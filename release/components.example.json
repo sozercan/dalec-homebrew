@@ -1,0 +1,30 @@
+{
+  "schema_version": "dalec-homebrew-components/v1",
+  "policy_version": "homebrew-runtime-v1",
+  "frontend": {
+    "index": "ghcr.io/sozercan/dalec-homebrew@sha256:<index-digest>",
+    "platforms": [
+      {"platform": {"os": "linux", "architecture": "amd64"}, "ref": "ghcr.io/sozercan/dalec-homebrew@sha256:<amd64-child>"},
+      {"platform": {"os": "linux", "architecture": "arm64"}, "ref": "ghcr.io/sozercan/dalec-homebrew@sha256:<arm64-child>"}
+    ]
+  },
+  "runtime_base": {
+    "index": "ghcr.io/sozercan/dalec-homebrew-runtime-base@sha256:<index-digest>",
+    "platforms": [
+      {"platform": {"os": "linux", "architecture": "amd64"}, "ref": "ghcr.io/sozercan/dalec-homebrew-runtime-base@sha256:<amd64-child>"},
+      {"platform": {"os": "linux", "architecture": "arm64"}, "ref": "ghcr.io/sozercan/dalec-homebrew-runtime-base@sha256:<arm64-child>"}
+    ]
+  },
+  "materializer": {
+    "index": "ghcr.io/sozercan/dalec-homebrew-materializer@sha256:<index-digest>",
+    "platforms": [
+      {"platform": {"os": "linux", "architecture": "amd64"}, "ref": "ghcr.io/sozercan/dalec-homebrew-materializer@sha256:<amd64-child>"},
+      {"platform": {"os": "linux", "architecture": "arm64"}, "ref": "ghcr.io/sozercan/dalec-homebrew-materializer@sha256:<arm64-child>"}
+    ]
+  },
+  "homebrew_commit": "77d90328ca2f63ff4ec1f67de0ade5632f5d2335",
+  "portable_ruby_version": "4.0.6",
+  "verification_keys_digest": "sha256:ef2d2c9e0219d485df9f07fff7b037feadc36c93085be9ffefb1390f31a3de1d",
+  "dalec_module": "v0.21.5-0.20260728234020-5fa2c46d716b",
+  "buildkit_module": "v0.31.2"
+}

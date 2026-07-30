@@ -1,0 +1,31 @@
+# syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
+name: homebrew-live-runtime
+description: Live integration image with GNU hello and jq from verified Homebrew bottles
+website: https://brew.sh/
+version: 0.1.0
+revision: 1
+license: Apache-2.0
+
+dependencies:
+  runtime:
+    hello: {}
+    jq: {}
+
+image:
+  entrypoint: /home/linuxbrew/.linuxbrew/bin/hello
+  user: linuxbrew
+
+tests:
+  - name: runtime-commands
+    steps:
+      - command: hello
+        stdout:
+          contains: ["Hello, world!"]
+      - command: jq --version
+        stdout:
+          starts_with: "jq-"
+    files:
+      /home/linuxbrew/.linuxbrew/bin/hello: {}
+      /home/linuxbrew/.linuxbrew/bin/jq: {}
+      /home/linuxbrew/.linuxbrew/bin/brew:
+        not_exist: true

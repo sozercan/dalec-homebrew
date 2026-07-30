@@ -1,0 +1,30 @@
+{
+  "schema_version": "dalec-homebrew-policy/v1",
+  "resolver_policy_version": "homebrew-runtime-v1",
+  "platforms": {
+    "linux/amd64": {
+      "bottle_tag": "x86_64_linux",
+      "cpu_baseline": "core2"
+    },
+    "linux/arm64": {
+      "bottle_tag": "arm64_linux",
+      "cpu_baseline": "armv8"
+    }
+  },
+  "linuxbrew": {
+    "uid": 1000,
+    "gid": 1000,
+    "prefix": "/home/linuxbrew/.linuxbrew"
+  },
+  "metadata_max_age_seconds": 604800,
+  "archive_limits": {
+    "compressed_bytes": 1073741824,
+    "expanded_bytes": 8589934592,
+    "entries": 250000,
+    "path_depth": 64,
+    "path_bytes": 4096,
+    "file_bytes": 4294967296,
+    "metadata_bytes": 1048576
+  },
+  "writable_path_template": "/home/linuxbrew/.linuxbrew/var/<canonical-formula>"
+}

@@ -1,0 +1,23 @@
+# syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
+name: hello-runtime
+description: GNU hello from a verified Homebrew bottle
+website: https://www.gnu.org/software/hello/
+version: 0.1.0
+revision: 1
+license: Apache-2.0
+
+dependencies:
+  runtime:
+    hello: {}
+
+image:
+  entrypoint: /home/linuxbrew/.linuxbrew/bin/hello
+
+tests:
+  - name: hello
+    steps:
+      - command: hello
+        stdout:
+          contains: ["Hello, world!"]
+    files:
+      /home/linuxbrew/.linuxbrew/bin/hello: {}
