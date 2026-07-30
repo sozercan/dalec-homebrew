@@ -12,11 +12,11 @@ import (
 	"github.com/project-dalec/dalec"
 	"github.com/sozercan/dalec-homebrew/internal/llbutil"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
-	"github.com/sozercan/dalec-homebrew/internal/testrunner"
+	"github.com/sozercan/dalec-homebrew/internal/testplan"
 )
 
 func AddTests(state llb.State, materializerRef string, platform ocispec.Platform, tests []*dalec.TestSpec, env []string, dir, user string, epochSeconds int64) (llb.State, error) {
-	plans, err := testrunner.NewPlans(tests)
+	plans, err := testplan.FromDalecTests(tests)
 	if err != nil {
 		return llb.Scratch(), err
 	}

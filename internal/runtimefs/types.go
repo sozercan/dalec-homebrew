@@ -11,13 +11,14 @@ import (
 const (
 	DefaultInstallPrefix = "/home/linuxbrew/.linuxbrew"
 
-	InventorySchemaVersion = "dalec-homebrew-runtime-inventory/v1"
-	PruneSchemaVersion     = "dalec-homebrew-prune-manifest/v1"
-	ManifestSchemaVersion  = "dalec-homebrew-runtime-manifest/v1"
+	InventorySchemaVersion              = "dalec-homebrew-runtime-inventory/v1"
+	PruneSchemaVersion                  = "dalec-homebrew-prune-manifest/v2"
+	PruneSubtreeCommitmentSchemaVersion = "dalec-homebrew-prune-subtree-commitment/v1"
+	ManifestSchemaVersion               = "dalec-homebrew-runtime-manifest/v1"
 
 	InventoryFileName = "runtime-inventory.json"
 	PruneFileName     = "prune-manifest.json"
-	ManifestFileName  = "runtime-manifest.json"
+	ManifestFileName  = "manifest.json"
 	SBOMFileName      = "sbom.spdx.json"
 )
 
@@ -141,16 +142,35 @@ type PruneEntry struct {
 	ExportedTo     []string    `json:"exported_to,omitempty"`
 }
 
+// PruneSubtree commits a completely excluded source subtree without embedding
+// one manifest row per descendant. CommitmentDigest is the digest of the
+// versioned, path-sorted commitment tuples described by
+// PruneSubtreeCommitmentSchemaVersion. Each tuple includes path, type, mode,
+// normalized size, and either a content digest or link target. EntryCount
+// includes the subtree root; RegularBytes is the sum of regular-file entry
+// sizes represented by the commitment.
+type PruneSubtree struct {
+	Path             string      `json:"path"`
+	Reason           PruneReason `json:"reason"`
+	EntryCount       int         `json:"entry_count"`
+	RegularBytes     int64       `json:"regular_bytes"`
+	CommitmentSchema string      `json:"commitment_schema"`
+	CommitmentDigest string      `json:"commitment_digest"`
+}
+
 // PruneManifest is an exact deterministic record of source paths not copied to
-// the runtime prefix.
+// the runtime prefix. Entries remain explicit where package attribution or
+// exported metadata matters. Fully excluded infrastructure subtrees may be
+// represented by deterministic commitments in Subtrees.
 type PruneManifest struct {
-	SchemaVersion       string       `json:"schema_version"`
-	PolicyVersion       string       `json:"policy_version"`
-	ResolutionDigest    string       `json:"resolution_digest"`
-	PruningPolicyDigest string       `json:"pruning_policy_digest"`
-	SourceDateEpoch     int64        `json:"source_date_epoch"`
-	Prefix              string       `json:"prefix"`
-	Entries             []PruneEntry `json:"entries"`
+	SchemaVersion       string         `json:"schema_version"`
+	PolicyVersion       string         `json:"policy_version"`
+	ResolutionDigest    string         `json:"resolution_digest"`
+	PruningPolicyDigest string         `json:"pruning_policy_digest"`
+	SourceDateEpoch     int64          `json:"source_date_epoch"`
+	Prefix              string         `json:"prefix"`
+	Subtrees            []PruneSubtree `json:"subtrees,omitempty"`
+	Entries             []PruneEntry   `json:"entries"`
 }
 
 // MetadataExport identifies package-manager metadata removed after its package

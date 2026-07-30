@@ -74,6 +74,7 @@ The output embeds:
 - `/usr/share/dalec-homebrew/sbom.spdx.json`
 - `/usr/share/dalec-homebrew/materialization.json`
 - `/usr/share/dalec-homebrew/runtime-base-packages.tsv`
+- `/usr/share/dalec-homebrew/runtime-base-artifacts.tsv`
 
 The final image does **not** contain `brew`, the Homebrew repository, caches, installer logs, receipts, embedded Formula source, or materializer/test tooling.
 
@@ -106,6 +107,15 @@ Run validation:
 
 ```console
 ./scripts/check.sh
+```
+
+Generate a repeatable JSON image-size report. Registry references include exact
+manifest, config, and compressed layer sizes; local images also include rootfs,
+package, evidence, largest-path, and history data:
+
+```console
+./scripts/image-size-report.sh --platform linux/amd64 IMAGE@sha256:<digest>
+./scripts/image-size-report.sh --insecure --platform linux/arm64 localhost:5000/IMAGE:tag
 ```
 
 Run a real single-platform frontend build against a registry reachable from the

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-bash -n scripts/check.sh scripts/live-test.sh
+bash -n scripts/check.sh scripts/live-test.sh scripts/image-size-report.sh
 go test ./...
 go vet ./...
 go test -race \

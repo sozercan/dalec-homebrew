@@ -8,22 +8,20 @@ import (
 	"io/fs"
 	"regexp"
 	"strings"
-
-	"github.com/project-dalec/dalec"
 )
 
 // PlanSchemaVersion is the JSON schema version understood by this runner.
 const PlanSchemaVersion = "testplan/v1"
 
-// Plan is a self-contained, BuildKit-independent plan for one Dalec test.
-// Running one TestSpec per process lets the caller provide the isolated rootfs
-// required by Dalec semantics without coupling this package to BuildKit.
+// Plan is a self-contained, BuildKit-independent plan for one runtime test.
+// Running one TestSpec per process lets the caller provide an isolated rootfs
+// without coupling the runtime runner to Dalec or BuildKit.
 type Plan struct {
 	SchemaVersion string   `json:"schema_version,omitempty"`
 	Test          TestSpec `json:"test"`
 }
 
-// TestSpec is the executable subset of dalec.TestSpec. Source mounts are
+// TestSpec is the executable test-plan representation. Source mounts are
 // intentionally absent because the final-image runner does not permit them.
 type TestSpec struct {
 	Name  string                     `json:"name"`
@@ -33,7 +31,7 @@ type TestSpec struct {
 	Files map[string]FileCheckOutput `json:"files,omitempty"`
 }
 
-// TestStep is the executable subset of dalec.TestStep.
+// TestStep is one executable command and its assertions.
 type TestStep struct {
 	Command string            `json:"command"`
 	Env     map[string]string `json:"env,omitempty"`
@@ -55,8 +53,8 @@ type CheckOutput struct {
 
 // FileCheckOutput extends CheckOutput with filesystem assertions.
 //
-// Permissions uses the same numeric JSON representation as fs.FileMode and
-// dalec.FileCheckOutput. A zero value means that permissions are not checked.
+// Permissions uses the numeric JSON representation of fs.FileMode. A zero
+// value means that permissions are not checked.
 type FileCheckOutput struct {
 	CheckOutput
 	Permissions fs.FileMode `json:"permissions,omitempty"`
@@ -64,70 +62,6 @@ type FileCheckOutput struct {
 	NotExist    bool        `json:"not_exist,omitempty"`
 	NoFollow    bool        `json:"no_follow,omitempty"`
 	LinkTarget  string      `json:"link_target,omitempty"`
-}
-
-// NewPlan converts one public Dalec test spec to the restricted JSON plan used
-// by this runner. It rejects source mounts rather than silently dropping them.
-func NewPlan(test *dalec.TestSpec) (Plan, error) {
-	if test == nil {
-		return Plan{}, errors.New("test is nil")
-	}
-	if len(test.Mounts) != 0 {
-		return Plan{}, fmt.Errorf("test %q: mounts are not supported", test.Name)
-	}
-
-	converted := TestSpec{
-		Name:  test.Name,
-		Dir:   test.Dir,
-		Env:   cloneMap(test.Env),
-		Steps: make([]TestStep, len(test.Steps)),
-		Files: make(map[string]FileCheckOutput, len(test.Files)),
-	}
-	for i, step := range test.Steps {
-		converted.Steps[i] = TestStep{
-			Command: step.Command,
-			Env:     cloneMap(step.Env),
-			Stdin:   step.Stdin,
-			Stdout:  fromDalecCheck(step.Stdout),
-			Stderr:  fromDalecCheck(step.Stderr),
-		}
-	}
-	for path, check := range test.Files {
-		converted.Files[path] = FileCheckOutput{
-			CheckOutput: fromDalecCheck(check.CheckOutput),
-			Permissions: check.Permissions,
-			IsDir:       check.IsDir,
-			NotExist:    check.NotExist,
-			NoFollow:    check.NoFollow,
-			LinkTarget:  check.LinkTarget,
-		}
-	}
-	if len(converted.Env) == 0 {
-		converted.Env = nil
-	}
-	if len(converted.Files) == 0 {
-		converted.Files = nil
-	}
-
-	plan := Plan{SchemaVersion: PlanSchemaVersion, Test: converted}
-	if err := plan.Validate(); err != nil {
-		return Plan{}, err
-	}
-	return plan, nil
-}
-
-// NewPlans converts each Dalec TestSpec into an independent plan so callers can
-// execute every test against its own isolated rootfs.
-func NewPlans(tests []*dalec.TestSpec) ([]Plan, error) {
-	plans := make([]Plan, 0, len(tests))
-	for i, test := range tests {
-		plan, err := NewPlan(test)
-		if err != nil {
-			return nil, fmt.Errorf("test %d: %w", i+1, err)
-		}
-		plans = append(plans, plan)
-	}
-	return plans, nil
 }
 
 // DecodePlan decodes exactly one strict JSON plan. Unknown fields and trailing
@@ -235,28 +169,6 @@ func validateEnv(env map[string]string) error {
 		}
 	}
 	return nil
-}
-
-func fromDalecCheck(check dalec.CheckOutput) CheckOutput {
-	return CheckOutput{
-		Equals:     check.Equals,
-		Contains:   append([]string(nil), check.Contains...),
-		Matches:    append([]string(nil), check.Matches...),
-		StartsWith: check.StartsWith,
-		EndsWith:   check.EndsWith,
-		Empty:      check.Empty,
-	}
-}
-
-func cloneMap(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
 }
 
 func (c CheckOutput) configured() bool {
