@@ -96,7 +96,7 @@ Use `DALEC_HOMEBREW_LIVE_SPEC` to run the same helper with a focused example:
 
 ## Validate a published image on a VM
 
-For a pushed image, the VM helper pulls it over SSH and runs the image with networking disabled, a read-only root filesystem, all capabilities dropped, and `no-new-privileges`:
+For a pushed image using the default `linuxbrew` identity (`1000:1000`), the VM helper pulls it over SSH and runs the image with networking disabled, a read-only root filesystem, all capabilities dropped, and `no-new-privileges`:
 
 ```console
 ./scripts/vm-live-validate.sh \

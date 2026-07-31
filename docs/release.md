@@ -6,7 +6,7 @@ A release is an immutable tuple of frontend, runtime-base, materializer, Homebre
 
 A release frontend must bind digest-pinned runtime-base and materializer images. The frontend itself must also be invoked by digest.
 
-The corresponding frontend build options are:
+At invocation, the frontend accepts these gateway build options as bindings:
 
 ```text
 DALEC_HOMEBREW_RUNTIME_BASE
@@ -17,7 +17,7 @@ DALEC_HOMEBREW_KEYS_DIGEST
 DALEC_HOMEBREW_RUBY_VERSION
 ```
 
-The runtime-base, materializer, Homebrew, key-set, and Ruby values are normally compiled into the frontend image. They may be supplied as build options for local development, but a supplied value cannot override a release-bound value.
+These options are not general overrides. Runtime-base, materializer, and Homebrew commit values may fill a binding only when that value was not compiled into the frontend; otherwise a supplied value must match the compiled value. Ruby falls back to `4.0.6` even when no value was compiled, and the key-set digest must match the embedded keys. To test different Ruby or key-set pins, rebuild the frontend with the Dockerfile arguments `HOMEBREW_RUBY_VERSION` and `HOMEBREW_KEYS_DIGEST`; a different key set also requires updating the embedded keys to match that digest.
 
 The frontend cannot bind its own final digest before it is published. `DALEC_HOMEBREW_FRONTEND_REF` therefore normally comes from BuildKit's digest-pinned gateway `source` option and must match it when explicitly supplied. Mutable tags are rejected. The platform child digests returned by BuildKit are recorded in every resolution record.
 
