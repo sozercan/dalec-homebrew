@@ -1,0 +1,159 @@
+# syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
+name: homebrew-live-redis
+version: 0.1.0
+revision: 1
+description: Advanced offline runtime validation for the verified Homebrew Redis closure
+website: https://redis.io/
+license: Apache-2.0
+
+dependencies:
+  runtime:
+    redis: {}
+
+image:
+  entrypoint: /home/linuxbrew/.linuxbrew/bin/redis-server
+  user: linuxbrew
+
+tests:
+  - name: redis-runtime-closure
+    env:
+      HOME: /home/linuxbrew/.linuxbrew/var/redis
+      HOMEBREW_PREFIX: /home/linuxbrew/.linuxbrew
+      TMPDIR: /tmp
+      XDG_CACHE_HOME: /home/linuxbrew/.linuxbrew/var/redis/cache
+      XDG_CONFIG_HOME: /home/linuxbrew/.linuxbrew/var/redis/config
+      XDG_DATA_HOME: /home/linuxbrew/.linuxbrew/var/redis/data
+    steps:
+      - command: |
+          set -eu
+          state_root="$HOMEBREW_PREFIX/var/redis"
+          state_dir="$state_root/dalec-live-test"
+          socket=/tmp/dalec-homebrew-redis.sock
+          logfile="$state_dir/redis.log"
+          server_pid=
+
+          cleanup() {
+            if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+              redis-cli -s "$socket" shutdown nosave >/dev/null 2>&1 ||
+                kill "$server_pid" 2>/dev/null || true
+              wait "$server_pid" 2>/dev/null || true
+            fi
+            rm -f "$socket"
+          }
+          trap cleanup EXIT INT TERM
+
+          test -d "$state_root"
+          test -w "$state_root"
+          rm -rf "$state_dir"
+          mkdir -p "$state_dir"
+          rm -f "$socket"
+
+          redis-server \
+            --port 0 \
+            --unixsocket "$socket" \
+            --unixsocketperm 600 \
+            --daemonize no \
+            --supervised no \
+            --dir "$state_dir" \
+            --dbfilename dump.rdb \
+            --appendonly no \
+            --pidfile "$state_dir/redis.pid" \
+            --logfile "$logfile" \
+            --save "" &
+          server_pid=$!
+
+          attempt=0
+          while ! redis-cli -s "$socket" ping >/dev/null 2>&1; do
+            attempt=$((attempt + 1))
+            if [ "$attempt" -ge 100 ] || ! kill -0 "$server_pid" 2>/dev/null; then
+              cat "$logfile" >&2 || true
+              exit 1
+            fi
+            sleep 0.1
+          done
+
+          test "$(awk '/^Uid:/ { print $2; exit }' "/proc/$server_pid/status")" = 1000
+          test "$(redis-cli -s "$socket" ping)" = PONG
+          test "$(redis-cli -s "$socket" set dalec:answer 20)" = OK
+          test "$(redis-cli -s "$socket" incrby dalec:answer 22)" = 42
+          test "$(redis-cli -s "$socket" get dalec:answer)" = 42
+
+          redis-cli -s "$socket" shutdown save >/dev/null
+          wait "$server_pid"
+          server_pid=
+          test -s "$state_dir/dump.rdb"
+          test ! -e "$socket"
+
+          trap - EXIT INT TERM
+          echo redis-runtime-closure-ok
+        stdout:
+          equals: "redis-runtime-closure-ok\n"
+    files:
+      /home/linuxbrew/.linuxbrew/bin/redis-server: {}
+      /home/linuxbrew/.linuxbrew/bin/redis-cli: {}
+      /home/linuxbrew/.linuxbrew/var/redis:
+        is_dir: true
+
+  - name: runtime-invariants
+    env:
+      HOMEBREW_PREFIX: /home/linuxbrew/.linuxbrew
+    steps:
+      - command: |
+          set -eu
+          test "$(id -u):$(id -g)" = "1000:1000"
+          grep -q '^VERSION_ID="24.04"$' /etc/os-release
+          grep -q '^VERSION_CODENAME=noble$' /etc/os-release
+          test "$(find /usr/share/dalec-homebrew -maxdepth 1 -type f | wc -l)" -eq 9
+          test -z "$(find "$HOMEBREW_PREFIX" -type f -perm /111 -writable -print -quit)"
+          echo runtime-invariants-ok
+        stdout:
+          equals: "runtime-invariants-ok\n"
+    files:
+      /home/linuxbrew/.linuxbrew/bin/redis-server: {}
+      /home/linuxbrew/.linuxbrew/bin/redis-cli: {}
+      /home/linuxbrew/.linuxbrew/bin/brew:
+        not_exist: true
+      /home/linuxbrew/.linuxbrew/Homebrew:
+        not_exist: true
+      /home/linuxbrew/.cache/Homebrew:
+        not_exist: true
+      /usr/bin/apt:
+        not_exist: true
+      /usr/bin/dpkg:
+        not_exist: true
+      /var/lib/dpkg/status:
+        not_exist: true
+      /usr/local/bin/chisel:
+        not_exist: true
+      /usr/local/bin/dalec-homebrew-materializer:
+        not_exist: true
+      /usr/local/bin/dalec-homebrew-test-runner:
+        not_exist: true
+      /usr/local/libexec/dalec-homebrew-pour.rb:
+        not_exist: true
+      /usr/share/dalec-homebrew/manifest.json:
+        permissions: 0o444
+        contains: [dalec-homebrew-runtime-manifest/v1]
+      /usr/share/dalec-homebrew/resolution.json:
+        permissions: 0o444
+        contains: [dalec-homebrew-resolution/v1]
+      /usr/share/dalec-homebrew/runtime-inventory.json:
+        permissions: 0o444
+        contains: [dalec-homebrew-runtime-inventory/v1]
+      /usr/share/dalec-homebrew/prune-manifest.json:
+        permissions: 0o444
+        contains: [dalec-homebrew-prune-manifest/v2]
+      /usr/share/dalec-homebrew/sbom.spdx.json:
+        permissions: 0o444
+        contains:
+          - SPDX-2.3
+          - dalec-homebrew-linux-
+      /usr/share/dalec-homebrew/materialization.json:
+        permissions: 0o444
+        contains: [verified_bottles]
+      /usr/share/dalec-homebrew/runtime-base-packages.tsv:
+        permissions: 0o444
+      /usr/share/dalec-homebrew/runtime-base-artifacts.tsv:
+        permissions: 0o444
+      /usr/share/dalec-homebrew/runtime-base-chisel.manifest.wall:
+        permissions: 0o644

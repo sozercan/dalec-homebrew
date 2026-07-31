@@ -1,0 +1,171 @@
+# syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
+name: homebrew-live-python
+version: 0.1.0
+revision: 1
+description: Advanced offline runtime validation for the verified Homebrew Python closure
+website: https://www.python.org/
+license: Apache-2.0
+
+dependencies:
+  runtime:
+    python@3.14: {}
+
+image:
+  entrypoint: /home/linuxbrew/.linuxbrew/bin/python3.14
+  user: linuxbrew
+
+tests:
+  - name: python-runtime-closure
+    env:
+      HOMEBREW_PREFIX: /home/linuxbrew/.linuxbrew
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      TMPDIR: /tmp
+    steps:
+      - command: |
+          set -eu
+          python3.14 - <<'PY'
+          import _bz2
+          import _ctypes
+          import _curses
+          import _lzma
+          import _sqlite3
+          import _ssl
+          import bz2
+          import ctypes
+          import datetime
+          import importlib.machinery
+          import lzma
+          import os
+          import readline
+          import sqlite3
+          import ssl
+          import subprocess
+          import sys
+          import zoneinfo
+          import zlib
+
+          extensions = (_bz2, _ctypes, _curses, _lzma, _sqlite3, _ssl, readline)
+          for module in extensions:
+              filename = module.__file__
+              assert filename and any(
+                  filename.endswith(suffix)
+                  for suffix in importlib.machinery.EXTENSION_SUFFIXES
+              ), (module.__name__, filename)
+
+          database = "/tmp/dalec-live-python.sqlite3"
+          try:
+              os.unlink(database)
+          except FileNotFoundError:
+              pass
+          with sqlite3.connect(database) as connection:
+              connection.execute("create table values_test (value integer not null)")
+              connection.executemany(
+                  "insert into values_test values (?)",
+                  ((20,), (22,)),
+              )
+              assert connection.execute(
+                  "select sum(value) from values_test"
+              ).fetchone()[0] == 42
+
+          payload = b"dalec-homebrew-python-runtime" * 32
+          assert bz2.decompress(bz2.compress(payload)) == payload
+          assert lzma.decompress(lzma.compress(payload)) == payload
+          assert zlib.decompress(zlib.compress(payload)) == payload
+
+          context = ssl.create_default_context()
+          verify_paths = ssl.get_default_verify_paths()
+          assert verify_paths.cafile and os.path.isfile(verify_paths.cafile)
+          assert context.get_ca_certs()
+
+          los_angeles = zoneinfo.ZoneInfo("America/Los_Angeles")
+          assert datetime.datetime(
+              2026, 1, 1, tzinfo=los_angeles
+          ).utcoffset() == datetime.timedelta(hours=-8)
+          assert datetime.datetime(
+              2026, 7, 1, tzinfo=los_angeles
+          ).utcoffset() == datetime.timedelta(hours=-7)
+
+          child = subprocess.run(
+              [sys.executable, "-c", "print(20 + 22)"],
+              check=True,
+              capture_output=True,
+              text=True,
+          )
+          assert child.stdout == "42\n"
+          shell = subprocess.run(
+              ["/bin/sh", "-c", "printf subprocess-ok"],
+              check=True,
+              capture_output=True,
+              text=True,
+          )
+          assert shell.stdout == "subprocess-ok"
+          assert ctypes.CDLL(None)
+
+          print("python-runtime-closure-ok")
+          PY
+        stdout:
+          equals: "python-runtime-closure-ok\n"
+
+  - name: runtime-invariants
+    env:
+      HOMEBREW_PREFIX: /home/linuxbrew/.linuxbrew
+    steps:
+      - command: |
+          set -eu
+          test "$(id -u):$(id -g)" = "1000:1000"
+          grep -q '^VERSION_ID="24.04"$' /etc/os-release
+          grep -q '^VERSION_CODENAME=noble$' /etc/os-release
+          test "$(find /usr/share/dalec-homebrew -maxdepth 1 -type f | wc -l)" -eq 9
+          test -z "$(find "$HOMEBREW_PREFIX" -type f -perm /111 -writable -print -quit)"
+          echo runtime-invariants-ok
+        stdout:
+          equals: "runtime-invariants-ok\n"
+    files:
+      /home/linuxbrew/.linuxbrew/bin/python3.14: {}
+      /home/linuxbrew/.linuxbrew/bin/brew:
+        not_exist: true
+      /home/linuxbrew/.linuxbrew/Homebrew:
+        not_exist: true
+      /home/linuxbrew/.cache/Homebrew:
+        not_exist: true
+      /usr/bin/apt:
+        not_exist: true
+      /usr/bin/dpkg:
+        not_exist: true
+      /var/lib/dpkg/status:
+        not_exist: true
+      /usr/local/bin/chisel:
+        not_exist: true
+      /usr/local/bin/dalec-homebrew-materializer:
+        not_exist: true
+      /usr/local/bin/dalec-homebrew-test-runner:
+        not_exist: true
+      /usr/local/libexec/dalec-homebrew-pour.rb:
+        not_exist: true
+      /usr/share/dalec-homebrew/manifest.json:
+        permissions: 0o444
+        contains: ['dalec-homebrew-runtime-manifest/v1']
+      /usr/share/dalec-homebrew/resolution.json:
+        permissions: 0o444
+        contains: ['dalec-homebrew-resolution/v1']
+      /usr/share/dalec-homebrew/runtime-inventory.json:
+        permissions: 0o444
+        contains: ['dalec-homebrew-runtime-inventory/v1']
+      /usr/share/dalec-homebrew/prune-manifest.json:
+        permissions: 0o444
+        contains: ['dalec-homebrew-prune-manifest/v2']
+      /usr/share/dalec-homebrew/sbom.spdx.json:
+        permissions: 0o444
+        contains:
+          - 'SPDX-2.3'
+          - 'dalec-homebrew-linux-'
+      /usr/share/dalec-homebrew/materialization.json:
+        permissions: 0o444
+        contains: ['verified_bottles']
+      /usr/share/dalec-homebrew/runtime-base-packages.tsv:
+        permissions: 0o444
+      /usr/share/dalec-homebrew/runtime-base-artifacts.tsv:
+        permissions: 0o444
+      /usr/share/dalec-homebrew/runtime-base-chisel.manifest.wall:
+        permissions: 0o644

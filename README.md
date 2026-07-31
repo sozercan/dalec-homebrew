@@ -131,15 +131,36 @@ selected Buildx builder:
 DALEC_HOMEBREW_LIVE_BUILDER=dalec-homebrew-live-builder \
 DALEC_HOMEBREW_LIVE_REGISTRY=dalec-homebrew-live-registry:5000 \
 DALEC_HOMEBREW_LIVE_PLATFORM=linux/arm64 \
-DALEC_HOMEBREW_LIVE_IMAGE=dalec-homebrew-live:arm64 \
+DALEC_HOMEBREW_LIVE_IMAGE=dalec-homebrew-live-registry:5000/dalec-homebrew-live:arm64 \
+DALEC_HOMEBREW_LIVE_OUTPUT=push \
 ./scripts/live-test.sh
 ```
 
 The helper builds and publishes digest-addressed runtime-base, materializer,
 and frontend components, renders [`examples/live-test.yaml`](examples/live-test.yaml)
 with the resulting frontend digest, runs its Dalec command/file tests, and
-loads the final image. The supplied registry may use HTTP for local testing,
-but it must be configured in the selected BuildKit daemon.
+loads the final image by default. Set `DALEC_HOMEBREW_LIVE_OUTPUT=push` to
+publish the final image as well; the helper then reports its immutable manifest
+digest and `DALEC_HOMEBREW_LIVE_FINAL_REF`. The supplied registry may use HTTP
+for local testing, but it must be configured in the selected BuildKit daemon.
+
+For a final image published to the registry on the amd64 `vm` SSH target, run
+the exported image itself with networking disabled, a read-only rootfs, all
+capabilities dropped, and `no-new-privileges`:
+
+```console
+./scripts/vm-live-validate.sh \
+  127.0.0.1:5556/dalec-homebrew-live@sha256:<digest> amd64
+```
+
+The focused [`examples/live-python.yaml`](examples/live-python.yaml),
+[`examples/live-glibc.yaml`](examples/live-glibc.yaml),
+[`examples/live-redis.yaml`](examples/live-redis.yaml), and
+[`examples/live-graphviz.yaml`](examples/live-graphviz.yaml) specs exercise
+dynamic extension/plugin loading, TLS/CA and timezone data, SQLite and
+compression, the brewed glibc loader and generated locale/gconv data, and a
+stateful non-root Redis lifecycle in addition to the common runtime evidence
+and exclusion invariants.
 
 Resolve current Formulae without materializing an image:
 

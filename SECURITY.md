@@ -16,6 +16,10 @@ The V1 implementation is expected to preserve these properties:
 10. Runtime code, links, libraries, plugins, and ancestors are root-owned and non-writable. Only explicitly versioned `var/<formula>` paths are writable by the runtime identity.
 11. Runtime tests use the final pruned state, final user, final environment/working directory, and no network.
 12. The Noble runtime base is cut from a fixed Ubuntu snapshot with a SHA-256-pinned Chisel binary and immutable checksummed slice definitions. The build-only proxy accepts only Ubuntu archive hosts, while Chisel remains responsible for signed Release and package-digest verification; neither Chisel nor the proxy reaches the final image.
+13. Generated shared runtime indexes are accepted only at versioned paths with
+    package/capability checks, bounded structure and size, authenticated runtime
+    ownership, and explicit runtime evidence attribution; unrelated global
+    `lib` or shared-data mutations continue to fail closed.
 
 ## Out of scope / external controls
 

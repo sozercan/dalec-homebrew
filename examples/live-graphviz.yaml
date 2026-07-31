@@ -1,0 +1,131 @@
+# syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
+name: homebrew-live-graphviz
+version: 0.1.0
+revision: 1
+description: Advanced offline runtime validation for the verified Homebrew Graphviz closure
+website: https://graphviz.org/
+license: EPL-1.0
+
+dependencies:
+  runtime:
+    graphviz: {}
+
+image:
+  entrypoint: /home/linuxbrew/.linuxbrew/bin/dot
+  user: linuxbrew
+
+tests:
+  - name: graphviz-runtime-plugins
+    env:
+      HOMEBREW_PREFIX: /home/linuxbrew/.linuxbrew
+    steps:
+      - command: |
+          set -eux
+          work=/tmp/dalec-live-graphviz
+          plugin_dir="$HOMEBREW_PREFIX/opt/graphviz/lib/graphviz"
+          data_dir="$HOMEBREW_PREFIX/opt/graphviz/share/graphviz"
+          mkdir -p "$work"
+
+          cat > "$work/input.dot" <<'DOT'
+          digraph runtime {
+            graph [label="dalec-runtime", labelloc=t]
+            verified -> plugins -> rendered
+          }
+          DOT
+
+          config="$(find "$plugin_dir" -maxdepth 1 -type f -name 'config*' -print -quit)"
+          test -n "$config"
+          test -s "$config"
+          grep -q 'libgvplugin_core' "$config"
+          grep -q 'libgvplugin_dot_layout' "$config"
+
+          core_plugin="$(find "$plugin_dir" -maxdepth 1 -type f -name 'libgvplugin_core.so.*' -print -quit)"
+          layout_plugin="$(find "$plugin_dir" -maxdepth 1 -type f -name 'libgvplugin_dot_layout.so.*' -print -quit)"
+          test -n "$core_plugin"
+          test -s "$core_plugin"
+          test -n "$layout_plugin"
+          test -s "$layout_plugin"
+
+          test -d "$data_dir"
+          runtime_data="$(find "$data_dir" -type f -print -quit)"
+          test -n "$runtime_data"
+          test -s "$runtime_data"
+
+          test -r "$HOMEBREW_PREFIX/etc/fonts/fonts.conf"
+          fc-match sans > /dev/null
+
+          dot -Tsvg -o "$work/output.svg" "$work/input.dot"
+          dot -Tpng -o "$work/output.png" "$work/input.dot"
+          grep -q '<svg' "$work/output.svg"
+          test "$(wc -c < "$work/output.svg")" -gt 100
+          test "$(wc -c < "$work/output.png")" -gt 100
+          png_signature="$(od -An -tx1 -N8 "$work/output.png" | tr -d '[:space:]')"
+          test "$png_signature" = 89504e470d0a1a0a
+
+          echo graphviz-runtime-plugins-ok
+        stdout:
+          equals: "graphviz-runtime-plugins-ok\n"
+    files:
+      /home/linuxbrew/.linuxbrew/bin/dot: {}
+
+  - name: runtime-invariants
+    env:
+      HOMEBREW_PREFIX: /home/linuxbrew/.linuxbrew
+    steps:
+      - command: |
+          set -eu
+          test "$(id -u):$(id -g)" = "1000:1000"
+          grep -q '^VERSION_ID="24.04"$' /etc/os-release
+          grep -q '^VERSION_CODENAME=noble$' /etc/os-release
+          test "$(find /usr/share/dalec-homebrew -maxdepth 1 -type f | wc -l)" -eq 9
+          test -z "$(find "$HOMEBREW_PREFIX" -type f -perm /111 -writable -print -quit)"
+          echo runtime-invariants-ok
+        stdout:
+          equals: "runtime-invariants-ok\n"
+    files:
+      /home/linuxbrew/.linuxbrew/bin/brew:
+        not_exist: true
+      /home/linuxbrew/.linuxbrew/Homebrew:
+        not_exist: true
+      /home/linuxbrew/.cache/Homebrew:
+        not_exist: true
+      /usr/bin/apt:
+        not_exist: true
+      /usr/bin/dpkg:
+        not_exist: true
+      /var/lib/dpkg/status:
+        not_exist: true
+      /usr/local/bin/chisel:
+        not_exist: true
+      /usr/local/bin/dalec-homebrew-materializer:
+        not_exist: true
+      /usr/local/bin/dalec-homebrew-test-runner:
+        not_exist: true
+      /usr/local/libexec/dalec-homebrew-pour.rb:
+        not_exist: true
+      /usr/share/dalec-homebrew/manifest.json:
+        permissions: 0o444
+        contains: [dalec-homebrew-runtime-manifest/v1]
+      /usr/share/dalec-homebrew/resolution.json:
+        permissions: 0o444
+        contains: [dalec-homebrew-resolution/v1]
+      /usr/share/dalec-homebrew/runtime-inventory.json:
+        permissions: 0o444
+        contains: [dalec-homebrew-runtime-inventory/v1]
+      /usr/share/dalec-homebrew/prune-manifest.json:
+        permissions: 0o444
+        contains: [dalec-homebrew-prune-manifest/v2]
+      /usr/share/dalec-homebrew/sbom.spdx.json:
+        permissions: 0o444
+        contains:
+          - SPDX-2.3
+          - dalec-homebrew-linux-
+      /usr/share/dalec-homebrew/materialization.json:
+        permissions: 0o444
+        contains: [verified_bottles]
+      /usr/share/dalec-homebrew/runtime-base-packages.tsv:
+        permissions: 0o444
+      /usr/share/dalec-homebrew/runtime-base-artifacts.tsv:
+        permissions: 0o444
+      /usr/share/dalec-homebrew/runtime-base-chisel.manifest.wall:
+        permissions: 0o644

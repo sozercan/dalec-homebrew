@@ -1,9 +1,11 @@
 package materializer
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +20,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sozercan/dalec-homebrew/internal/bottle"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
@@ -234,6 +237,18 @@ func Install(ctx context.Context, cfg Config) (*Evidence, error) {
 			cancel()
 			return nil, fmt.Errorf("validate prefix before %q: %w", name, err)
 		}
+		var priorGdkPixbufCache []byte
+		if state, ok := before[gdkPixbufLoadersCachePath]; ok {
+			if state.Type != "regular" {
+				cancel()
+				return nil, fmt.Errorf("validate prefix before %q: gdk-pixbuf loader cache is not a regular file", name)
+			}
+			priorGdkPixbufCache, err = readStableSnapshotFile(cfg.Prefix, gdkPixbufLoadersCachePath, state)
+			if err != nil {
+				cancel()
+				return nil, fmt.Errorf("capture gdk-pixbuf loader cache before %q: %w", name, err)
+			}
+		}
 		err = cfg.Runner.Run(stepCtx, Command{Path: filepath.Join(cfg.Prefix, filepath.FromSlash(protectedHomebrewBrew)), Args: []string{"ruby", pourScriptPath, installPaths[name]}, Env: installEnv(cfg.Prefix), Dir: "/home/linuxbrew", User: cfg.User})
 		if err != nil {
 			cancel()
@@ -275,7 +290,14 @@ func Install(ctx context.Context, cfg Config) (*Evidence, error) {
 			return nil, fmt.Errorf("installer descendants continued mutating prefix after %q", name)
 		}
 		changes := diff(before, after)
-		if err := classify(cfg.Prefix, node, before, after, changes, optNamesForNode(cfg.Record, node.Name)); err != nil {
+		if err := classify(cfg.Prefix, node, before, after, changes, classifyOptions{
+			optNames:            optNamesForNode(cfg.Record, node.Name),
+			closureKegs:         resolvedClosureKegs(cfg.Record),
+			verified:            verifiedByName[name],
+			runtimeUID:          uint32(cfg.Record.Runtime.UID),
+			runtimeGID:          uint32(cfg.Record.Runtime.GID),
+			priorGdkPixbufCache: priorGdkPixbufCache,
+		}); err != nil {
 			return nil, fmt.Errorf("contain install %q: %w", name, err)
 		}
 		if err := reconcileInstalledKeg(cfg.Prefix, node, verifiedByName[name], after); err != nil {
@@ -705,12 +727,23 @@ func sameSnapshotOwnership(expected, actual fileState) bool {
 	return !expected.OwnershipKnown || (expected.UID == actual.UID && expected.GID == actual.GID)
 }
 
-func classify(prefix string, node resolution.Node, before, after map[string]fileState, changes []Change, optNamesArg ...map[string]struct{}) error {
+type classifyOptions struct {
+	optNames            map[string]struct{}
+	closureKegs         map[string]struct{}
+	verified            bottle.Result
+	runtimeUID          uint32
+	runtimeGID          uint32
+	priorGdkPixbufCache []byte
+}
+
+func classify(prefix string, node resolution.Node, before, after map[string]fileState, changes []Change, optionsArg ...classifyOptions) error {
 	keg := filepath.ToSlash(filepath.Join("Cellar", node.Name, node.PkgVersion))
 	opt := filepath.ToSlash(filepath.Join("opt", node.Name))
 	optNames := map[string]struct{}{node.Name: {}}
-	if len(optNamesArg) > 0 {
-		for name := range optNamesArg[0] {
+	options := classifyOptions{}
+	if len(optionsArg) > 0 {
+		options = optionsArg[0]
+		for name := range options.optNames {
 			optNames[name] = struct{}{}
 		}
 	}
@@ -718,12 +751,37 @@ func classify(prefix string, node resolution.Node, before, after map[string]file
 	if err != nil {
 		return err
 	}
+	sharedMimeGenerated := map[string]struct{}{}
+	if node.Name != sharedMimeInfoFormula && changesContainPathRoot(changes, sharedMimeDatabaseRoot) {
+		return fmt.Errorf("formula %q changed the generated shared MIME database without a controlled refresh", node.Name)
+	}
+	if node.Name == sharedMimeInfoFormula && changesContainPathRoot(changes, sharedMimeDatabaseRoot) {
+		sharedMimeGenerated, err = validateSharedMimeInfoDatabase(prefix, node, before, after, options)
+		if err != nil {
+			return fmt.Errorf("validate shared MIME database: %w", err)
+		}
+	}
+	gdkPixbufCacheValidated := false
+	if changesContainPathRoot(changes, gdkPixbufLoadersDirectoryPath) || changesContainExactPath(changes, gdkPixbufLoadersCachePath) {
+		kind, ok := changeKind(changes, gdkPixbufLoadersCachePath)
+		if !ok {
+			return fmt.Errorf("gdk-pixbuf loader set changed without refreshing %s", gdkPixbufLoadersCachePath)
+		}
+		state, ok := after[gdkPixbufLoadersCachePath]
+		if !ok || state.Type != "regular" {
+			return fmt.Errorf("gdk-pixbuf loader cache is absent or not a regular file after %s", node.Name)
+		}
+		if err := validateGdkPixbufLoadersCache(prefix, node, gdkPixbufLoadersCachePath, kind, before, state, after, options); err != nil {
+			return fmt.Errorf("validate gdk-pixbuf loader cache: %w", err)
+		}
+		gdkPixbufCacheValidated = true
+	}
 	for i := range changes {
 		c := &changes[i]
 		p := c.Path
 		_, existed := before[p]
 		_, safeSharedExpansion := expandedSharedPaths[p]
-		if existed && c.Kind != "created" && !safeSharedExpansion && !isPackageManagerState(p) && !isBrewedLoaderMutation(prefix, node, p, after) && (p == "." || inGlobal(p) || p == "Cellar" || p == "etc" || strings.HasPrefix(p, "etc/") || p == "var" || strings.HasPrefix(p, "var/") || p == "opt" || strings.HasPrefix(p, "opt/")) {
+		if existed && c.Kind != "created" && !safeSharedExpansion && !isPackageManagerState(p) && !isBrewedLoaderMutation(prefix, node, p, after) && !isControlledGdkPixbufLoadersCacheMutation(node, p, c.Kind, options.verified) && (p == "." || inGlobal(p) || p == "Cellar" || p == "etc" || strings.HasPrefix(p, "etc/") || p == "var" || strings.HasPrefix(p, "var/") || p == "opt" || strings.HasPrefix(p, "opt/")) {
 			return fmt.Errorf("install modified or removed pre-existing shared path %s", p)
 		}
 		switch {
@@ -810,7 +868,17 @@ func classify(prefix string, node resolution.Node, before, after map[string]file
 			if a, ok := after[p]; ok && a.Type == "regular" {
 				root := strings.SplitN(p, "/", 2)[0]
 				if root != "share" {
-					return fmt.Errorf("unexpected regular file in global %s tree at %s", root, p)
+					if p != gdkPixbufLoadersCachePath || !gdkPixbufCacheValidated {
+						return fmt.Errorf("unexpected regular file in global %s tree at %s", root, p)
+					}
+					c.Classification = "gdk-pixbuf-loader-cache"
+				}
+				if snapshotPathWithin(p, sharedMimeDatabaseRoot) {
+					if _, generated := sharedMimeGenerated[p]; generated {
+						c.Classification = "shared-mime-database"
+					} else if !globalPathMatchesVerifiedBottle(prefix, node, options.verified, p, a, after) {
+						return fmt.Errorf("unverified regular file in shared MIME database at %s", p)
+					}
 				}
 				if a.Mode.Perm()&0o111 != 0 {
 					return fmt.Errorf("unexpected executable outside current keg at %s", p)
@@ -844,6 +912,904 @@ func classify(prefix string, node resolution.Node, before, after map[string]file
 		}
 	}
 	return nil
+}
+
+const (
+	sharedMimeInfoFormula              = "shared-mime-info"
+	sharedMimeDatabaseRoot             = "share/mime"
+	sharedMimeVerifiedSourcePath       = "share/mime/packages/freedesktop.org.xml"
+	sharedMimeDatabaseMaxEntries       = 4096
+	sharedMimeDatabaseMaxFiles         = 2048
+	sharedMimeDatabaseMaxBytes   int64 = 32 << 20
+	sharedMimeDatabaseMaxFile    int64 = 8 << 20
+
+	gdkPixbufFormula               = "gdk-pixbuf"
+	gdkPixbufLoadersCachePath      = "lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+	gdkPixbufLoadersDirectoryPath  = "lib/gdk-pixbuf-2.0/2.10.0/loaders"
+	gdkPixbufLoadersCacheMaxBytes  = int64(1 << 20)
+	gdkPixbufLoadersCacheMaxModule = 256
+)
+
+var sharedMimeFixedOutputs = map[string]struct{}{
+	"XMLnamespaces": {},
+	"aliases":       {},
+	"generic-icons": {},
+	"globs":         {},
+	"globs2":        {},
+	"icons":         {},
+	"magic":         {},
+	"mime.cache":    {},
+	"subclasses":    {},
+	"treemagic":     {},
+	"types":         {},
+	"version":       {},
+}
+
+var sharedMimeGeneratedTypes = map[string]struct{}{
+	"application": {},
+	"audio":       {},
+	"chemical":    {},
+	"font":        {},
+	"image":       {},
+	"inode":       {},
+	"message":     {},
+	"model":       {},
+	"multipart":   {},
+	"text":        {},
+	"video":       {},
+	"x-content":   {},
+	"x-epoc":      {},
+}
+
+func changesContainPathRoot(changes []Change, root string) bool {
+	for _, change := range changes {
+		if snapshotPathWithin(change.Path, root) {
+			return true
+		}
+	}
+	return false
+}
+
+func changesContainExactPath(changes []Change, target string) bool {
+	_, ok := changeKind(changes, target)
+	return ok
+}
+
+func changeKind(changes []Change, target string) (string, bool) {
+	for _, change := range changes {
+		if change.Path == target {
+			return change.Kind, true
+		}
+	}
+	return "", false
+}
+
+func validateSharedMimeInfoDatabase(prefix string, node resolution.Node, before, after map[string]fileState, options classifyOptions) (map[string]struct{}, error) {
+	if node.Name != sharedMimeInfoFormula || !verifiedBottleMatchesNode(node, options.verified) {
+		return nil, fmt.Errorf("verified shared-mime-info bottle identity is absent")
+	}
+	if options.runtimeUID == 0 || options.runtimeGID == 0 {
+		return nil, fmt.Errorf("authenticated runtime identity is absent")
+	}
+	if _, exists := before[sharedMimeDatabaseRoot]; exists {
+		return nil, fmt.Errorf("shared MIME database root existed before shared-mime-info installation")
+	}
+	root, ok := after[sharedMimeDatabaseRoot]
+	if !ok || root.Type != "directory" {
+		return nil, fmt.Errorf("shared MIME database root is absent or not a directory")
+	}
+	if err := validateSharedMimeGeneratedDirectory(sharedMimeDatabaseRoot, root, options.runtimeUID, options.runtimeGID); err != nil {
+		return nil, err
+	}
+	source, ok := after[sharedMimeVerifiedSourcePath]
+	if !ok || !globalPathMatchesVerifiedBottle(prefix, node, options.verified, sharedMimeVerifiedSourcePath, source, after) {
+		return nil, fmt.Errorf("verified freedesktop.org.xml source is not linked from the shared-mime-info keg")
+	}
+
+	generated := map[string]struct{}{}
+	fixedSeen := map[string]struct{}{}
+	typeCounts := map[string]int{}
+	entries := 0
+	files := 0
+	var totalBytes int64
+	for rel, state := range after {
+		if !snapshotPathWithin(rel, sharedMimeDatabaseRoot) || rel == sharedMimeDatabaseRoot {
+			continue
+		}
+		entries++
+		if entries > sharedMimeDatabaseMaxEntries {
+			return nil, fmt.Errorf("shared MIME database exceeds %d entries", sharedMimeDatabaseMaxEntries)
+		}
+		if rel == sharedMimeVerifiedSourcePath {
+			continue
+		}
+		if state.Type == "directory" {
+			if err := validateSharedMimeGeneratedDirectory(rel, state, options.runtimeUID, options.runtimeGID); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if state.Type != "regular" || !isSharedMimeGeneratedFilePath(rel) {
+			return nil, fmt.Errorf("unexpected shared MIME database entry %s of type %s", rel, state.Type)
+		}
+		if err := validateSharedMimeGeneratedFileMetadata(rel, state, options.runtimeUID, options.runtimeGID); err != nil {
+			return nil, err
+		}
+		if totalBytes > sharedMimeDatabaseMaxBytes-state.Size {
+			return nil, fmt.Errorf("shared MIME database exceeds %d bytes", sharedMimeDatabaseMaxBytes)
+		}
+		totalBytes += state.Size
+		files++
+		if files > sharedMimeDatabaseMaxFiles {
+			return nil, fmt.Errorf("shared MIME database exceeds %d generated files", sharedMimeDatabaseMaxFiles)
+		}
+		data, err := readStableSnapshotFile(prefix, rel, state)
+		if err != nil {
+			return nil, fmt.Errorf("read generated shared MIME file %s: %w", rel, err)
+		}
+		sub := strings.TrimPrefix(rel, sharedMimeDatabaseRoot+"/")
+		if !strings.Contains(sub, "/") {
+			fixedSeen[sub] = struct{}{}
+		} else {
+			mimeType := strings.SplitN(sub, "/", 2)[0]
+			typeCounts[mimeType]++
+			if err := validateGeneratedSharedMimeXML(rel, data); err != nil {
+				return nil, err
+			}
+		}
+		generated[rel] = struct{}{}
+	}
+	for name := range sharedMimeFixedOutputs {
+		if _, ok := fixedSeen[name]; !ok {
+			return nil, fmt.Errorf("shared MIME database is missing required output %s", name)
+		}
+	}
+	for name := range sharedMimeGeneratedTypes {
+		if typeCounts[name] == 0 {
+			return nil, fmt.Errorf("shared MIME database is missing generated XML for type %s", name)
+		}
+	}
+	return generated, nil
+}
+
+func validateSharedMimeGeneratedDirectory(rel string, state fileState, runtimeUID, runtimeGID uint32) error {
+	if state.Type != "directory" || !state.Mode.IsDir() {
+		return fmt.Errorf("shared MIME path %s is not a directory", rel)
+	}
+	if state.Mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || state.Mode.Perm()&0o022 != 0 {
+		return fmt.Errorf("shared MIME directory %s has unsafe permissions", rel)
+	}
+	if !state.OwnershipKnown || state.UID != runtimeUID || state.GID != runtimeGID {
+		return fmt.Errorf("shared MIME directory %s owner does not match runtime uid/gid %d:%d", rel, runtimeUID, runtimeGID)
+	}
+	return nil
+}
+
+func validateSharedMimeGeneratedFileMetadata(rel string, state fileState, runtimeUID, runtimeGID uint32) error {
+	if state.Type != "regular" || !state.Mode.IsRegular() {
+		return fmt.Errorf("shared MIME output %s is not an ordinary regular file", rel)
+	}
+	if state.Size < 0 || state.Size > sharedMimeDatabaseMaxFile {
+		return fmt.Errorf("shared MIME output %s size %d exceeds %d bytes", rel, state.Size, sharedMimeDatabaseMaxFile)
+	}
+	if state.Mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || state.Mode.Perm()&0o133 != 0 {
+		return fmt.Errorf("shared MIME output %s has unsafe permissions", rel)
+	}
+	if state.Links != 1 {
+		return fmt.Errorf("shared MIME output %s link count is %d, expected 1", rel, state.Links)
+	}
+	if !state.OwnershipKnown || state.UID != runtimeUID || state.GID != runtimeGID {
+		return fmt.Errorf("shared MIME output %s owner does not match runtime uid/gid %d:%d", rel, runtimeUID, runtimeGID)
+	}
+	if len(state.Digest) != sha256.Size*2 {
+		return fmt.Errorf("shared MIME output %s digest is absent or malformed", rel)
+	}
+	if _, err := hex.DecodeString(state.Digest); err != nil {
+		return fmt.Errorf("shared MIME output %s digest is malformed: %w", rel, err)
+	}
+	return nil
+}
+
+func isSharedMimeGeneratedFilePath(rel string) bool {
+	if !strings.HasPrefix(rel, sharedMimeDatabaseRoot+"/") {
+		return false
+	}
+	sub := strings.TrimPrefix(rel, sharedMimeDatabaseRoot+"/")
+	if _, ok := sharedMimeFixedOutputs[sub]; ok {
+		return true
+	}
+	parts := strings.Split(sub, "/")
+	if len(parts) != 2 {
+		return false
+	}
+	if _, ok := sharedMimeGeneratedTypes[parts[0]]; !ok || !strings.HasSuffix(parts[1], ".xml") {
+		return false
+	}
+	base := strings.TrimSuffix(parts[1], ".xml")
+	if base == "" {
+		return false
+	}
+	for _, r := range base {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("._+@-", r) {
+			return false
+		}
+	}
+	return true
+}
+
+func validateGeneratedSharedMimeXML(rel string, data []byte) error {
+	if !utf8.Valid(data) {
+		return fmt.Errorf("generated shared MIME XML %s is not valid UTF-8", rel)
+	}
+	sub := strings.TrimPrefix(rel, sharedMimeDatabaseRoot+"/")
+	if !strings.HasSuffix(sub, ".xml") || !strings.Contains(sub, "/") {
+		return fmt.Errorf("generated shared MIME XML %s has an invalid path", rel)
+	}
+	expectedType := strings.TrimSuffix(sub, ".xml")
+	const namespace = "http://www.freedesktop.org/standards/shared-mime-info"
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	depth := 0
+	rootCount := 0
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("parse generated shared MIME XML %s: %w", rel, err)
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			if depth == 0 {
+				rootCount++
+				if rootCount != 1 || value.Name.Local != "mime-type" || value.Name.Space != namespace {
+					return fmt.Errorf("generated shared MIME XML %s has an unexpected root element", rel)
+				}
+				mimeType := ""
+				typeSeen := false
+				for _, attr := range value.Attr {
+					if attr.Name.Space == "" && attr.Name.Local == "type" {
+						if typeSeen {
+							return fmt.Errorf("generated shared MIME XML %s repeats the type attribute", rel)
+						}
+						typeSeen = true
+						mimeType = attr.Value
+					}
+				}
+				// update-mime-database lower-cases generated filenames even when
+				// the registered MIME subtype retains mixed case (for example,
+				// macroEnabled). MIME type tokens are case-insensitive.
+				if !equalASCIIFold(mimeType, expectedType) {
+					return fmt.Errorf("generated shared MIME XML %s declares type %q, expected %q", rel, mimeType, expectedType)
+				}
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+			if depth < 0 {
+				return fmt.Errorf("generated shared MIME XML %s has an invalid element boundary", rel)
+			}
+		case xml.CharData:
+			if depth == 0 && !isXMLWhitespace(value) {
+				return fmt.Errorf("generated shared MIME XML %s has character data outside the root element", rel)
+			}
+		}
+	}
+	if rootCount != 1 || depth != 0 {
+		return fmt.Errorf("generated shared MIME XML %s has no unique complete root element", rel)
+	}
+	return nil
+}
+
+func equalASCIIFold(left, right string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range len(left) {
+		a, b := left[i], right[i]
+		if a >= utf8.RuneSelf || b >= utf8.RuneSelf {
+			return false
+		}
+		if a >= 'A' && a <= 'Z' {
+			a += 'a' - 'A'
+		}
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if a != b {
+			return false
+		}
+	}
+	return true
+}
+
+func isXMLWhitespace(data []byte) bool {
+	for _, value := range data {
+		switch value {
+		case ' ', '\t', '\r', '\n':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func globalPathMatchesVerifiedBottle(prefix string, node resolution.Node, verified bottle.Result, rel string, global fileState, snapshot map[string]fileState) bool {
+	if !verifiedBottleMatchesNode(node, verified) {
+		return false
+	}
+	var inventory *bottle.InventoryEntry
+	for i := range verified.Inventory {
+		entry := &verified.Inventory[i]
+		if entry.KegPath == rel && entry.Type == bottle.EntryRegular {
+			inventory = entry
+			break
+		}
+	}
+	if inventory == nil {
+		return false
+	}
+	keg := path.Join("Cellar", node.Name, node.PkgVersion)
+	sourceRel := path.Join(keg, rel)
+	source, ok := snapshot[sourceRel]
+	if !ok || source.Type != "regular" || source.Size != inventory.Size || source.Mode.Perm() != os.FileMode(inventory.Mode).Perm() || source.Digest != strings.TrimPrefix(inventory.SHA256, "sha256:") {
+		return false
+	}
+	switch global.Type {
+	case "symlink":
+		resolved, err := resolveSnapshotPath(prefix, snapshot, rel)
+		return err == nil && resolved == sourceRel
+	case "regular":
+		return global.Size == source.Size && global.Mode.Perm() == source.Mode.Perm() && global.Digest == source.Digest
+	default:
+		return false
+	}
+}
+
+func isControlledGdkPixbufLoadersCacheMutation(node resolution.Node, rel, kind string, verified bottle.Result) bool {
+	if rel != gdkPixbufLoadersCachePath || !verifiedBottleMatchesNode(node, verified) {
+		return false
+	}
+	if node.Name == gdkPixbufFormula {
+		return kind == "created"
+	}
+	return kind == "modified" && nodeDependsOn(node, gdkPixbufFormula) && len(verifiedGdkPixbufLoaders(node, verified)) > 0
+}
+
+func verifiedBottleMatchesNode(node resolution.Node, verified bottle.Result) bool {
+	return node.Name != "" && node.PkgVersion != "" &&
+		verified.Name == node.Name && verified.PkgVersion == node.PkgVersion &&
+		verified.KegPrefix == path.Join(node.Name, node.PkgVersion)
+}
+
+func nodeDependsOn(node resolution.Node, dependency string) bool {
+	for _, requirement := range node.Dependencies {
+		if requirement.Name == dependency {
+			return true
+		}
+	}
+	return false
+}
+
+func verifiedGdkPixbufLoaders(node resolution.Node, verified bottle.Result) map[string]struct{} {
+	loaders := map[string]struct{}{}
+	if !verifiedBottleMatchesNode(node, verified) {
+		return loaders
+	}
+	for _, entry := range verified.Inventory {
+		if entry.Type != bottle.EntryRegular || path.Dir(entry.KegPath) != gdkPixbufLoadersDirectoryPath {
+			continue
+		}
+		if isGdkPixbufLoaderBasename(path.Base(entry.KegPath)) {
+			loaders[entry.KegPath] = struct{}{}
+		}
+	}
+	return loaders
+}
+
+func validateGdkPixbufLoadersCache(prefix string, node resolution.Node, rel, kind string, before map[string]fileState, state fileState, after map[string]fileState, options classifyOptions) error {
+	if !isControlledGdkPixbufLoadersCacheMutation(node, rel, kind, options.verified) {
+		return fmt.Errorf("verified formula %q may not %s %s", node.Name, kind, rel)
+	}
+	if options.runtimeUID == 0 || options.runtimeGID == 0 {
+		return fmt.Errorf("authenticated runtime identity is absent")
+	}
+	if kind == "created" {
+		if _, ok := before[rel]; ok {
+			return fmt.Errorf("creation unexpectedly replaced a pre-existing cache")
+		}
+	} else {
+		prior, ok := before[rel]
+		if !ok {
+			return fmt.Errorf("refresh requires a pre-existing cache")
+		}
+		if err := validateGdkPixbufLoadersCacheMetadata("pre-existing", prior, options.runtimeUID, options.runtimeGID); err != nil {
+			return err
+		}
+	}
+	if err := validateGdkPixbufLoadersCacheMetadata("generated", state, options.runtimeUID, options.runtimeGID); err != nil {
+		return err
+	}
+	if len(options.closureKegs) == 0 {
+		return fmt.Errorf("resolved closure keg set is empty")
+	}
+
+	data, err := readStableSnapshotFile(prefix, rel, state)
+	if err != nil {
+		return err
+	}
+	cacheModules := map[string]gdkPixbufCacheModule{}
+	if err := validateGdkPixbufLoadersCacheContent(prefix, data, after, options.closureKegs, cacheModules); err != nil {
+		return err
+	}
+	afterModules, err := installedGlobalGdkPixbufLoaders(prefix, after, options.closureKegs)
+	if err != nil {
+		return err
+	}
+	if !gdkPixbufCacheTargetsEqual(cacheModules, afterModules) {
+		return fmt.Errorf("cache module set does not exactly match installed global loader symlinks")
+	}
+	beforeModules, err := installedGlobalGdkPixbufLoaders(prefix, before, options.closureKegs)
+	if err != nil {
+		return fmt.Errorf("validate pre-existing global loader symlinks: %w", err)
+	}
+	for module, target := range beforeModules {
+		if afterTarget, ok := afterModules[module]; !ok || afterTarget != target {
+			return fmt.Errorf("pre-existing loader module %s was removed or retargeted", module)
+		}
+	}
+	if kind == "created" {
+		if len(options.priorGdkPixbufCache) != 0 {
+			return fmt.Errorf("initial cache creation unexpectedly has captured prior content")
+		}
+		if len(beforeModules) != 0 {
+			return fmt.Errorf("initial gdk-pixbuf cache creation found pre-existing global loaders")
+		}
+		return nil
+	}
+	if len(options.priorGdkPixbufCache) == 0 {
+		return fmt.Errorf("cache refresh is missing captured pre-install content")
+	}
+	priorCacheModules := map[string]gdkPixbufCacheModule{}
+	if err := validateGdkPixbufLoadersCacheContent(prefix, options.priorGdkPixbufCache, before, options.closureKegs, priorCacheModules); err != nil {
+		return fmt.Errorf("validate pre-install gdk-pixbuf loader cache: %w", err)
+	}
+	for module, prior := range priorCacheModules {
+		current, ok := cacheModules[module]
+		if !ok {
+			return fmt.Errorf("pre-existing cache module %s was removed", module)
+		}
+		if current.resolved != prior.resolved || current.block != prior.block {
+			return fmt.Errorf("pre-existing cache module %s was rewritten", module)
+		}
+	}
+
+	contributed := verifiedGdkPixbufLoaders(node, options.verified)
+	currentKeg := path.Join("Cellar", node.Name, node.PkgVersion)
+	newLoaders := 0
+	for module, target := range afterModules {
+		if _, existed := beforeModules[module]; existed {
+			continue
+		}
+		if !snapshotPathWithin(target, currentKeg) {
+			return fmt.Errorf("new loader module %s does not resolve into modifier keg", module)
+		}
+		kegPath := strings.TrimPrefix(target, currentKeg+"/")
+		if _, ok := contributed[kegPath]; !ok {
+			return fmt.Errorf("new loader module %s is absent from the verified bottle inventory", module)
+		}
+		newLoaders++
+	}
+	if newLoaders == 0 {
+		return fmt.Errorf("verified modifier registered no new loader module")
+	}
+	return nil
+}
+
+type gdkPixbufCacheModule struct {
+	resolved string
+	block    string
+}
+
+func gdkPixbufCacheTargetsEqual(cache map[string]gdkPixbufCacheModule, installed map[string]string) bool {
+	if len(cache) != len(installed) {
+		return false
+	}
+	for module, target := range installed {
+		entry, ok := cache[module]
+		if !ok || entry.resolved != target {
+			return false
+		}
+	}
+	return true
+}
+
+func validateGdkPixbufLoadersCacheMetadata(label string, state fileState, runtimeUID, runtimeGID uint32) error {
+	if state.Type != "regular" || !state.Mode.IsRegular() {
+		return fmt.Errorf("%s cache is not an ordinary regular file", label)
+	}
+	if state.Size <= 0 || state.Size > gdkPixbufLoadersCacheMaxBytes {
+		return fmt.Errorf("%s cache size %d is outside 1..%d bytes", label, state.Size, gdkPixbufLoadersCacheMaxBytes)
+	}
+	if state.Mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return fmt.Errorf("%s cache has special permission bits", label)
+	}
+	if state.Mode.Perm()&0o111 != 0 {
+		return fmt.Errorf("%s cache is executable", label)
+	}
+	if state.Mode.Perm()&0o022 != 0 {
+		return fmt.Errorf("%s cache is group/other writable", label)
+	}
+	if state.Links != 1 {
+		return fmt.Errorf("%s cache link count is %d, expected 1", label, state.Links)
+	}
+	if !state.OwnershipKnown || state.UID != runtimeUID || state.GID != runtimeGID {
+		return fmt.Errorf("%s cache owner does not match authenticated runtime uid/gid %d:%d", label, runtimeUID, runtimeGID)
+	}
+	if len(state.Digest) != sha256.Size*2 {
+		return fmt.Errorf("%s cache digest is absent or malformed", label)
+	}
+	if _, err := hex.DecodeString(state.Digest); err != nil {
+		return fmt.Errorf("%s cache digest is malformed: %w", label, err)
+	}
+	return nil
+}
+
+func readStableSnapshotFile(prefix, rel string, state fileState) ([]byte, error) {
+	filename := filepath.Join(prefix, filepath.FromSlash(rel))
+	info, err := os.Lstat(filename)
+	if err != nil {
+		return nil, fmt.Errorf("lstat generated file: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode() != state.Mode || info.Size() != state.Size {
+		return nil, fmt.Errorf("generated file no longer matches its snapshot metadata")
+	}
+	inode, links := snapshotInodeMeta(info)
+	if links != 1 || (state.Inode != "" && inode != state.Inode) {
+		return nil, fmt.Errorf("generated file no longer matches its snapshot inode")
+	}
+
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("open generated file: %w", err)
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat opened generated file: %w", err)
+	}
+	openedInode, openedLinks := snapshotInodeMeta(openedInfo)
+	if !openedInfo.Mode().IsRegular() || openedInfo.Mode() != state.Mode || openedInfo.Size() != state.Size || openedLinks != 1 || (inode != "" && openedInode != inode) {
+		return nil, fmt.Errorf("opened generated file differs from its no-follow path")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, state.Size+1))
+	if err != nil {
+		return nil, fmt.Errorf("read generated file: %w", err)
+	}
+	if int64(len(data)) != state.Size {
+		return nil, fmt.Errorf("generated file changed size while reading")
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != state.Digest {
+		return nil, fmt.Errorf("generated file content differs from its stable snapshot")
+	}
+	return data, nil
+}
+
+type gdkPixbufCacheToken struct {
+	value  string
+	quoted bool
+}
+
+func validateGdkPixbufLoadersCacheContent(prefix string, data []byte, after map[string]fileState, closureKegs map[string]struct{}, modules map[string]gdkPixbufCacheModule) error {
+	if !utf8.Valid(data) {
+		return fmt.Errorf("cache is not valid UTF-8")
+	}
+	for offset, value := range data {
+		if (value < 0x20 && value != '\n') || value == 0x7f {
+			return fmt.Errorf("cache contains control byte 0x%02x at offset %d", value, offset)
+		}
+	}
+	content := string(data)
+	for _, marker := range []string{
+		"/__dalec_homebrew",
+		"/run/dalec-homebrew",
+		"/usr/local/bin/dalec-homebrew-materializer",
+		"/usr/local/bin/dalec-homebrew-test-runner",
+		pourScriptPath,
+		"dalec-homebrew-verified-bottles-",
+	} {
+		if strings.Contains(content, marker) {
+			return fmt.Errorf("cache contains materializer-only path marker %q", marker)
+		}
+	}
+	if strings.Contains(content, "../") || strings.Contains(content, `..\`) {
+		return fmt.Errorf("cache contains path traversal")
+	}
+
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 || lines[0] != "# GdkPixbuf Image Loader Modules file" {
+		return fmt.Errorf("cache header is missing or unsupported")
+	}
+	const (
+		cachePhaseHeader = iota
+		cachePhaseModule
+		cachePhaseMetadata
+		cachePhaseMIME
+		cachePhaseExtensions
+		cachePhaseSignatures
+	)
+	phase := cachePhaseHeader
+	loaderDirectorySeen := false
+	moduleCount := 0
+	currentModule := ""
+	currentResolved := ""
+	var currentBlock []string
+	finalizeBlock := func() error {
+		if currentModule == "" || currentResolved == "" || len(currentBlock) == 0 {
+			return fmt.Errorf("cache contains an incomplete loader block")
+		}
+		if _, duplicate := modules[currentModule]; duplicate {
+			return fmt.Errorf("cache repeats loader module %s", currentModule)
+		}
+		modules[currentModule] = gdkPixbufCacheModule{resolved: currentResolved, block: strings.Join(currentBlock, "\n")}
+		currentModule = ""
+		currentResolved = ""
+		currentBlock = nil
+		return nil
+	}
+
+	for lineNumber, line := range lines[1:] {
+		lineNumber += 2
+		if phase == cachePhaseHeader {
+			if strings.HasPrefix(line, "# LoaderDir = ") {
+				if loaderDirectorySeen {
+					return fmt.Errorf("line %d repeats LoaderDir", lineNumber)
+				}
+				if err := validateGdkPixbufLoaderDirectory(prefix, strings.TrimPrefix(line, "# LoaderDir = "), after); err != nil {
+					return fmt.Errorf("line %d: %w", lineNumber, err)
+				}
+				loaderDirectorySeen = true
+				continue
+			}
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if !loaderDirectorySeen {
+				return fmt.Errorf("line %d starts modules before LoaderDir", lineNumber)
+			}
+			phase = cachePhaseModule
+		}
+
+		if phase == cachePhaseModule && line == "" {
+			continue
+		}
+		if phase == cachePhaseSignatures && line == "" {
+			if err := finalizeBlock(); err != nil {
+				return fmt.Errorf("line %d: %w", lineNumber, err)
+			}
+			phase = cachePhaseModule
+			continue
+		}
+		tokens, err := parseGdkPixbufCacheLine(line)
+		if err != nil {
+			return fmt.Errorf("line %d: %w", lineNumber, err)
+		}
+		switch phase {
+		case cachePhaseModule:
+			if len(tokens) != 1 || !tokens[0].quoted || tokens[0].value == "" || strings.Contains(tokens[0].value, `\`) {
+				return fmt.Errorf("line %d is not a plain loader module path", lineNumber)
+			}
+			resolved, err := validateGdkPixbufLoaderModule(prefix, tokens[0].value, after, closureKegs)
+			if err != nil {
+				return fmt.Errorf("line %d: %w", lineNumber, err)
+			}
+			if _, duplicate := modules[tokens[0].value]; duplicate {
+				return fmt.Errorf("line %d repeats loader module %s", lineNumber, tokens[0].value)
+			}
+			currentModule = tokens[0].value
+			currentResolved = resolved
+			currentBlock = []string{line}
+			moduleCount++
+			if moduleCount > gdkPixbufLoadersCacheMaxModule {
+				return fmt.Errorf("cache exceeds %d loader modules", gdkPixbufLoadersCacheMaxModule)
+			}
+			phase = cachePhaseMetadata
+		case cachePhaseMetadata:
+			currentBlock = append(currentBlock, line)
+			if len(tokens) != 5 || !tokens[0].quoted || tokens[1].quoted || !tokens[2].quoted || !tokens[3].quoted || !tokens[4].quoted {
+				return fmt.Errorf("line %d has malformed loader metadata", lineNumber)
+			}
+			if _, err := strconv.ParseUint(tokens[1].value, 10, 32); err != nil {
+				return fmt.Errorf("line %d has invalid loader flags", lineNumber)
+			}
+			phase = cachePhaseMIME
+		case cachePhaseMIME, cachePhaseExtensions:
+			currentBlock = append(currentBlock, line)
+			if len(tokens) == 0 || !tokens[len(tokens)-1].quoted || tokens[len(tokens)-1].value != "" {
+				return fmt.Errorf("line %d lacks an empty-list terminator", lineNumber)
+			}
+			for _, token := range tokens {
+				if !token.quoted {
+					return fmt.Errorf("line %d contains an unquoted list value", lineNumber)
+				}
+			}
+			if phase == cachePhaseMIME {
+				phase = cachePhaseExtensions
+			} else {
+				phase = cachePhaseSignatures
+			}
+		case cachePhaseSignatures:
+			currentBlock = append(currentBlock, line)
+			if len(tokens) != 3 || !tokens[0].quoted || !tokens[1].quoted || tokens[2].quoted {
+				return fmt.Errorf("line %d has malformed loader signature", lineNumber)
+			}
+			if _, err := strconv.ParseInt(tokens[2].value, 10, 32); err != nil {
+				return fmt.Errorf("line %d has invalid signature relevance", lineNumber)
+			}
+		}
+	}
+	if !loaderDirectorySeen || moduleCount == 0 {
+		return fmt.Errorf("cache does not contain a loader directory and at least one module")
+	}
+	if phase == cachePhaseMetadata || phase == cachePhaseMIME || phase == cachePhaseExtensions {
+		return fmt.Errorf("cache ends in an incomplete loader block")
+	}
+	if phase == cachePhaseSignatures {
+		if err := finalizeBlock(); err != nil {
+			return err
+		}
+	}
+	if len(modules) != moduleCount {
+		return fmt.Errorf("cache module block count does not match parsed module count")
+	}
+	return nil
+}
+
+func validateGdkPixbufLoaderDirectory(prefix, directory string, after map[string]fileState) error {
+	prefix = path.Clean(filepath.ToSlash(prefix))
+	expected := path.Join(prefix, gdkPixbufLoadersDirectoryPath)
+	if directory != expected || !path.IsAbs(directory) || path.Clean(directory) != directory {
+		return fmt.Errorf("LoaderDir %q is not the exact global loader directory %q", directory, expected)
+	}
+	state, ok := after[gdkPixbufLoadersDirectoryPath]
+	if !ok || state.Type != "directory" {
+		return fmt.Errorf("global loader directory is absent or not a real directory")
+	}
+	return nil
+}
+
+func validateGdkPixbufLoaderModule(prefix, module string, snapshot map[string]fileState, closureKegs map[string]struct{}) (string, error) {
+	prefix = path.Clean(filepath.ToSlash(prefix))
+	loaderDirectory := path.Join(prefix, gdkPixbufLoadersDirectoryPath)
+	if !path.IsAbs(module) || path.Clean(module) != module || path.Dir(module) != loaderDirectory {
+		return "", fmt.Errorf("loader module %q is outside the exact global loader directory", module)
+	}
+	base := path.Base(module)
+	if !isGdkPixbufLoaderBasename(base) {
+		return "", fmt.Errorf("loader module %q has an unexpected filename", module)
+	}
+	prefixWithSlash := strings.TrimSuffix(prefix, "/") + "/"
+	if !strings.HasPrefix(module, prefixWithSlash) {
+		return "", fmt.Errorf("loader module %q is outside the runtime prefix", module)
+	}
+	rel := strings.TrimPrefix(module, prefixWithSlash)
+	state, ok := snapshot[rel]
+	if !ok || state.Type != "symlink" {
+		return "", fmt.Errorf("loader module %q is not a global symlink", module)
+	}
+	resolved, err := resolveSnapshotPath(prefix, snapshot, rel)
+	if err != nil {
+		return "", fmt.Errorf("resolve loader module %q: %w", module, err)
+	}
+	keg, ok := closureKegForPath(resolved, closureKegs)
+	if !ok {
+		return "", fmt.Errorf("loader module %q resolves outside the resolved closure at %s", module, resolved)
+	}
+	expectedSuffix := strings.TrimPrefix(gdkPixbufLoadersDirectoryPath, "lib/") + "/" + base
+	if !strings.HasSuffix(resolved, "/lib/"+expectedSuffix) {
+		return "", fmt.Errorf("loader module %q resolves outside a keg loader directory at %s", module, resolved)
+	}
+	target, ok := snapshot[resolved]
+	if !ok || target.Type != "regular" || target.Mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || target.Mode.Perm()&0o022 != 0 {
+		return "", fmt.Errorf("loader module %q does not resolve to an ordinary protected file in %s", module, keg)
+	}
+	return resolved, nil
+}
+
+func installedGlobalGdkPixbufLoaders(prefix string, snapshot map[string]fileState, closureKegs map[string]struct{}) (map[string]string, error) {
+	modules := map[string]string{}
+	prefix = path.Clean(filepath.ToSlash(prefix))
+	for rel, state := range snapshot {
+		if path.Dir(rel) != gdkPixbufLoadersDirectoryPath || state.Type != "symlink" || !isGdkPixbufLoaderBasename(path.Base(rel)) {
+			continue
+		}
+		module := path.Join(prefix, rel)
+		resolved, err := validateGdkPixbufLoaderModule(prefix, module, snapshot, closureKegs)
+		if err != nil {
+			return nil, err
+		}
+		modules[module] = resolved
+	}
+	return modules, nil
+}
+
+func isGdkPixbufLoaderBasename(base string) bool {
+	const prefix = "libpixbufloader"
+	if !strings.HasPrefix(base, prefix) || !strings.HasSuffix(base, ".so") || len(base) <= len(prefix)+len("-.so") {
+		return false
+	}
+	separator := base[len(prefix)]
+	if separator != '-' && separator != '_' {
+		return false
+	}
+	name := base[len(prefix)+1 : len(base)-len(".so")]
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func closureKegForPath(candidate string, closureKegs map[string]struct{}) (string, bool) {
+	for keg := range closureKegs {
+		if snapshotPathWithin(candidate, keg) {
+			return keg, true
+		}
+	}
+	return "", false
+}
+
+func parseGdkPixbufCacheLine(line string) ([]gdkPixbufCacheToken, error) {
+	var tokens []gdkPixbufCacheToken
+	for offset := 0; offset < len(line); {
+		for offset < len(line) && line[offset] == ' ' {
+			offset++
+		}
+		if offset == len(line) {
+			break
+		}
+		if line[offset] == '"' {
+			start := offset + 1
+			offset = start
+			closed := false
+			for offset < len(line) {
+				switch line[offset] {
+				case '\\':
+					offset += 2
+					if offset > len(line) {
+						return nil, fmt.Errorf("truncated escape sequence")
+					}
+				case '"':
+					tokens = append(tokens, gdkPixbufCacheToken{value: line[start:offset], quoted: true})
+					offset++
+					closed = true
+				default:
+					offset++
+				}
+				if closed {
+					break
+				}
+			}
+			if !closed {
+				return nil, fmt.Errorf("unterminated quoted field")
+			}
+			continue
+		}
+		start := offset
+		for offset < len(line) && line[offset] != ' ' {
+			if line[offset] == '"' {
+				return nil, fmt.Errorf("quote inside unquoted field")
+			}
+			offset++
+		}
+		tokens = append(tokens, gdkPixbufCacheToken{value: line[start:offset]})
+	}
+	return tokens, nil
 }
 
 func isPackageManagerState(p string) bool {
@@ -1338,6 +2304,20 @@ func validPythonMinor(value string) bool {
 		}
 	}
 	return true
+}
+
+func resolvedClosureKegs(record *resolution.Record) map[string]struct{} {
+	out := map[string]struct{}{}
+	if record == nil {
+		return out
+	}
+	for _, node := range record.Nodes {
+		if node.Name == "" || node.PkgVersion == "" {
+			continue
+		}
+		out[path.Join("Cellar", node.Name, node.PkgVersion)] = struct{}{}
+	}
+	return out
 }
 
 func optNamesForNode(record *resolution.Record, name string) map[string]struct{} {

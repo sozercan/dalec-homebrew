@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-bash -n scripts/check.sh scripts/live-test.sh scripts/image-size-report.sh
+bash -n \
+  scripts/check.sh \
+  scripts/live-test.sh \
+  scripts/image-size-report.sh \
+  scripts/vm-live-validate.sh
 go test ./...
 go vet ./...
 go test -race \
   ./internal/homebrew/metadata \
   ./internal/homebrew/oci \
   ./internal/bottle \
+  ./internal/materializer \
   ./internal/resolution \
   ./internal/runtimefs \
   ./internal/runtimebase \

@@ -39,4 +39,19 @@ Chisel package requests pass through a build-only allowlisted proxy that maps on
 
 Bottle inventory remains authoritative after pouring. The only extra keg subtree currently accepted is `glibc/lib/locale`, which the authenticated Homebrew `glibc` Formula deterministically generates with its brewed `localedef`. Reconciliation bounds its entry count, per-file and aggregate size, requires known ownership and non-writable/non-executable ordinary files or directories, and rejects links and special modes. Every other unexpected keg path still fails closed.
 
+Two generated global runtime indexes have explicit, versioned handling. The
+`gdk-pixbuf` loader cache is accepted only at
+`lib/gdk-pixbuf-2.0/2.10.0/loaders.cache`; its grammar, ownership, mode, size,
+module count, and exact module set are checked, and every module must be a
+global symlink into a verified loader file in the resolved bottle closure.
+Later cache writers must depend on `gdk-pixbuf` and contribute a newly verified
+loader. The `shared-mime-info` database below `share/mime` is accepted only
+from the verified database generator, with fixed required outputs, bounded
+file/count/size totals, safe path grammar, and parsed generated XML. Runtime
+ownership rules attribute these generated files to their defining packages;
+ordinary global copies retain their original bottle attribution. Fontconfig's
+verified shared `etc/fonts` configuration is also retained explicitly. All of
+these files are re-hashed in runtime inventory and normalized to root-owned,
+non-writable output.
+
 Runtime ELF verification treats a private `.a` file containing a raw `ET_REL` object as linker data, matching Homebrew glibc's `libmcheck.a`. Such an object is still rejected if exposed as a command; `.so`/plugin paths and arbitrary executable relocatable objects remain invalid.

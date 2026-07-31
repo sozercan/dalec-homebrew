@@ -9,6 +9,11 @@ import (
 	"github.com/sozercan/dalec-homebrew/internal/runtimefs"
 )
 
+const (
+	gdkPixbufLoadersCachePath = "lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+	sharedMimeDatabasePath    = "share/mime"
+)
+
 // RuntimeAllowlist is the V1 package-state policy. Code and global links are
 // retained for the complete verified closure. Configuration and writable state
 // are narrower: only Formula-named subtrees are approved by default. Formulae
@@ -26,8 +31,41 @@ func RuntimeAllowlist(record *resolution.Record) (runtimefs.Allowlist, []string)
 			runtimefs.PathRule{Path: node.Name + ".conf", Package: node.Name},
 			runtimefs.PathRule{Path: node.Name + ".d", Package: node.Name},
 		)
+		if node.Name == "fontconfig" {
+			// Fontconfig's default runtime configuration uses the shared
+			// HOMEBREW_PREFIX/etc/fonts layout rather than a formula-named
+			// subtree. The files are still verified bottle content and remain
+			// root-owned and non-writable in the final runtime.
+			allow.Etc = append(allow.Etc, runtimefs.PathRule{
+				Path:     "fonts",
+				Package:  node.Name,
+				Required: true,
+			})
+		}
 		allow.Var = append(allow.Var, runtimefs.PathRule{Path: node.Name, Package: node.Name, Writable: true, Required: true})
 		writable = append(writable, path.Join(runtimefs.DefaultInstallPrefix, "var", node.Name))
+		if node.Name == "gdk-pixbuf" {
+			// Homebrew's authenticated gdk-pixbuf install step generates this
+			// runtime module registry below the enabled global lib root. The
+			// materializer validates its complete structure and binds every
+			// referenced loader back to a keg in the resolved closure.
+			allow.Owners = append(allow.Owners, runtimefs.PathRule{
+				Path:     gdkPixbufLoadersCachePath,
+				Package:  node.Name,
+				Required: true,
+			})
+		}
+		if node.Name == "shared-mime-info" {
+			// update-mime-database expands the verified package XML into a
+			// shared runtime database. The materializer validates the complete
+			// generated tree and rejects unverified writers before this fallback
+			// attribution is applied.
+			allow.Owners = append(allow.Owners, runtimefs.PathRule{
+				Path:     sharedMimeDatabasePath,
+				Package:  node.Name,
+				Required: true,
+			})
+		}
 	}
 	return allow, writable
 }

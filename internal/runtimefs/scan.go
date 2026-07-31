@@ -534,10 +534,6 @@ func attributeEntries(scan *sourceScan, policy *normalizedPolicy) error {
 		if !entry.retain || entry.typeName == TypeDirectory || entry.packageName != "" {
 			continue
 		}
-		if rule, ok := matchingRule(entry.rel, policy.allowlist.Owners); ok && entry.typeName == TypeRegular {
-			entry.packageName = rule.Package
-			continue
-		}
 		if entry.typeName == TypeSymlink {
 			final, err := finalLinkTarget(scan.byPath, entry.rel, map[string]bool{})
 			if err != nil {
@@ -549,6 +545,11 @@ func attributeEntries(scan *sourceScan, policy *normalizedPolicy) error {
 		}
 		if entry.packageName == "" && entry.typeName == TypeRegular {
 			entry.packageName = packageForGlobalCopy(entry, byRelative)
+		}
+		if entry.packageName == "" && entry.typeName == TypeRegular {
+			if rule, ok := matchingRule(entry.rel, policy.allowlist.Owners); ok {
+				entry.packageName = rule.Package
+			}
 		}
 		if entry.packageName == "" {
 			return runtimeError(CodeUnattributed, entry.rel, "retained non-directory path cannot be attributed to the resolution closure")

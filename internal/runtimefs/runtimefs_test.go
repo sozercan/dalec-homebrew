@@ -722,6 +722,25 @@ func TestOwnerRulesDoNotOverrideSymlinkTargetPackage(t *testing.T) {
 	}
 }
 
+func TestOwnerRulesDoNotOverrideExactGlobalCopyPackage(t *testing.T) {
+	target := &sourceEntry{rel: "Cellar/jq/1/share/mime/packages/jq.xml", typeName: TypeRegular, retain: true, sha256: "same", mode: 0o644}
+	global := &sourceEntry{rel: "share/mime/packages/jq.xml", typeName: TypeRegular, retain: true, sha256: "same", mode: 0o644}
+	scan := &sourceScan{entries: []*sourceEntry{target, global}, byPath: map[string]*sourceEntry{target.rel: target, global.rel: global}}
+	policy := &normalizedPolicy{
+		nodes: map[string]resolution.Node{
+			"jq":               {Name: "jq", PkgVersion: "1"},
+			"shared-mime-info": {Name: "shared-mime-info", PkgVersion: "1"},
+		},
+		allowlist: normalizedAllowlist{Owners: []normalizedRule{{Path: "share/mime", Package: "shared-mime-info"}}},
+	}
+	if err := attributeEntries(scan, policy); err != nil {
+		t.Fatal(err)
+	}
+	if global.packageName != "jq" {
+		t.Fatalf("exact global copy attributed to %q", global.packageName)
+	}
+}
+
 func TestWriteEvidenceRejectsNonemptyDestinationWithoutPartialUpdate(t *testing.T) {
 	fx := newFixture(t)
 	result, err := Assemble(fx.source, testOutput(t, "runtime"), fx.record, fx.opts)

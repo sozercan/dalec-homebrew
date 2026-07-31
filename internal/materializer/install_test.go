@@ -3,11 +3,14 @@ package materializer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -239,7 +242,7 @@ func TestClassifyValidatesOptLinksAndAliases(t *testing.T) {
 	withAlias := maps.Clone(base)
 	withAlias["opt/hi"] = fileState{Type: "symlink", Link: "../Cellar/hello/1"}
 	changes := []Change{{Path: "opt", Kind: "created"}, {Path: "opt/hello", Kind: "created"}, {Path: "opt/hi", Kind: "created"}}
-	if err := classify(prefix, resolution.Node{Name: "hello", PkgVersion: "1"}, nil, withAlias, changes, map[string]struct{}{"hello": {}, "hi": {}}); err != nil {
+	if err := classify(prefix, resolution.Node{Name: "hello", PkgVersion: "1"}, nil, withAlias, changes, classifyOptions{optNames: map[string]struct{}{"hello": {}, "hi": {}}}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1066,6 +1069,471 @@ func TestClassifyRejectsRegularFileInGlobalLib(t *testing.T) {
 	}
 }
 
+const (
+	gdkPixbufTestLibrsvg    = "librsvg"
+	gdkPixbufTestWebP       = "webp-pixbuf-loader"
+	gdkPixbufTestRuntimeUID = uint32(4242)
+	gdkPixbufTestRuntimeGID = uint32(4343)
+)
+
+var gdkPixbufTestVersions = map[string]string{
+	gdkPixbufFormula:     "2.44.7",
+	gdkPixbufTestLibrsvg: "2.60.0",
+	gdkPixbufTestWebP:    "0.2.7",
+}
+
+var gdkPixbufTestModules = map[string]string{
+	gdkPixbufFormula:     "libpixbufloader-png.so",
+	gdkPixbufTestLibrsvg: "libpixbufloader_svg.so",
+	gdkPixbufTestWebP:    "libpixbufloader-webp.so",
+}
+
+type gdkPixbufCacheFixture struct {
+	prefix      string
+	node        resolution.Node
+	verified    bottle.Result
+	before      map[string]fileState
+	after       map[string]fileState
+	closureKegs map[string]struct{}
+	priorCache  []byte
+}
+
+func (fixture gdkPixbufCacheFixture) options() classifyOptions {
+	return classifyOptions{
+		optNames:            map[string]struct{}{fixture.node.Name: {}},
+		closureKegs:         fixture.closureKegs,
+		verified:            fixture.verified,
+		runtimeUID:          gdkPixbufTestRuntimeUID,
+		runtimeGID:          gdkPixbufTestRuntimeGID,
+		priorGdkPixbufCache: append([]byte(nil), fixture.priorCache...),
+	}
+}
+
+func newGdkPixbufCacheFixture(t *testing.T, writer string, includeContributor bool, transform func(string, string) string) gdkPixbufCacheFixture {
+	t.Helper()
+	prefix := t.TempDir()
+	for _, directory := range []string{"etc", "var", "opt", gdkPixbufLoadersDirectoryPath} {
+		if err := os.MkdirAll(filepath.Join(prefix, filepath.FromSlash(directory)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	formulae := []string{gdkPixbufFormula}
+	if includeContributor {
+		formulae = append(formulae, writer)
+	}
+	globalLoaderDirectory := filepath.Join(prefix, filepath.FromSlash(gdkPixbufLoadersDirectoryPath))
+	for _, formula := range formulae {
+		target := filepath.Join(prefix, "Cellar", formula, gdkPixbufTestVersions[formula], "lib", "gdk-pixbuf-2.0", "2.10.0", "loaders", gdkPixbufTestModules[formula])
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("loader\n"), 0o444); err != nil {
+			t.Fatal(err)
+		}
+		linkTarget, err := filepath.Rel(globalLoaderDirectory, target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(linkTarget, filepath.Join(globalLoaderDirectory, gdkPixbufTestModules[formula])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writerVersion, ok := gdkPixbufTestVersions[writer]
+	if !ok {
+		t.Fatalf("unsupported fixture writer %q", writer)
+	}
+	if err := os.Symlink(path.Join("../Cellar", writer, writerVersion), filepath.Join(prefix, "opt", writer)); err != nil {
+		t.Fatal(err)
+	}
+	content := gdkPixbufCacheContent(prefix, formulae)
+	if transform != nil {
+		content = transform(prefix, content)
+	}
+	cachePath := filepath.Join(prefix, filepath.FromSlash(gdkPixbufLoadersCachePath))
+	if err := os.WriteFile(cachePath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cachePath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after, err := snapshot(prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheState := after[gdkPixbufLoadersCachePath]
+	cacheState.UID = gdkPixbufTestRuntimeUID
+	cacheState.GID = gdkPixbufTestRuntimeGID
+	cacheState.OwnershipKnown = true
+	after[gdkPixbufLoadersCachePath] = cacheState
+
+	before := map[string]fileState{}
+	var priorCache []byte
+	if includeContributor {
+		before = maps.Clone(after)
+		for rel := range before {
+			if snapshotPathWithin(rel, path.Join("Cellar", writer)) || rel == path.Join("opt", writer) || rel == path.Join(gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[writer]) {
+				delete(before, rel)
+			}
+		}
+		priorCache = []byte(gdkPixbufCacheContent(prefix, []string{gdkPixbufFormula}))
+		prior := cacheState
+		prior.Size = int64(len(priorCache))
+		sum := sha256.Sum256(priorCache)
+		prior.Digest = fmt.Sprintf("%x", sum[:])
+		before[gdkPixbufLoadersCachePath] = prior
+	}
+	closureKegs := map[string]struct{}{}
+	for _, formula := range formulae {
+		closureKegs[path.Join("Cellar", formula, gdkPixbufTestVersions[formula])] = struct{}{}
+	}
+	node := resolution.Node{Name: writer, PkgVersion: writerVersion}
+	if writer != gdkPixbufFormula {
+		node.Dependencies = []resolution.Requirement{{Name: gdkPixbufFormula}}
+	}
+	kegPath := path.Join(gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[writer])
+	verified := bottle.Result{
+		Name:       writer,
+		PkgVersion: writerVersion,
+		KegPrefix:  path.Join(writer, writerVersion),
+		Inventory: []bottle.InventoryEntry{{
+			Path:    path.Join(writer, writerVersion, kegPath),
+			KegPath: kegPath,
+			Type:    bottle.EntryRegular,
+			Mode:    0o444,
+			SHA256:  "sha256:" + strings.Repeat("c", sha256.Size*2),
+		}},
+	}
+	return gdkPixbufCacheFixture{prefix: prefix, node: node, verified: verified, before: before, after: after, closureKegs: closureKegs, priorCache: priorCache}
+}
+
+func gdkPixbufCacheContent(prefix string, formulae []string) string {
+	prefix = filepath.ToSlash(prefix)
+	var content strings.Builder
+	content.WriteString("# GdkPixbuf Image Loader Modules file\n")
+	content.WriteString("# Automatically generated file, do not edit\n")
+	content.WriteString("# Created by gdk-pixbuf-query-loaders from gdk-pixbuf-test\n")
+	content.WriteString("#\n")
+	fmt.Fprintf(&content, "# LoaderDir = %s\n#\n", path.Join(prefix, gdkPixbufLoadersDirectoryPath))
+	for _, formula := range formulae {
+		fmt.Fprintf(&content, "\"%s\"\n", path.Join(prefix, gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[formula]))
+		fmt.Fprintf(&content, "\"%s\" 5 \"gdk-pixbuf\" \"test loader\" \"LGPL\"\n", formula)
+		content.WriteString("\"image/test\" \"\"\n")
+		content.WriteString("\"test\" \"\"\n")
+		content.WriteString("\"abc\" \"\" 100\n\n")
+	}
+	return content.String()
+}
+
+func TestClassifyAllowsControlledGdkPixbufLoaderCacheWriters(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		writer             string
+		includeContributor bool
+		kind               string
+	}{
+		{name: "gdk-pixbuf creates cache", writer: gdkPixbufFormula, kind: "created"},
+		{name: "librsvg underscore loader refreshes cache", writer: gdkPixbufTestLibrsvg, includeContributor: true, kind: "modified"},
+		{name: "verified future contributor refreshes cache", writer: gdkPixbufTestWebP, includeContributor: true, kind: "modified"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newGdkPixbufCacheFixture(t, tc.writer, tc.includeContributor, nil)
+			changes := []Change{{Path: gdkPixbufLoadersCachePath, Kind: tc.kind}}
+			if err := classify(fixture.prefix, fixture.node, fixture.before, fixture.after, changes, fixture.options()); err != nil {
+				t.Fatal(err)
+			}
+			if changes[0].Classification != "gdk-pixbuf-loader-cache" {
+				t.Fatalf("classification=%q", changes[0].Classification)
+			}
+		})
+	}
+}
+
+func TestClassifyRejectsUncontrolledGdkPixbufLoaderCacheWriters(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		writer string
+		kind   string
+	}{
+		{name: "unrelated formula creation", writer: "hello", kind: "created"},
+		{name: "gdk-pixbuf modification", writer: gdkPixbufFormula, kind: "modified"},
+		{name: "librsvg creation", writer: gdkPixbufTestLibrsvg, kind: "created"},
+		{name: "librsvg removal", writer: gdkPixbufTestLibrsvg, kind: "removed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixtureWriter := tc.writer
+			if fixtureWriter != gdkPixbufFormula && fixtureWriter != gdkPixbufTestLibrsvg {
+				fixtureWriter = gdkPixbufFormula
+			}
+			fixture := newGdkPixbufCacheFixture(t, fixtureWriter, fixtureWriter == gdkPixbufTestLibrsvg, nil)
+			fixture.node.Name = tc.writer
+			fixture.node.PkgVersion = gdkPixbufTestVersions[fixtureWriter]
+			changes := []Change{{Path: gdkPixbufLoadersCachePath, Kind: tc.kind}}
+			if tc.kind == "removed" {
+				fixture.after = maps.Clone(fixture.after)
+				delete(fixture.after, gdkPixbufLoadersCachePath)
+			}
+			if err := classify(fixture.prefix, fixture.node, fixture.before, fixture.after, changes, classifyOptions{
+				optNames:    map[string]struct{}{tc.writer: {}},
+				closureKegs: fixture.closureKegs,
+			}); err == nil {
+				t.Fatal("uncontrolled loader-cache mutation accepted")
+			}
+		})
+	}
+}
+
+func TestGdkPixbufLoaderBasenameValidation(t *testing.T) {
+	for _, name := range []string{"libpixbufloader-png.so", "libpixbufloader_svg.so", "libpixbufloader-webp_2.so"} {
+		if !isGdkPixbufLoaderBasename(name) {
+			t.Errorf("valid loader basename %q rejected", name)
+		}
+	}
+	for _, name := range []string{"libpixbufloader.so", "libpixbufloader-.so", "libpixbufloader_.so", "libpixbufloader.svg.so", "libpixbufloader-../evil.so", "other-svg.so"} {
+		if isGdkPixbufLoaderBasename(name) {
+			t.Errorf("unsafe loader basename %q accepted", name)
+		}
+	}
+}
+
+func TestGdkPixbufLoaderCacheRejectsUnverifiedContributorCapabilities(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*gdkPixbufCacheFixture)
+	}{
+		{name: "missing gdk dependency", mutate: func(fixture *gdkPixbufCacheFixture) { fixture.node.Dependencies = nil }},
+		{name: "hardlink inventory entry", mutate: func(fixture *gdkPixbufCacheFixture) { fixture.verified.Inventory[0].Type = bottle.EntryHardlink }},
+		{name: "non-loader inventory path", mutate: func(fixture *gdkPixbufCacheFixture) { fixture.verified.Inventory[0].KegPath = "lib/libother.so" }},
+		{name: "mismatched verified bottle", mutate: func(fixture *gdkPixbufCacheFixture) { fixture.verified.Name = "other" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestWebP, true, nil)
+			tc.mutate(&fixture)
+			changes := []Change{{Path: gdkPixbufLoadersCachePath, Kind: "modified"}}
+			if err := classify(fixture.prefix, fixture.node, fixture.before, fixture.after, changes, fixture.options()); err == nil {
+				t.Fatal("unverified loader contributor was accepted")
+			}
+		})
+	}
+}
+
+func TestGdkPixbufLoaderCacheRequiresExactGlobalModuleSet(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufFormula, false, nil)
+	base := "libpixbufloader-extra.so"
+	targetRel := path.Join("Cellar", gdkPixbufFormula, gdkPixbufTestVersions[gdkPixbufFormula], gdkPixbufLoadersDirectoryPath, base)
+	moduleRel := path.Join(gdkPixbufLoadersDirectoryPath, base)
+	fixture.after[targetRel] = fileState{Type: "regular", Mode: 0o444}
+	fixture.after[moduleRel] = fileState{Type: "symlink", Link: path.Join("../../../../Cellar", gdkPixbufFormula, gdkPixbufTestVersions[gdkPixbufFormula], gdkPixbufLoadersDirectoryPath, base)}
+	state := fixture.after[gdkPixbufLoadersCachePath]
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "created", fixture.before, state, fixture.after, fixture.options()); err == nil {
+		t.Fatal("cache omitting an installed global loader symlink was accepted")
+	}
+}
+
+func TestClassifyRejectsLoaderAdditionWithoutCacheRefresh(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestLibrsvg, true, nil)
+	changes := []Change{{Path: path.Join(gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[gdkPixbufTestLibrsvg]), Kind: "created"}}
+	if err := classify(fixture.prefix, fixture.node, fixture.before, fixture.after, changes, fixture.options()); err == nil {
+		t.Fatal("loader addition without cache refresh was accepted")
+	}
+}
+
+func TestClassifyRejectsLoaderCacheTypeReplacement(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestLibrsvg, true, nil)
+	fixture.after[gdkPixbufLoadersCachePath] = fileState{Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "/etc/shadow"}
+	changes := []Change{
+		{Path: path.Join(gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[gdkPixbufTestLibrsvg]), Kind: "created"},
+		{Path: gdkPixbufLoadersCachePath, Kind: "modified"},
+	}
+	if err := classify(fixture.prefix, fixture.node, fixture.before, fixture.after, changes, fixture.options()); err == nil {
+		t.Fatal("loader cache type replacement was accepted")
+	}
+}
+
+func TestGdkPixbufLoaderCacheRejectsRewrittenExistingBlock(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestLibrsvg, true, func(_ string, content string) string {
+		return strings.Replace(content, `"gdk-pixbuf" 5 "gdk-pixbuf" "test loader" "LGPL"`, `"gdk-pixbuf" 5 "gdk-pixbuf" "rewritten loader" "LGPL"`, 1)
+	})
+	state := fixture.after[gdkPixbufLoadersCachePath]
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "modified", fixture.before, state, fixture.after, fixture.options()); err == nil {
+		t.Fatal("rewritten pre-existing loader block was accepted")
+	}
+}
+
+func TestGdkPixbufLoaderCacheRejectsPreviousModuleRemoval(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestLibrsvg, true, nil)
+	gdkModule := filepath.Join(fixture.prefix, filepath.FromSlash(path.Join(gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[gdkPixbufFormula])))
+	if err := os.Remove(gdkModule); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(fixture.prefix, filepath.FromSlash(gdkPixbufLoadersCachePath))
+	if err := os.WriteFile(cachePath, []byte(gdkPixbufCacheContent(fixture.prefix, []string{gdkPixbufTestLibrsvg})), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after, err := snapshot(fixture.prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheState := after[gdkPixbufLoadersCachePath]
+	cacheState.UID, cacheState.GID, cacheState.OwnershipKnown = gdkPixbufTestRuntimeUID, gdkPixbufTestRuntimeGID, true
+	after[gdkPixbufLoadersCachePath] = cacheState
+	fixture.after = after
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "modified", fixture.before, cacheState, fixture.after, fixture.options()); err == nil {
+		t.Fatal("refresh removed a previously registered loader")
+	}
+}
+
+func TestGdkPixbufLoaderCacheRequiresNewVerifiedRegistration(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestWebP, true, nil)
+	fixture.before = maps.Clone(fixture.after)
+	prior := fixture.before[gdkPixbufLoadersCachePath]
+	prior.Digest = strings.Repeat("d", sha256.Size*2)
+	fixture.before[gdkPixbufLoadersCachePath] = prior
+	state := fixture.after[gdkPixbufLoadersCachePath]
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "modified", fixture.before, state, fixture.after, fixture.options()); err == nil {
+		t.Fatal("modifier registered no new loader")
+	}
+}
+
+func TestGdkPixbufLoaderCacheRequiresNewLoaderFromVerifiedInventory(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestWebP, true, nil)
+	fixture.verified.Inventory[0].KegPath = path.Join(gdkPixbufLoadersDirectoryPath, "libpixbufloader-other.so")
+	state := fixture.after[gdkPixbufLoadersCachePath]
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "modified", fixture.before, state, fixture.after, fixture.options()); err == nil {
+		t.Fatal("new loader absent from verified bottle inventory was accepted")
+	}
+}
+
+func TestGdkPixbufLoaderCacheRejectsUnsafeMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*fileState)
+	}{
+		{name: "not regular", mutate: func(state *fileState) { state.Type = "symlink"; state.Mode = os.ModeSymlink | 0o777 }},
+		{name: "empty", mutate: func(state *fileState) { state.Size = 0 }},
+		{name: "oversized", mutate: func(state *fileState) { state.Size = gdkPixbufLoadersCacheMaxBytes + 1 }},
+		{name: "executable", mutate: func(state *fileState) { state.Mode |= 0o100 }},
+		{name: "group writable", mutate: func(state *fileState) { state.Mode |= 0o020 }},
+		{name: "other writable", mutate: func(state *fileState) { state.Mode |= 0o002 }},
+		{name: "setuid", mutate: func(state *fileState) { state.Mode |= os.ModeSetuid }},
+		{name: "hard linked", mutate: func(state *fileState) { state.Links = 2 }},
+		{name: "unknown owner", mutate: func(state *fileState) { state.OwnershipKnown = false }},
+		{name: "wrong uid", mutate: func(state *fileState) { state.UID = 0 }},
+		{name: "wrong gid", mutate: func(state *fileState) { state.GID = 0 }},
+		{name: "missing digest", mutate: func(state *fileState) { state.Digest = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newGdkPixbufCacheFixture(t, gdkPixbufFormula, false, nil)
+			state := fixture.after[gdkPixbufLoadersCachePath]
+			tc.mutate(&state)
+			if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "created", fixture.before, state, fixture.after, fixture.options()); err == nil {
+				t.Fatal("unsafe loader-cache metadata accepted")
+			}
+		})
+	}
+}
+
+func TestLibrsvgLoaderCacheRefreshRejectsUnsafePriorMetadata(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestLibrsvg, true, nil)
+	prior := fixture.before[gdkPixbufLoadersCachePath]
+	prior.Mode |= 0o020
+	fixture.before[gdkPixbufLoadersCachePath] = prior
+	state := fixture.after[gdkPixbufLoadersCachePath]
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "modified", fixture.before, state, fixture.after, fixture.options()); err == nil {
+		t.Fatal("librsvg refreshed an unsafe pre-existing cache")
+	}
+}
+
+func TestGdkPixbufLoaderCacheRejectsUnsafeContent(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		transform func(string, string) string
+	}{
+		{
+			name: "materializer path",
+			transform: func(_ string, content string) string {
+				return strings.Replace(content, "#\n", "#\n# /run/dalec-homebrew/input/resolution.json\n", 1)
+			},
+		},
+		{
+			name: "nul byte",
+			transform: func(_ string, content string) string {
+				return content + "\x00"
+			},
+		},
+		{
+			name: "control byte",
+			transform: func(_ string, content string) string {
+				return strings.Replace(content, "Automatically generated", "Automatically\tgenerated", 1)
+			},
+		},
+		{
+			name: "invalid utf8",
+			transform: func(_ string, content string) string {
+				return content + string([]byte{0xff})
+			},
+		},
+		{
+			name: "path traversal",
+			transform: func(prefix, content string) string {
+				loaderDir := path.Join(filepath.ToSlash(prefix), gdkPixbufLoadersDirectoryPath)
+				return strings.Replace(content, loaderDir, loaderDir+"/../loaders", 1)
+			},
+		},
+		{
+			name: "outside prefix",
+			transform: func(prefix, content string) string {
+				module := path.Join(filepath.ToSlash(prefix), gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[gdkPixbufFormula])
+				return strings.Replace(content, module, "/tmp/libpixbufloader-png.so", 1)
+			},
+		},
+		{
+			name: "direct keg reference",
+			transform: func(prefix, content string) string {
+				module := path.Join(filepath.ToSlash(prefix), gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[gdkPixbufFormula])
+				kegModule := path.Join(filepath.ToSlash(prefix), "Cellar", gdkPixbufFormula, gdkPixbufTestVersions[gdkPixbufFormula], "lib", "gdk-pixbuf-2.0", "2.10.0", "loaders", gdkPixbufTestModules[gdkPixbufFormula])
+				return strings.Replace(content, module, kegModule, 1)
+			},
+		},
+		{
+			name: "incomplete block",
+			transform: func(_ string, content string) string {
+				return strings.Replace(content, "\"gdk-pixbuf\" 5 \"gdk-pixbuf\" \"test loader\" \"LGPL\"\n", "", 1)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newGdkPixbufCacheFixture(t, gdkPixbufFormula, false, tc.transform)
+			state := fixture.after[gdkPixbufLoadersCachePath]
+			if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "created", fixture.before, state, fixture.after, fixture.options()); err == nil {
+				t.Fatal("unsafe loader-cache content accepted")
+			}
+		})
+	}
+}
+
+func TestGdkPixbufLoaderCacheRejectsTargetsOutsideResolvedClosure(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestLibrsvg, true, nil)
+	delete(fixture.closureKegs, path.Join("Cellar", gdkPixbufTestLibrsvg, gdkPixbufTestVersions[gdkPixbufTestLibrsvg]))
+	state := fixture.after[gdkPixbufLoadersCachePath]
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "modified", fixture.before, state, fixture.after, fixture.options()); err == nil {
+		t.Fatal("loader target outside the resolved closure was accepted")
+	}
+}
+
+func TestGdkPixbufLoaderCacheRejectsArbitraryFileInsideClosureKeg(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufFormula, false, nil)
+	moduleRel := path.Join(gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[gdkPixbufFormula])
+	arbitraryRel := path.Join("Cellar", gdkPixbufFormula, gdkPixbufTestVersions[gdkPixbufFormula], "lib", "libarbitrary.so")
+	fixture.after[arbitraryRel] = fileState{Type: "regular", Mode: 0o444}
+	moduleState := fixture.after[moduleRel]
+	moduleState.Link = path.Join("../../../../Cellar", gdkPixbufFormula, gdkPixbufTestVersions[gdkPixbufFormula], "lib", "libarbitrary.so")
+	fixture.after[moduleRel] = moduleState
+	state := fixture.after[gdkPixbufLoadersCachePath]
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "created", fixture.before, state, fixture.after, fixture.options()); err == nil {
+		t.Fatal("arbitrary closure-keg file was accepted as a loader module")
+	}
+}
+
 func TestReconcileRejectsUndeclaredGlobalHardlink(t *testing.T) {
 	node := resolution.Node{Name: "hello", PkgVersion: "1"}
 	verified := bottle.Result{Name: "hello", PkgVersion: "1", KegPrefix: "hello/1", Inventory: []bottle.InventoryEntry{{Path: "hello/1/file", KegPath: "file", Type: bottle.EntryRegular, Mode: 0o644, SHA256: "sha256:" + strings.Repeat("a", 64)}}}
@@ -1553,5 +2021,254 @@ func TestReconcileGlibcStillRejectsOtherGeneratedKegPaths(t *testing.T) {
 	}
 	if err := reconcileInstalledKeg("/home/linuxbrew/.linuxbrew", node, verified, after); err == nil || !strings.Contains(err.Error(), "unattributed path") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+const (
+	sharedMimeTestUID = uint32(4242)
+	sharedMimeTestGID = uint32(4343)
+)
+
+type sharedMimeFixture struct {
+	prefix   string
+	node     resolution.Node
+	verified bottle.Result
+	before   map[string]fileState
+	after    map[string]fileState
+	options  classifyOptions
+}
+
+func newSharedMimeFixture(t *testing.T) sharedMimeFixture {
+	t.Helper()
+	prefix := t.TempDir()
+	node := resolution.Node{Name: sharedMimeInfoFormula, PkgVersion: "2.5.1"}
+	keg := filepath.Join(prefix, "Cellar", node.Name, node.PkgVersion)
+	sourceData := []byte("<mime-info/>\n")
+	source := filepath.Join(keg, filepath.FromSlash(sharedMimeVerifiedSourcePath))
+	writeSharedMimeTestFile(t, source, sourceData, 0o644)
+
+	for _, directory := range []string{"etc", "var", "opt", "share/mime/packages"} {
+		if err := os.MkdirAll(filepath.Join(prefix, filepath.FromSlash(directory)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(path.Join("../Cellar", node.Name, node.PkgVersion), filepath.Join(prefix, "opt", node.Name)); err != nil {
+		t.Fatal(err)
+	}
+	globalSource := filepath.Join(prefix, filepath.FromSlash(sharedMimeVerifiedSourcePath))
+	linkTarget, err := filepath.Rel(filepath.Dir(globalSource), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(linkTarget, globalSource); err != nil {
+		t.Fatal(err)
+	}
+	for name := range sharedMimeFixedOutputs {
+		data := []byte(name + "\n")
+		if name == "icons" {
+			data = nil
+		}
+		writeSharedMimeTestFile(t, filepath.Join(prefix, filepath.FromSlash(path.Join(sharedMimeDatabaseRoot, name))), data, 0o644)
+	}
+	for mimeType := range sharedMimeGeneratedTypes {
+		data := []byte("<?xml version=\"1.0\"?><mime-type xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\" type=\"" + mimeType + "/x-test\"/>\n")
+		writeSharedMimeTestFile(t, filepath.Join(prefix, filepath.FromSlash(path.Join(sharedMimeDatabaseRoot, mimeType, "x-test.xml"))), data, 0o644)
+	}
+
+	after := snapshotSharedMimeFixture(t, prefix)
+	verified := bottle.Result{
+		Name:       node.Name,
+		PkgVersion: node.PkgVersion,
+		KegPrefix:  path.Join(node.Name, node.PkgVersion),
+		Inventory: []bottle.InventoryEntry{{
+			Path:    path.Join(node.Name, node.PkgVersion, sharedMimeVerifiedSourcePath),
+			KegPath: sharedMimeVerifiedSourcePath,
+			Type:    bottle.EntryRegular,
+			Mode:    0o644,
+			Size:    int64(len(sourceData)),
+			SHA256:  sha256Digest(sourceData),
+		}},
+	}
+	options := classifyOptions{
+		optNames:    map[string]struct{}{node.Name: {}},
+		closureKegs: map[string]struct{}{path.Join("Cellar", node.Name, node.PkgVersion): {}},
+		verified:    verified,
+		runtimeUID:  sharedMimeTestUID,
+		runtimeGID:  sharedMimeTestGID,
+	}
+	return sharedMimeFixture{prefix: prefix, node: node, verified: verified, before: map[string]fileState{}, after: after, options: options}
+}
+
+func writeSharedMimeTestFile(t *testing.T, filename string, data []byte, mode os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filename, data, mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filename, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func snapshotSharedMimeFixture(t *testing.T, prefix string) map[string]fileState {
+	t.Helper()
+	after, err := snapshot(prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rel, state := range after {
+		if snapshotPathWithin(rel, sharedMimeDatabaseRoot) {
+			state.UID = sharedMimeTestUID
+			state.GID = sharedMimeTestGID
+			state.OwnershipKnown = true
+			after[rel] = state
+		}
+	}
+	return after
+}
+
+func TestClassifyAllowsVerifiedSharedMimeDatabaseGeneration(t *testing.T) {
+	fixture := newSharedMimeFixture(t)
+	changes := diff(fixture.before, fixture.after)
+	if err := classify(fixture.prefix, fixture.node, fixture.before, fixture.after, changes, fixture.options); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, change := range changes {
+		if change.Path == path.Join(sharedMimeDatabaseRoot, "XMLnamespaces") {
+			found = true
+			if change.Classification != "shared-mime-database" {
+				t.Fatalf("classification=%q", change.Classification)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("generated shared MIME output was absent from install delta")
+	}
+}
+
+func TestSharedMimeDatabaseRejectsMissingOrUnsafeGeneratedData(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*sharedMimeFixture)
+	}{
+		{name: "missing fixed output", mutate: func(f *sharedMimeFixture) {
+			delete(f.after, path.Join(sharedMimeDatabaseRoot, "XMLnamespaces"))
+		}},
+		{name: "unexpected path", mutate: func(f *sharedMimeFixture) {
+			f.after[path.Join(sharedMimeDatabaseRoot, "nested", "bad", "file.xml")] = fileState{Type: "regular", Mode: 0o644, Size: 1, Digest: strings.Repeat("a", 64), Links: 1, UID: sharedMimeTestUID, GID: sharedMimeTestGID, OwnershipKnown: true}
+		}},
+		{name: "writable output", mutate: func(f *sharedMimeFixture) {
+			p := path.Join(sharedMimeDatabaseRoot, "aliases")
+			state := f.after[p]
+			state.Mode = 0o666
+			f.after[p] = state
+		}},
+		{name: "wrong owner", mutate: func(f *sharedMimeFixture) {
+			p := path.Join(sharedMimeDatabaseRoot, "aliases")
+			state := f.after[p]
+			state.UID++
+			f.after[p] = state
+		}},
+		{name: "hardlink", mutate: func(f *sharedMimeFixture) {
+			p := path.Join(sharedMimeDatabaseRoot, "aliases")
+			state := f.after[p]
+			state.Links = 2
+			f.after[p] = state
+		}},
+		{name: "pre-existing database", mutate: func(f *sharedMimeFixture) {
+			f.before[sharedMimeDatabaseRoot] = f.after[sharedMimeDatabaseRoot]
+		}},
+		{name: "mismatched verified bottle", mutate: func(f *sharedMimeFixture) {
+			f.options.verified.Name = "other"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newSharedMimeFixture(t)
+			tc.mutate(&fixture)
+			if _, err := validateSharedMimeInfoDatabase(fixture.prefix, fixture.node, fixture.before, fixture.after, fixture.options); err == nil {
+				t.Fatal("unsafe shared MIME database accepted")
+			}
+		})
+	}
+}
+
+func TestSharedMimeDatabaseRejectsMalformedGeneratedXML(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{name: "malformed", data: "<mime-type>"},
+		{name: "wrong root", data: `<other xmlns="http://www.freedesktop.org/standards/shared-mime-info" type="application/x-test"/>`},
+		{name: "wrong namespace", data: `<mime-type xmlns="https://example.invalid" type="application/x-test"/>`},
+		{name: "wrong type", data: `<mime-type xmlns="http://www.freedesktop.org/standards/shared-mime-info" type="text/other"/>`},
+		{name: "unicode folded type", data: `<mime-type xmlns="http://www.freedesktop.org/standards/shared-mime-info" type="application/x-teſt"/>`},
+		{name: "leading character data", data: `junk<mime-type xmlns="http://www.freedesktop.org/standards/shared-mime-info" type="application/x-test"/>`},
+		{name: "trailing character data", data: `<mime-type xmlns="http://www.freedesktop.org/standards/shared-mime-info" type="application/x-test"/>junk`},
+		{name: "non XML whitespace", data: "\u00a0<mime-type xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\" type=\"application/x-test\"/>"},
+		{name: "duplicate type", data: `<mime-type xmlns="http://www.freedesktop.org/standards/shared-mime-info" type="" type="application/x-test"/>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newSharedMimeFixture(t)
+			filename := filepath.Join(fixture.prefix, filepath.FromSlash(path.Join(sharedMimeDatabaseRoot, "application", "x-test.xml")))
+			writeSharedMimeTestFile(t, filename, []byte(tc.data), 0o644)
+			fixture.after = snapshotSharedMimeFixture(t, fixture.prefix)
+			if _, err := validateSharedMimeInfoDatabase(fixture.prefix, fixture.node, fixture.before, fixture.after, fixture.options); err == nil {
+				t.Fatal("invalid generated shared MIME XML accepted")
+			}
+		})
+	}
+}
+
+func TestClassifyRejectsUnverifiedGeneratedSharedMimeFile(t *testing.T) {
+	node := resolution.Node{Name: "hello", PkgVersion: "1"}
+	after := map[string]fileState{
+		".":                              {Type: "directory"},
+		"Cellar":                         {Type: "directory"},
+		"Cellar/hello":                   {Type: "directory"},
+		"Cellar/hello/1":                 {Type: "directory"},
+		"etc":                            {Type: "directory"},
+		"var":                            {Type: "directory"},
+		"opt":                            {Type: "directory"},
+		"opt/hello":                      {Type: "symlink", Link: "../Cellar/hello/1"},
+		"share":                          {Type: "directory"},
+		sharedMimeDatabaseRoot:           {Type: "directory"},
+		sharedMimeDatabaseRoot + "/evil": {Type: "regular", Mode: 0o644, Size: 1, Digest: strings.Repeat("a", 64), Links: 1},
+	}
+	if err := classify("/prefix", node, nil, after, diff(nil, after)); err == nil {
+		t.Fatal("unverified generated shared MIME file accepted")
+	}
+}
+
+func TestClassifyRejectsLaterSharedMimePackageCopyWithoutRefresh(t *testing.T) {
+	node := resolution.Node{Name: "mime-extension", PkgVersion: "1"}
+	rel := "share/mime/packages/extension.xml"
+	digest := strings.Repeat("a", 64)
+	keg := path.Join("Cellar", node.Name, node.PkgVersion)
+	after := map[string]fileState{
+		".":                         {Type: "directory"},
+		"Cellar":                    {Type: "directory"},
+		"Cellar/" + node.Name:       {Type: "directory"},
+		keg:                         {Type: "directory"},
+		path.Join(keg, rel):         {Type: "regular", Mode: 0o644, Size: 4, Digest: digest},
+		"etc":                       {Type: "directory"},
+		"var":                       {Type: "directory"},
+		"opt":                       {Type: "directory"},
+		path.Join("opt", node.Name): {Type: "symlink", Link: path.Join("../Cellar", node.Name, node.PkgVersion)},
+		"share":                     {Type: "directory"},
+		sharedMimeDatabaseRoot:      {Type: "directory"},
+		rel:                         {Type: "regular", Mode: 0o644, Size: 4, Digest: digest},
+	}
+	verified := bottle.Result{
+		Name:       node.Name,
+		PkgVersion: node.PkgVersion,
+		KegPrefix:  path.Join(node.Name, node.PkgVersion),
+		Inventory:  []bottle.InventoryEntry{{KegPath: rel, Type: bottle.EntryRegular, Mode: 0o644, Size: 4, SHA256: "sha256:" + digest}},
+	}
+	options := classifyOptions{optNames: map[string]struct{}{node.Name: {}}, verified: verified}
+	if err := classify("/prefix", node, nil, after, diff(nil, after), options); err == nil {
+		t.Fatal("later shared MIME package copy without database refresh was accepted")
 	}
 }
