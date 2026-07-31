@@ -18,26 +18,12 @@ A minimal Dalec spec looks like this:
 ```yaml
 # syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
 
-name: hello-runtime
-description: GNU hello from a verified Homebrew bottle
-website: https://www.gnu.org/software/hello/
-version: 0.1.0
-revision: 1
-license: Apache-2.0
-
 dependencies:
   runtime:
     hello: {}
 
 image:
   entrypoint: /home/linuxbrew/.linuxbrew/bin/hello
-
-tests:
-  - name: hello
-    steps:
-      - command: hello
-        stdout:
-          contains: ["Hello, world!"]
 ```
 
 Replace `<frontend-digest>` with the immutable digest supplied by a trusted release or local component build, then build it:
@@ -109,14 +95,7 @@ See the files under [`../examples/`](../examples/) for command output, filesyste
 
 ## Supported Dalec contract
 
-A spec must provide these package metadata fields:
-
-- `name`
-- `description`
-- `website`
-- `version`
-- `revision`
-- `license`
+Package metadata fields such as `name`, `description`, `website`, `version`, `revision`, and `license` may be supplied, but they are optional for this dependency-only runtime frontend.
 
 V1 accepts global and selected-target `dependencies.runtime`, the image fields listed above, and tests without mounts.
 

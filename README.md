@@ -35,24 +35,12 @@ The checked-in examples are templates; this repository does not currently publis
 Following [Dalec's container-only build pattern](https://project-dalec.github.io/dalec/container-only-builds/), you can send the build definition over stdin instead of creating a spec file. This form requires `jq`:
 
 ```console
-FRONTEND='ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>'
-
-jq -nc '{
-  name: "hello-runtime",
-  description: "GNU hello from a verified Homebrew bottle",
-  website: "https://www.gnu.org/software/hello/",
-  version: "0.1.0",
-  revision: "1",
-  license: "Apache-2.0",
-  dependencies: {runtime: {hello: {}}},
-  image: {entrypoint: "/home/linuxbrew/.linuxbrew/bin/hello"}
-}' |
-  docker buildx build \
-    --build-arg "BUILDKIT_SYNTAX=$FRONTEND" \
-    --platform linux/amd64 \
-    --tag hello-runtime:inline \
-    --load \
-    -
+docker buildx build \
+  --build-arg "BUILDKIT_SYNTAX=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>" \
+  --platform linux/amd64 \
+  --tag hello-runtime:inline \
+  --load \
+  - <<<"$(jq -c '.dependencies.runtime = {"hello": {}} | .image.entrypoint = "/home/linuxbrew/.linuxbrew/bin/hello"' <<<"{}")"
 
 docker run --rm hello-runtime:inline
 ```
@@ -63,13 +51,6 @@ Save this as `hello.yaml`, replacing `<frontend-digest>` with the same immutable
 
 ```yaml
 # syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
-
-name: hello-runtime
-description: GNU hello from a verified Homebrew bottle
-website: https://www.gnu.org/software/hello/
-version: 0.1.0
-revision: 1
-license: Apache-2.0
 
 dependencies:
   runtime:

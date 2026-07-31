@@ -48,6 +48,24 @@ func TestListShorthandAndOrder(t *testing.T) {
 	}
 }
 
+func TestBareDependencyOnlySpec(t *testing.T) {
+	data := `{"dependencies":{"runtime":{"hello":{}}},"image":{"entrypoint":"/home/linuxbrew/.linuxbrew/bin/hello"}}`
+	order, err := RuntimeDependencyOrder([]byte(data), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel, err := Validate(load(t, data), "", "amd64", order)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sel.Roots) != 1 || sel.Roots[0].Name != "hello" {
+		t.Fatalf("roots=%v", sel.Roots)
+	}
+	if sel.Image == nil || sel.Image.Entrypoint != "/home/linuxbrew/.linuxbrew/bin/hello" {
+		t.Fatalf("image=%+v", sel.Image)
+	}
+}
+
 func TestTargetOverrideAndArchFiltering(t *testing.T) {
 	data := baseSpec + `
 targets:

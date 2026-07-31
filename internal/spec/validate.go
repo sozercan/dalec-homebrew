@@ -32,15 +32,9 @@ func Validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string) 
 	if _, ok := supportedArches[arch]; !ok {
 		return nil, fmt.Errorf("unsupported target architecture %q; V1 supports amd64 and arm64", arch)
 	}
+	// This frontend materializes runtime dependencies directly and does not build
+	// a package from the Dalec spec, so package metadata is optional.
 	var errs []error
-	for field, value := range map[string]string{
-		"name": s.Name, "description": s.Description, "website": s.Website,
-		"version": s.Version, "revision": s.Revision, "license": s.License,
-	} {
-		if strings.TrimSpace(value) == "" {
-			errs = append(errs, fmt.Errorf("required package metadata field %s is empty", field))
-		}
-	}
 	if len(s.Sources) > 0 {
 		errs = append(errs, errors.New("sources are not supported"))
 	}
