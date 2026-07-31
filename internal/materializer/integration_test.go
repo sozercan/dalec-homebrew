@@ -20,11 +20,31 @@ import (
 type installRunner struct {
 	t                 *testing.T
 	prefix, sourceDir string
+	epoch             time.Time
 	called            bool
 }
 
 func (r *installRunner) Run(_ context.Context, c Command) error {
 	r.called = true
+	stagedFormula := filepath.Join(r.prefix, filepath.FromSlash(coreTapFormulaRoot), "h", "hello.rb")
+	data, err := os.ReadFile(stagedFormula)
+	if err != nil {
+		r.t.Fatalf("verified Formula was not staged before pour: %v", err)
+	}
+	if string(data) != "class Hello < Formula\nend\n" {
+		r.t.Fatalf("staged Formula changed: %q", data)
+	}
+	info, err := os.Stat(stagedFormula)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o444 || !info.ModTime().Equal(r.epoch) {
+		r.t.Fatalf("staged Formula metadata = mode %o mtime %s", info.Mode().Perm(), info.ModTime())
+	}
+	wantBrew := filepath.Join(r.prefix, filepath.FromSlash(protectedHomebrewBrew))
+	if c.Path != wantBrew {
+		r.t.Fatalf("brew path = %q, want protected path %q", c.Path, wantBrew)
+	}
 	if len(c.Args) != 3 || strings.Join(c.Args, " ") != "ruby "+pourScriptPath+" "+filepath.Join(filepath.Dir(c.Args[2]), "hello--1.x86_64_linux.bottle.tar.gz") {
 		r.t.Fatalf("args=%v", c.Args)
 	}
@@ -69,18 +89,12 @@ func (r *installRunner) Run(_ context.Context, c Command) error {
 }
 
 func TestInstallVerifiesBeforeOfflineBottleCommand(t *testing.T) {
-	prefix := filepath.Join(t.TempDir(), "prefix")
+	prefix := formulaTapFixture(t)
 	bottles := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(prefix, "Homebrew/bin"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, dir := range []string{"bin", "etc", "var"} {
+	for _, dir := range []string{"bin", "etc", "var", "Cellar", "opt"} {
 		if err := os.MkdirAll(filepath.Join(prefix, dir), 0o755); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := os.WriteFile(filepath.Join(prefix, "Homebrew/bin/brew"), []byte("brew"), 0o555); err != nil {
-		t.Fatal(err)
 	}
 	if err := os.Symlink("../Homebrew/bin/brew", filepath.Join(prefix, "bin/brew")); err != nil {
 		t.Fatal(err)
@@ -103,13 +117,25 @@ func TestInstallVerifiesBeforeOfflineBottleCommand(t *testing.T) {
 	if _, err := policy.BindRuntimePolicy(record); err != nil {
 		t.Fatal(err)
 	}
-	runner := &installRunner{t: t, prefix: prefix, sourceDir: bottles}
-	evidence, err := Install(context.Background(), Config{Record: record, BottlesDir: bottles, Prefix: prefix, Runner: runner})
+	runner := &installRunner{t: t, prefix: prefix, sourceDir: bottles, epoch: tm}
+	tapOptions := formulaTapTestOptions()
+	evidence, err := Install(context.Background(), Config{
+		Record: record, BottlesDir: bottles, Prefix: prefix, Runner: runner,
+		formulaTapUID: tapOptions.ownerUID, formulaTapGID: tapOptions.ownerGID,
+		formulaTapRuntimeUID: tapOptions.runtimeUID, formulaTapRuntimeGID: tapOptions.runtimeGID,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !runner.called || len(evidence.VerifiedBottles) != 1 || len(evidence.InstallDeltas) != 1 {
+	if !runner.called || len(evidence.VerifiedBottles) != 1 || len(evidence.StagedFormulae) != 1 || len(evidence.InstallDeltas) != 1 {
 		t.Fatalf("runner=%v evidence=%+v", runner.called, evidence)
+	}
+	if evidence.VerifiedBottles[0].FormulaSource != nil {
+		t.Fatal("transient Formula source was retained in serialized evidence")
+	}
+	staged := evidence.StagedFormulae[0]
+	if staged.Formula != "hello" || staged.TapPath != "Formula/h/hello.rb" || staged.BottlePath != "hello/1/.brew/hello.rb" {
+		t.Fatalf("staged Formula evidence = %#v", staged)
 	}
 }
 

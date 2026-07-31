@@ -28,5 +28,24 @@ installer = FormulaInstaller.new(
   ignore_deps: true,
 )
 installer.install
+
+# FormulaInstaller#finish updates Homebrew's optional linkage cache. Actual
+# dynamic-library inspection is complete before check_formula_deps, but the
+# latter also classifies declared dependencies by loading Formula objects. The
+# core tap is intentionally empty in the offline materializer, so retain the
+# real linkage scan and skip only that metadata classification when a Formula
+# is unavailable. The Go materializer still verifies the complete installed
+# shared-library closure and propagates every other Homebrew failure.
+module DalecHomebrewOfflineLinkage
+  private
+
+  def check_formula_deps
+    super
+  rescue FormulaUnavailableError
+    nil
+  end
+end
+LinkageChecker.prepend(DalecHomebrewOfflineLinkage)
+
 installer.finish
 exit 1 if Homebrew.failed?

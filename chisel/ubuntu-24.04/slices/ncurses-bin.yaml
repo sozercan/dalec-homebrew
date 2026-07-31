@@ -1,0 +1,26 @@
+package: ncurses-bin
+
+essential:
+  - ncurses-bin_copyright
+
+slices:
+  bins:
+    essential:
+      - libc6_libs
+      - libtinfo6_libs
+      - ncurses-base_terminfo
+    contents:
+      /usr/bin/captoinfo:
+      /usr/bin/clear:
+      /usr/bin/infocmp:
+      /usr/bin/infotocap:
+      /usr/bin/reset:
+      /usr/bin/tabs:
+      /usr/bin/tic:
+      /usr/bin/toe:
+      /usr/bin/tput:
+      /usr/bin/tset:
+
+  copyright:
+    contents:
+      /usr/share/doc/ncurses-bin/copyright:

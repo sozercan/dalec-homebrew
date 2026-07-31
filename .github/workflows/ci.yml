@@ -20,17 +20,11 @@ jobs:
           go-version: 1.25.9
           cache: true
       - run: go mod download
-      - run: go test ./...
-      - run: go vet ./...
-      - run: go test -race ./internal/homebrew/metadata ./internal/homebrew/oci ./internal/bottle ./internal/resolution ./internal/runtimefs ./internal/testrunner
-      - name: Cross-compile release binaries
-        run: |
-          set -eux
-          for arch in amd64 arm64; do
-            for cmd in frontend materializer record-verify release-verify test-runner resolve; do
-              CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -o /tmp/dalec-homebrew-${cmd}-${arch} ./cmd/${cmd}
-            done
-          done
+      - run: go mod tidy
+      - run: git diff --exit-code -- go.mod go.sum
+      - run: ./scripts/check.sh
+      - run: make build
+      - run: git diff --check
 
   dockerfile:
     runs-on: ubuntu-24.04
@@ -39,11 +33,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: docker/setup-buildx-action@v3
-      - name: Build static helper stage
+      - run: docker buildx bake --print
+      - name: Build gateway frontend image
         uses: docker/build-push-action@v6
         with:
           context: .
-          target: go-build
+          target: frontend
           platforms: linux/amd64
           push: false
           cache-from: type=gha

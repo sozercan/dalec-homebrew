@@ -59,35 +59,46 @@ func buildInventory(scan *sourceScan, record *resolution.Record, policy *normali
 	}
 }
 
-func buildPruneManifest(scan *sourceScan, record *resolution.Record, policy *normalizedPolicy, resolutionDigest string) PruneManifest {
+const homebrewRepositoryRoot = "Homebrew"
+
+type pruneSubtreeCommitment struct {
+	SchemaVersion string                        `json:"schema_version"`
+	Root          string                        `json:"root"`
+	Reason        PruneReason                   `json:"reason"`
+	EntryCount    int                           `json:"entry_count"`
+	RegularBytes  int64                         `json:"regular_bytes"`
+	Entries       []pruneSubtreeCommitmentEntry `json:"entries"`
+}
+
+type pruneSubtreeCommitmentEntry struct {
+	Path           string    `json:"path"`
+	Type           EntryType `json:"type"`
+	Mode           string    `json:"mode"`
+	Size           int64     `json:"size"`
+	ContentSHA256  string    `json:"content_sha256,omitempty"`
+	LinkTarget     string    `json:"link_target,omitempty"`
+	HardlinkTarget string    `json:"hardlink_target,omitempty"`
+}
+
+func buildPruneManifest(scan *sourceScan, record *resolution.Record, policy *normalizedPolicy, resolutionDigest string) (PruneManifest, error) {
+	subtree, compacted, err := compactHomebrewRepository(scan)
+	if err != nil {
+		return PruneManifest{}, runtimeError(CodeEvidence, homebrewRepositoryRoot, "commit pruned repository subtree: %v", err)
+	}
+
 	entries := make([]PruneEntry, 0, len(scan.pruned))
 	for _, entry := range scan.pruned {
-		item := PruneEntry{
-			Path:       entry.rel,
-			Type:       entry.typeName,
-			Mode:       modeString(entry.mode),
-			Size:       entry.size,
-			SHA256:     entry.sha256,
-			LinkTarget: entry.linkSource,
-			Reason:     entry.pruneReason,
-			Package:    entry.packageName,
+		if _, ok := compacted[entry.rel]; ok {
+			continue
 		}
-		if entry.typeName == TypeRegular {
-			item.MetadataExport = entry.metadataExport
-		}
-		if item.Reason == "" {
-			item.Reason = PruneNotAllowlisted
-		}
-		if item.Type == TypeDirectory {
-			item.Size = 0
-			item.SHA256 = ""
-		}
-		if item.MetadataExport != "" && item.SHA256 != "" {
-			item.ExportedTo = []string{ManifestFileName}
-		}
-		entries = append(entries, item)
+		entries = append(entries, buildPruneEntry(entry))
 	}
 	slices.SortFunc(entries, func(a, b PruneEntry) int { return strings.Compare(a.Path, b.Path) })
+	var subtrees []PruneSubtree
+	if subtree != nil {
+		subtrees = append(subtrees, *subtree)
+	}
+	slices.SortFunc(subtrees, func(a, b PruneSubtree) int { return strings.Compare(a.Path, b.Path) })
 	return PruneManifest{
 		SchemaVersion:       PruneSchemaVersion,
 		PolicyVersion:       record.PolicyVersion,
@@ -95,8 +106,165 @@ func buildPruneManifest(scan *sourceScan, record *resolution.Record, policy *nor
 		PruningPolicyDigest: policy.digest,
 		SourceDateEpoch:     record.SourceDateEpoch,
 		Prefix:              policy.installPrefix,
+		Subtrees:            subtrees,
 		Entries:             entries,
+	}, nil
+}
+
+func buildPruneEntry(entry *sourceEntry) PruneEntry {
+	item := PruneEntry{
+		Path:       entry.rel,
+		Type:       entry.typeName,
+		Mode:       modeString(entry.mode),
+		Size:       entry.size,
+		SHA256:     entry.sha256,
+		LinkTarget: entry.linkSource,
+		Reason:     entry.pruneReason,
+		Package:    entry.packageName,
 	}
+	if entry.typeName == TypeRegular {
+		item.MetadataExport = entry.metadataExport
+	}
+	if item.Reason == "" {
+		item.Reason = PruneNotAllowlisted
+	}
+	if item.Type == TypeDirectory {
+		item.Size = 0
+		item.SHA256 = ""
+	}
+	if item.MetadataExport != "" && item.SHA256 != "" {
+		item.ExportedTo = []string{ManifestFileName}
+	}
+	return item
+}
+
+func compactHomebrewRepository(scan *sourceScan) (*PruneSubtree, map[string]struct{}, error) {
+	root := scan.byPath[homebrewRepositoryRoot]
+	if root == nil || root.typeName != TypeDirectory || root.retain || root.pruneReason != PruneRepository {
+		return nil, nil, nil
+	}
+
+	var entries []*sourceEntry
+	for _, entry := range scan.entries {
+		if !isWithin(entry.rel, homebrewRepositoryRoot) {
+			continue
+		}
+		if entry.retain || entry.pruneReason != PruneRepository || entry.packageName != "" || entry.metadataExport != "" {
+			// This is not a uniform, attribution-free repository subtree. Preserve
+			// the existing per-file evidence instead of partially compacting it.
+			return nil, nil, nil
+		}
+		entries = append(entries, entry)
+	}
+	if len(entries) == 0 {
+		return nil, nil, nil
+	}
+
+	subtree, err := commitPrunedSubtree(homebrewRepositoryRoot, PruneRepository, entries)
+	if err != nil {
+		return nil, nil, err
+	}
+	compacted := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		compacted[entry.rel] = struct{}{}
+	}
+	return &subtree, compacted, nil
+}
+
+func commitPrunedSubtree(root string, reason PruneReason, entries []*sourceEntry) (PruneSubtree, error) {
+	if root == "" {
+		return PruneSubtree{}, fmt.Errorf("empty subtree root")
+	}
+	if len(entries) == 0 {
+		return PruneSubtree{}, fmt.Errorf("empty subtree")
+	}
+
+	commitmentEntries := make([]pruneSubtreeCommitmentEntry, 0, len(entries))
+	var regularBytes int64
+	for _, entry := range entries {
+		if entry == nil || !isWithin(entry.rel, root) {
+			return PruneSubtree{}, fmt.Errorf("entry is nil or outside root")
+		}
+		item := pruneSubtreeCommitmentEntry{
+			Path: entry.rel,
+			Type: entry.typeName,
+			Mode: pruneCommitmentModeString(entry.mode),
+			Size: entry.size,
+		}
+		switch entry.typeName {
+		case TypeDirectory:
+			item.Size = 0
+		case TypeRegular:
+			if entry.sha256 == "" {
+				return PruneSubtree{}, fmt.Errorf("regular file %q has no content digest", entry.rel)
+			}
+			item.ContentSHA256 = entry.sha256
+			regularBytes += item.Size
+		case TypeSymlink:
+			if entry.linkSource == "" {
+				return PruneSubtree{}, fmt.Errorf("symlink %q has no target", entry.rel)
+			}
+			item.Size = int64(len(entry.linkSource))
+			item.LinkTarget = entry.linkSource
+		case TypeHardlink:
+			if entry.hardlinkTo == "" {
+				return PruneSubtree{}, fmt.Errorf("hardlink %q has no target", entry.rel)
+			}
+			item.HardlinkTarget = entry.hardlinkTo
+			item.ContentSHA256 = entry.sha256
+		default:
+			return PruneSubtree{}, fmt.Errorf("entry %q has unsupported type %q", entry.rel, entry.typeName)
+		}
+		commitmentEntries = append(commitmentEntries, item)
+	}
+	slices.SortFunc(commitmentEntries, func(a, b pruneSubtreeCommitmentEntry) int {
+		return strings.Compare(a.Path, b.Path)
+	})
+	for i := 1; i < len(commitmentEntries); i++ {
+		if commitmentEntries[i-1].Path == commitmentEntries[i].Path {
+			return PruneSubtree{}, fmt.Errorf("duplicate path %q", commitmentEntries[i].Path)
+		}
+	}
+	if commitmentEntries[0].Path != root {
+		return PruneSubtree{}, fmt.Errorf("subtree root %q is absent", root)
+	}
+	if commitmentEntries[0].Type != TypeDirectory {
+		return PruneSubtree{}, fmt.Errorf("subtree root %q is not a directory", root)
+	}
+
+	data, err := canonicalJSON(pruneSubtreeCommitment{
+		SchemaVersion: PruneSubtreeCommitmentSchemaVersion,
+		Root:          root,
+		Reason:        reason,
+		EntryCount:    len(commitmentEntries),
+		RegularBytes:  regularBytes,
+		Entries:       commitmentEntries,
+	})
+	if err != nil {
+		return PruneSubtree{}, err
+	}
+	return PruneSubtree{
+		Path:             root,
+		Reason:           reason,
+		EntryCount:       len(commitmentEntries),
+		RegularBytes:     regularBytes,
+		CommitmentSchema: PruneSubtreeCommitmentSchemaVersion,
+		CommitmentDigest: digest.FromBytes(data).String(),
+	}, nil
+}
+
+func pruneCommitmentModeString(mode os.FileMode) string {
+	value := uint32(mode.Perm())
+	if mode&os.ModeSetuid != 0 {
+		value |= 0o4000
+	}
+	if mode&os.ModeSetgid != 0 {
+		value |= 0o2000
+	}
+	if mode&os.ModeSticky != 0 {
+		value |= 0o1000
+	}
+	return fmt.Sprintf("%04o", value)
 }
 
 func buildResult(outputRoot string, record *resolution.Record, inventory Inventory, prune PruneManifest, metadata []MetadataExport, policy *normalizedPolicy) (*Result, error) {

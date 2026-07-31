@@ -153,6 +153,7 @@ func scanAndPlan(ctx context.Context, sourceRoot string, record *resolution.Reco
 	if err := attributeEntries(scan, policy); err != nil {
 		return nil, err
 	}
+	pruneOptionalDependencyTooling(scan, policy)
 	if err := validateRequestedExecutables(scan, record, policy); err != nil {
 		return nil, err
 	}
@@ -533,10 +534,6 @@ func attributeEntries(scan *sourceScan, policy *normalizedPolicy) error {
 		if !entry.retain || entry.typeName == TypeDirectory || entry.packageName != "" {
 			continue
 		}
-		if rule, ok := matchingRule(entry.rel, policy.allowlist.Owners); ok && entry.typeName == TypeRegular {
-			entry.packageName = rule.Package
-			continue
-		}
 		if entry.typeName == TypeSymlink {
 			final, err := finalLinkTarget(scan.byPath, entry.rel, map[string]bool{})
 			if err != nil {
@@ -548,6 +545,11 @@ func attributeEntries(scan *sourceScan, policy *normalizedPolicy) error {
 		}
 		if entry.packageName == "" && entry.typeName == TypeRegular {
 			entry.packageName = packageForGlobalCopy(entry, byRelative)
+		}
+		if entry.packageName == "" && entry.typeName == TypeRegular {
+			if rule, ok := matchingRule(entry.rel, policy.allowlist.Owners); ok {
+				entry.packageName = rule.Package
+			}
 		}
 		if entry.packageName == "" {
 			return runtimeError(CodeUnattributed, entry.rel, "retained non-directory path cannot be attributed to the resolution closure")
@@ -593,6 +595,35 @@ func onePackage(values map[string]struct{}) string {
 		return value
 	}
 	return ""
+}
+
+var optionalLLVMGlobalExecutables = map[string]struct{}{
+	"bin/analyze-build":    {},
+	"bin/git-clang-format": {},
+	"bin/hmaptool":         {},
+	"bin/intercept-build":  {},
+	"bin/run-clang-tidy":   {},
+	"bin/scan-build-py":    {},
+	"bin/scan-view":        {},
+}
+
+func pruneOptionalDependencyTooling(scan *sourceScan, policy *normalizedPolicy) {
+	for _, entry := range scan.entries {
+		if !entry.retain || entry.typeName != TypeSymlink {
+			continue
+		}
+		if _, optional := optionalLLVMGlobalExecutables[entry.rel]; !optional {
+			continue
+		}
+		if entry.packageName != "llvm" && !strings.HasPrefix(entry.packageName, "llvm@") {
+			continue
+		}
+		if _, requested := policy.requested[entry.packageName]; requested {
+			continue
+		}
+		entry.retain = false
+		entry.pruneReason = PruneOptionalTooling
+	}
 }
 
 func validateRequestedExecutables(scan *sourceScan, record *resolution.Record, policy *normalizedPolicy) error {
@@ -711,7 +742,7 @@ func collectMetadataExports(scan *sourceScan, record *resolution.Record) error {
 			return runtimeError(CodeUnattributed, entry.rel, "package metadata cannot be attributed")
 		}
 		if entry.metadataExport == "install_receipt" {
-			if err := validateReceiptIdentity(entry, byName[entry.packageName]); err != nil {
+			if err := validateReceiptIdentity(entry, byName[entry.packageName], record.Nodes); err != nil {
 				return runtimeError(CodeVerification, entry.rel, "receipt identity: %v", err)
 			}
 		}
@@ -861,12 +892,12 @@ func readScannedRegular(entry *sourceEntry) ([]byte, error) {
 	return data, nil
 }
 
-func validateReceiptIdentity(entry *sourceEntry, node resolution.Node) error {
+func validateReceiptIdentity(entry *sourceEntry, node resolution.Node, closure []resolution.Node) error {
 	data, err := readScannedRegular(entry)
 	if err != nil {
 		return err
 	}
-	_, err = bottle.VerifyInstalledReceipt(data, node)
+	_, err = bottle.VerifyInstalledReceipt(data, node, closure)
 	return err
 }
 

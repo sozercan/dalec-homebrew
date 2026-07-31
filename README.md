@@ -10,7 +10,7 @@ The implementation is intentionally narrow:
 - authenticated Homebrew JWS metadata
 - exact OCI index, manifest, config, and layer descriptors
 - offline materialization with `llb.NetModeNone`
-- clean-runtime-base assembly (the materializer filesystem is never exported)
+- snapshot-pinned Ubuntu Chisel Noble runtime base (the full materializer filesystem is never exported)
 - non-root runtime users and root-owned, non-writable code
 - global and selected-target Dalec command/file tests
 
@@ -74,8 +74,14 @@ The output embeds:
 - `/usr/share/dalec-homebrew/sbom.spdx.json`
 - `/usr/share/dalec-homebrew/materialization.json`
 - `/usr/share/dalec-homebrew/runtime-base-packages.tsv`
+- `/usr/share/dalec-homebrew/runtime-base-artifacts.tsv`
+- `/usr/share/dalec-homebrew/runtime-base-chisel.manifest.wall`
 
-The final image does **not** contain `brew`, the Homebrew repository, caches, installer logs, receipts, embedded Formula source, or materializer/test tooling.
+The final image does **not** contain `apt`, `dpkg`, Chisel itself, `brew`, the Homebrew repository, caches, installer logs, receipts, embedded Formula source, or materializer/test tooling. It intentionally retains Bash, Dash, core command-line utilities, Perl base, NSS/DNS, full glibc gconv data, timezone data, and common C/C++ runtime libraries so arbitrary supported Homebrew bottle closures are not constrained to the `hello` example.
+
+The runtime base is cut from the Ubuntu snapshot named by `UBUNTU_SNAPSHOT` with a SHA-256-pinned Chisel release binary and an immutable, checksummed `chisel-releases` commit archive. A build-only local proxy rewrites Chisel's standard Ubuntu archive requests to that snapshot; Chisel still verifies Ubuntu's signed Release metadata and package digests. The proxy and evidence converter are not copied into any component image. Full Ubuntu remains only in the materializer, where `apt` and account-management tools are needed during image construction.
+
+`runtime-base-packages.tsv` uses five tab-separated fields for Chisel bases: package, version, architecture, selected regular payload bytes, and the verified source `.deb` SHA-256. The materializer also accepts the legacy three-field format. The complete compressed Chisel path/slice manifest remains authoritative.
 
 ## Component tuple
 
@@ -101,11 +107,21 @@ Requirements:
 - BuildKit 0.31.2 or newer for `llb.ImageBlob`, `State.Requires`, and current exporter epoch behavior
 - Docker Buildx or `buildctl` for image integration tests
 - `jq` for the live component-build helper
+- outbound access to GitHub and the pinned Ubuntu snapshot while building components
 
 Run validation:
 
 ```console
 ./scripts/check.sh
+```
+
+Generate a repeatable JSON image-size report. Registry references include exact
+manifest, config, and compressed layer sizes; local images also include rootfs,
+package, evidence, largest-path, and history data:
+
+```console
+./scripts/image-size-report.sh --platform linux/amd64 IMAGE@sha256:<digest>
+./scripts/image-size-report.sh --insecure --platform linux/arm64 localhost:5000/IMAGE:tag
 ```
 
 Run a real single-platform frontend build against a registry reachable from the
@@ -115,15 +131,36 @@ selected Buildx builder:
 DALEC_HOMEBREW_LIVE_BUILDER=dalec-homebrew-live-builder \
 DALEC_HOMEBREW_LIVE_REGISTRY=dalec-homebrew-live-registry:5000 \
 DALEC_HOMEBREW_LIVE_PLATFORM=linux/arm64 \
-DALEC_HOMEBREW_LIVE_IMAGE=dalec-homebrew-live:arm64 \
+DALEC_HOMEBREW_LIVE_IMAGE=dalec-homebrew-live-registry:5000/dalec-homebrew-live:arm64 \
+DALEC_HOMEBREW_LIVE_OUTPUT=push \
 ./scripts/live-test.sh
 ```
 
 The helper builds and publishes digest-addressed runtime-base, materializer,
 and frontend components, renders [`examples/live-test.yaml`](examples/live-test.yaml)
 with the resulting frontend digest, runs its Dalec command/file tests, and
-loads the final image. The supplied registry may use HTTP for local testing,
-but it must be configured in the selected BuildKit daemon.
+loads the final image by default. Set `DALEC_HOMEBREW_LIVE_OUTPUT=push` to
+publish the final image as well; the helper then reports its immutable manifest
+digest and `DALEC_HOMEBREW_LIVE_FINAL_REF`. The supplied registry may use HTTP
+for local testing, but it must be configured in the selected BuildKit daemon.
+
+For a final image published to the registry on the amd64 `vm` SSH target, run
+the exported image itself with networking disabled, a read-only rootfs, all
+capabilities dropped, and `no-new-privileges`:
+
+```console
+./scripts/vm-live-validate.sh \
+  127.0.0.1:5556/dalec-homebrew-live@sha256:<digest> amd64
+```
+
+The focused [`examples/live-python.yaml`](examples/live-python.yaml),
+[`examples/live-glibc.yaml`](examples/live-glibc.yaml),
+[`examples/live-redis.yaml`](examples/live-redis.yaml), and
+[`examples/live-graphviz.yaml`](examples/live-graphviz.yaml) specs exercise
+dynamic extension/plugin loading, TLS/CA and timezone data, SQLite and
+compression, the brewed glibc loader and generated locale/gconv data, and a
+stateful non-root Redis lifecycle in addition to the common runtime evidence
+and exclusion invariants.
 
 Resolve current Formulae without materializing an image:
 

@@ -1,18 +1,40 @@
 package materializer
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sozercan/dalec-homebrew/internal/bottle"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 	"github.com/sozercan/dalec-homebrew/internal/runtimefs"
 )
+
+func TestDirectorySnapshotEqualityPreservesInodeIdentity(t *testing.T) {
+	before := fileState{Type: "directory", Mode: os.ModeDir | 0o755, Inode: "1:10", Links: 2, Size: 4096, UID: 1000, GID: 1000, OwnershipKnown: true}
+	after := before
+	after.Links = 9
+	after.Size = 8192
+	if !snapshotStatesEqual(before, after) {
+		t.Fatal("structural directory link-count/size changes were treated as replacement")
+	}
+	after.Inode = "1:11"
+	if snapshotStatesEqual(before, after) {
+		t.Fatal("directory inode replacement was ignored")
+	}
+}
 
 func TestClassifyCurrentKegAndGlobalLink(t *testing.T) {
 	prefix := t.TempDir()
@@ -60,12 +82,65 @@ func TestClassifyRejectsOtherKeg(t *testing.T) {
 	}
 }
 
+func TestValidateNoPrefixBrewEnv(t *testing.T) {
+	t.Run("absent", func(t *testing.T) {
+		if err := validateNoPrefixBrewEnv(t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("real directory without override", func(t *testing.T) {
+		prefix := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(prefix, "etc/homebrew"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateNoPrefixBrewEnv(prefix); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("override file", func(t *testing.T) {
+		prefix := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(prefix, "etc/homebrew"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(prefix, "etc/homebrew/brew.env"), []byte("HOMEBREW_BASH_COMMAND=/tmp/hook\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateNoPrefixBrewEnv(prefix); err == nil {
+			t.Fatal("prefix brew.env override accepted")
+		}
+	})
+	t.Run("symlinked directory", func(t *testing.T) {
+		prefix := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(prefix, "etc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), filepath.Join(prefix, "etc/homebrew")); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateNoPrefixBrewEnv(prefix); err == nil {
+			t.Fatal("symlinked Homebrew environment directory accepted")
+		}
+	})
+}
+
+func TestInstallEnvForcesProtectedSystemConfiguration(t *testing.T) {
+	env := installEnv("/prefix")
+	if !slices.Contains(env, "HOMEBREW_SYSTEM_ENV_TAKES_PRIORITY=1") {
+		t.Fatal("materializer environment does not prioritize the protected system brew.env")
+	}
+	for _, value := range env {
+		if strings.HasPrefix(value, "HOMEBREW_BASH_COMMAND=") {
+			t.Fatalf("materializer environment unexpectedly supplies a bash hook: %q", value)
+		}
+	}
+}
+
 func TestVerifyReceiptBottle(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "INSTALL_RECEIPT.json")
 	if err := os.WriteFile(p, []byte(`{"built_as_bottle":true,"poured_from_bottle":true,"runtime_dependencies":[],"source":{"spec":"stable","tap":"homebrew/core","versions":{"stable":"1.2.3","version_scheme":0}}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyReceipt(p, resolution.Node{Name: "x", FormulaVersion: "1.2.3"}); err != nil {
+	if err := verifyReceipt(p, resolution.Node{Name: "x", FormulaVersion: "1.2.3"}, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -167,7 +242,7 @@ func TestClassifyValidatesOptLinksAndAliases(t *testing.T) {
 	withAlias := maps.Clone(base)
 	withAlias["opt/hi"] = fileState{Type: "symlink", Link: "../Cellar/hello/1"}
 	changes := []Change{{Path: "opt", Kind: "created"}, {Path: "opt/hello", Kind: "created"}, {Path: "opt/hi", Kind: "created"}}
-	if err := classify(prefix, resolution.Node{Name: "hello", PkgVersion: "1"}, nil, withAlias, changes, map[string]struct{}{"hello": {}, "hi": {}}); err != nil {
+	if err := classify(prefix, resolution.Node{Name: "hello", PkgVersion: "1"}, nil, withAlias, changes, classifyOptions{optNames: map[string]struct{}{"hello": {}, "hi": {}}}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -197,6 +272,148 @@ func TestClassifyRejectsEscapingStateSymlink(t *testing.T) {
 	changes := []Change{{Path: "opt", Kind: "created"}, {Path: "opt/hello", Kind: "created"}, {Path: "etc/config", Kind: "created"}}
 	if err := classify("/prefix", resolution.Node{Name: "hello", PkgVersion: "1"}, nil, after, changes); err == nil {
 		t.Fatal("escaping etc symlink accepted")
+	}
+}
+
+func TestClassifyAllowsCurrentKegBashCompletionLink(t *testing.T) {
+	node := resolution.Node{Name: "kubernetes-cli", PkgVersion: "1.36.3"}
+	after := map[string]fileState{
+		"Cellar":                                                     {Type: "directory"},
+		"Cellar/kubernetes-cli":                                      {Type: "directory"},
+		"Cellar/kubernetes-cli/1.36.3":                               {Type: "directory"},
+		"Cellar/kubernetes-cli/1.36.3/etc":                           {Type: "directory"},
+		"Cellar/kubernetes-cli/1.36.3/etc/bash_completion.d":         {Type: "directory"},
+		"Cellar/kubernetes-cli/1.36.3/etc/bash_completion.d/kubectl": {Type: "regular", Mode: 0o644},
+		"opt":                           {Type: "directory"},
+		"opt/kubernetes-cli":            {Type: "symlink", Link: "../Cellar/kubernetes-cli/1.36.3"},
+		"etc":                           {Type: "directory"},
+		"etc/bash_completion.d":         {Type: "directory"},
+		"etc/bash_completion.d/kubectl": {Type: "symlink", Link: "../../Cellar/kubernetes-cli/1.36.3/etc/bash_completion.d/kubectl"},
+		"var":                           {Type: "directory"},
+	}
+	changes := []Change{{Path: "etc/bash_completion.d/kubectl", Kind: "created"}}
+	if err := classify("/prefix", node, nil, after, changes); err != nil {
+		t.Fatal(err)
+	}
+	if changes[0].Classification != "configuration" {
+		t.Fatalf("classification=%q", changes[0].Classification)
+	}
+}
+
+func TestClassifyAllowsCurrentKegBashCompletionAlias(t *testing.T) {
+	node := resolution.Node{Name: "util-linux", PkgVersion: "2.42.2"}
+	after := map[string]fileState{
+		"Cellar":                       {Type: "directory"},
+		"Cellar/util-linux":            {Type: "directory"},
+		"Cellar/util-linux/2.42.2":     {Type: "directory"},
+		"Cellar/util-linux/2.42.2/etc": {Type: "directory"},
+		"Cellar/util-linux/2.42.2/etc/bash_completion.d":       {Type: "directory"},
+		"Cellar/util-linux/2.42.2/etc/bash_completion.d/last":  {Type: "regular", Mode: 0o644},
+		"Cellar/util-linux/2.42.2/etc/bash_completion.d/lastb": {Type: "symlink", Link: "last"},
+		"opt":                         {Type: "directory"},
+		"opt/util-linux":              {Type: "symlink", Link: "../Cellar/util-linux/2.42.2"},
+		"etc":                         {Type: "directory"},
+		"etc/bash_completion.d":       {Type: "directory"},
+		"etc/bash_completion.d/lastb": {Type: "symlink", Link: "../../Cellar/util-linux/2.42.2/etc/bash_completion.d/lastb"},
+		"var":                         {Type: "directory"},
+	}
+	changes := []Change{{Path: "etc/bash_completion.d/lastb", Kind: "created"}}
+	if err := classify("/prefix", node, nil, after, changes); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClassifyRejectsUnsafeBashCompletionAliases(t *testing.T) {
+	node := resolution.Node{Name: "util-linux", PkgVersion: "2.42.2"}
+	base := map[string]fileState{
+		"Cellar":                       {Type: "directory"},
+		"Cellar/util-linux":            {Type: "directory"},
+		"Cellar/util-linux/2.42.2":     {Type: "directory"},
+		"Cellar/util-linux/2.42.2/etc": {Type: "directory"},
+		"Cellar/util-linux/2.42.2/etc/bash_completion.d":       {Type: "directory"},
+		"Cellar/util-linux/2.42.2/etc/bash_completion.d/last":  {Type: "regular", Mode: 0o644},
+		"Cellar/util-linux/2.42.2/etc/bash_completion.d/lastb": {Type: "symlink", Link: "last"},
+		"Cellar/other":                              {Type: "directory"},
+		"Cellar/other/1":                            {Type: "directory"},
+		"Cellar/other/1/etc":                        {Type: "directory"},
+		"Cellar/other/1/etc/bash_completion.d":      {Type: "directory"},
+		"Cellar/other/1/etc/bash_completion.d/last": {Type: "regular", Mode: 0o644},
+		"opt":                         {Type: "directory"},
+		"opt/util-linux":              {Type: "symlink", Link: "../Cellar/util-linux/2.42.2"},
+		"etc":                         {Type: "directory"},
+		"etc/bash_completion.d":       {Type: "directory"},
+		"etc/bash_completion.d/lastb": {Type: "symlink", Link: "../../Cellar/util-linux/2.42.2/etc/bash_completion.d/lastb"},
+		"var":                         {Type: "directory"},
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(map[string]fileState)
+	}{
+		{
+			name: "global link bypasses keg alias",
+			mutate: func(after map[string]fileState) {
+				state := after["etc/bash_completion.d/lastb"]
+				state.Link = "../../Cellar/util-linux/2.42.2/etc/bash_completion.d/last"
+				after["etc/bash_completion.d/lastb"] = state
+			},
+		},
+		{
+			name: "keg alias crosses into another keg",
+			mutate: func(after map[string]fileState) {
+				state := after["Cellar/util-linux/2.42.2/etc/bash_completion.d/lastb"]
+				state.Link = "../../../../../other/1/etc/bash_completion.d/last"
+				after["Cellar/util-linux/2.42.2/etc/bash_completion.d/lastb"] = state
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			after := maps.Clone(base)
+			tc.mutate(after)
+			if err := classify("/prefix", node, nil, after, []Change{{Path: "etc/bash_completion.d/lastb", Kind: "created"}}); err == nil {
+				t.Fatal("unsafe completion alias accepted")
+			}
+		})
+	}
+}
+
+func TestClassifyRejectsUnsafeBashCompletionLinks(t *testing.T) {
+	node := resolution.Node{Name: "kubernetes-cli", PkgVersion: "1.36.3"}
+	base := map[string]fileState{
+		"Cellar":                                                     {Type: "directory"},
+		"Cellar/kubernetes-cli":                                      {Type: "directory"},
+		"Cellar/kubernetes-cli/1.36.3":                               {Type: "directory"},
+		"Cellar/kubernetes-cli/1.36.3/bin":                           {Type: "directory"},
+		"Cellar/kubernetes-cli/1.36.3/bin/kubectl":                   {Type: "regular", Mode: 0o755},
+		"Cellar/kubernetes-cli/1.36.3/etc":                           {Type: "directory"},
+		"Cellar/kubernetes-cli/1.36.3/etc/bash_completion.d":         {Type: "directory"},
+		"Cellar/kubernetes-cli/1.36.3/etc/bash_completion.d/kubectl": {Type: "regular", Mode: 0o644},
+		"Cellar/other":                                               {Type: "directory"},
+		"Cellar/other/1":                                             {Type: "directory"},
+		"Cellar/other/1/etc":                                         {Type: "directory"},
+		"Cellar/other/1/etc/bash_completion.d":                       {Type: "directory"},
+		"Cellar/other/1/etc/bash_completion.d/kubectl":               {Type: "regular", Mode: 0o644},
+		"opt":                   {Type: "directory"},
+		"opt/kubernetes-cli":    {Type: "symlink", Link: "../Cellar/kubernetes-cli/1.36.3"},
+		"etc":                   {Type: "directory"},
+		"etc/bash_completion.d": {Type: "directory"},
+		"var":                   {Type: "directory"},
+	}
+	for _, tc := range []struct {
+		name string
+		path string
+		link string
+	}{
+		{name: "outside completion tree", path: "etc/kubectl", link: "../Cellar/kubernetes-cli/1.36.3/etc/bash_completion.d/kubectl"},
+		{name: "different current-keg file", path: "etc/bash_completion.d/kubectl", link: "../../Cellar/kubernetes-cli/1.36.3/bin/kubectl"},
+		{name: "other keg", path: "etc/bash_completion.d/kubectl", link: "../../Cellar/other/1/etc/bash_completion.d/kubectl"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			after := maps.Clone(base)
+			after[tc.path] = fileState{Type: "symlink", Link: tc.link}
+			if err := classify("/prefix", node, nil, after, []Change{{Path: tc.path, Kind: "created"}}); err == nil {
+				t.Fatalf("unsafe completion link %s -> %s accepted", tc.path, tc.link)
+			}
+		})
 	}
 }
 
@@ -289,7 +506,7 @@ func TestVerifyReceiptRejectsSymlink(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyReceipt(link, resolution.Node{Name: "x"}); err == nil {
+	if err := verifyReceipt(link, resolution.Node{Name: "x"}, nil); err == nil {
 		t.Fatal("receipt symlink accepted")
 	}
 }
@@ -319,6 +536,491 @@ func TestMaterializerPrefixMustBeAbsolute(t *testing.T) {
 func TestSnapshotMissingRootFails(t *testing.T) {
 	if _, err := snapshotContext(context.Background(), filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Fatal("missing snapshot root accepted")
+	}
+}
+
+func TestDiffIgnoresDirectoryStructuralMetadata(t *testing.T) {
+	before := map[string]fileState{
+		"share/xml": {
+			Type: "directory", Mode: os.ModeDir | 0o755, Size: 4096,
+			Inode: "1:2", Links: 2, UID: 1000, GID: 1000, OwnershipKnown: true,
+		},
+	}
+	after := maps.Clone(before)
+	state := after["share/xml"]
+	state.Size = 8192
+	state.Links = 3
+	after["share/xml"] = state
+	if changes := diff(before, after); len(changes) != 0 {
+		t.Fatalf("directory child metadata produced changes: %#v", changes)
+	}
+}
+
+func TestDiffDetectsDirectorySecurityMetadataChanges(t *testing.T) {
+	base := fileState{
+		Type: "directory", Mode: os.ModeDir | 0o755, Size: 4096,
+		Inode: "1:2", Links: 2, UID: 1000, GID: 1000, OwnershipKnown: true,
+	}
+	tests := []struct {
+		name   string
+		mutate func(*fileState)
+	}{
+		{name: "type", mutate: func(state *fileState) { state.Type = "regular" }},
+		{name: "mode", mutate: func(state *fileState) { state.Mode = os.ModeDir | 0o775 }},
+		{name: "inode", mutate: func(state *fileState) { state.Inode = "1:3" }},
+		{name: "uid", mutate: func(state *fileState) { state.UID = 0 }},
+		{name: "gid", mutate: func(state *fileState) { state.GID = 0 }},
+		{name: "ownership availability", mutate: func(state *fileState) { state.OwnershipKnown = false }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := map[string]fileState{"share/xml": base}
+			after := maps.Clone(before)
+			state := after["share/xml"]
+			tc.mutate(&state)
+			after["share/xml"] = state
+			changes := diff(before, after)
+			if len(changes) != 1 || changes[0].Path != "share/xml" || changes[0].Kind != "modified" {
+				t.Fatalf("security metadata change not detected: %#v", changes)
+			}
+		})
+	}
+}
+
+func TestClassifyAllowsChildBelowPreexistingGlobalDirectory(t *testing.T) {
+	directory := func(inode string, links uint64) fileState {
+		return fileState{
+			Type: "directory", Mode: os.ModeDir | 0o755,
+			Inode: inode, Links: links, UID: 1000, GID: 1000, OwnershipKnown: true,
+		}
+	}
+	before := map[string]fileState{
+		".":         directory("1:1", 10),
+		"Cellar":    directory("1:2", 5),
+		"opt":       directory("1:3", 2),
+		"etc":       directory("1:4", 2),
+		"var":       directory("1:5", 2),
+		"share":     directory("1:6", 3),
+		"share/xml": directory("1:7", 2),
+	}
+	after := maps.Clone(before)
+	for _, path := range []string{".", "Cellar", "share/xml"} {
+		state := after[path]
+		state.Links++
+		state.Size += 4096
+		after[path] = state
+	}
+	after["Cellar/hello"] = directory("1:8", 3)
+	after["Cellar/hello/1"] = directory("1:9", 2)
+	after["opt/hello"] = fileState{Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "../Cellar/hello/1", Inode: "1:10", Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true}
+	after["share/xml/dbus-1"] = directory("1:11", 2)
+
+	changes := diff(before, after)
+	for _, change := range changes {
+		if change.Path == "share/xml" || change.Path == "Cellar" || change.Path == "." {
+			t.Fatalf("structural directory metadata was classified as a change: %#v", changes)
+		}
+	}
+	if err := classify("/prefix", resolution.Node{Name: "hello", PkgVersion: "1"}, before, after, changes); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClassifyRejectsSecurityChangeToPreexistingGlobalDirectory(t *testing.T) {
+	base := fileState{
+		Type: "directory", Mode: os.ModeDir | 0o755,
+		Inode: "1:7", Links: 2, UID: 1000, GID: 1000, OwnershipKnown: true,
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*fileState)
+	}{
+		{name: "mode", mutate: func(state *fileState) { state.Mode = os.ModeDir | 0o775 }},
+		{name: "owner", mutate: func(state *fileState) { state.UID = 0 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := map[string]fileState{"share/xml": base}
+			after := maps.Clone(before)
+			state := after["share/xml"]
+			tc.mutate(&state)
+			after["share/xml"] = state
+			changes := diff(before, after)
+			if len(changes) != 1 || changes[0].Path != "share/xml" || changes[0].Kind != "modified" {
+				t.Fatalf("security change was not classified at share/xml: %#v", changes)
+			}
+			err := classify("/prefix", resolution.Node{Name: "hello", PkgVersion: "1"}, before, after, changes)
+			if err == nil || !strings.Contains(err.Error(), "pre-existing shared path share/xml") {
+				t.Fatalf("pre-existing shared-directory security change not rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestSnapshotCapturesDirectoryIdentityAndOwnership(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "share"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	states, err := snapshot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{".", "share"} {
+		state := states[path]
+		if state.Inode == "" {
+			t.Skip("platform does not expose stable inode metadata")
+		}
+		if state.Links == 0 || !state.OwnershipKnown {
+			t.Fatalf("%s missing directory identity or ownership: %#v", path, state)
+		}
+	}
+}
+
+func TestClassifyAllowsVerifiedSharedDirectoryExpansion(t *testing.T) {
+	node, before, after := sharedDirectoryExpansionFixture()
+	changes := diff(before, after)
+	if err := classify("/prefix", node, before, after, changes); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClassifyRejectsUnsafeSharedDirectoryExpansions(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]fileState, map[string]fileState)
+	}{
+		{
+			name: "expanded root mode changed",
+			mutate: func(_ map[string]fileState, after map[string]fileState) {
+				state := after["share/xml"]
+				state.Mode = os.ModeDir | 0o775
+				after["share/xml"] = state
+			},
+		},
+		{
+			name: "expanded root owner changed",
+			mutate: func(_ map[string]fileState, after map[string]fileState) {
+				state := after["share/xml"]
+				state.UID = 0
+				after["share/xml"] = state
+			},
+		},
+		{
+			name: "prior target outside cellar",
+			mutate: func(before, _ map[string]fileState) {
+				before["outside"] = testSnapshotDirectory("1:20", 2)
+				state := before["share/xml"]
+				state.Link = "../../outside"
+				before["share/xml"] = state
+			},
+		},
+		{
+			name: "preserved file omitted",
+			mutate: func(_ map[string]fileState, after map[string]fileState) {
+				delete(after, "share/xml/fontconfig/fonts.dtd")
+			},
+		},
+		{
+			name: "preserved file redirected",
+			mutate: func(_ map[string]fileState, after map[string]fileState) {
+				state := after["share/xml/fontconfig/fonts.dtd"]
+				state.Link = "../../../Cellar/dbus/1/share/xml/dbus-1/busconfig.dtd"
+				after["share/xml/fontconfig/fonts.dtd"] = state
+			},
+		},
+		{
+			name: "current child redirected",
+			mutate: func(_ map[string]fileState, after map[string]fileState) {
+				state := after["share/xml/dbus-1"]
+				state.Link = "../../Cellar/fontconfig/2/share/xml/fontconfig"
+				after["share/xml/dbus-1"] = state
+			},
+		},
+		{
+			name: "current child bypasses current-keg symlink",
+			mutate: func(_ map[string]fileState, after map[string]fileState) {
+				after["Cellar/dbus/1/share/xml/dbus-1"] = fileState{Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "../../../../fontconfig/2/share/xml/fontconfig", Inode: "1:18", Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true}
+				state := after["share/xml/dbus-1"]
+				state.Link = "../../Cellar/fontconfig/2/share/xml/fontconfig"
+				after["share/xml/dbus-1"] = state
+			},
+		},
+		{
+			name: "unattributed regular file",
+			mutate: func(_ map[string]fileState, after map[string]fileState) {
+				after["share/xml/injected"] = fileState{Type: "regular", Mode: 0o644, Digest: strings.Repeat("e", 64), Inode: "1:21", Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true}
+			},
+		},
+		{
+			name: "unattributed directory",
+			mutate: func(_ map[string]fileState, after map[string]fileState) {
+				after["share/xml/injected"] = testSnapshotDirectory("1:21", 2)
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			node, before, after := sharedDirectoryExpansionFixture()
+			tc.mutate(before, after)
+			if err := classify("/prefix", node, before, after, diff(before, after)); err == nil {
+				t.Fatal("unsafe shared-directory expansion accepted")
+			}
+		})
+	}
+}
+
+func sharedDirectoryExpansionFixture() (resolution.Node, map[string]fileState, map[string]fileState) {
+	node := resolution.Node{Name: "dbus", PkgVersion: "1"}
+	before := map[string]fileState{
+		".":                             testSnapshotDirectory("1:1", 10),
+		"Cellar":                        testSnapshotDirectory("1:2", 5),
+		"Cellar/fontconfig":             testSnapshotDirectory("1:3", 3),
+		"Cellar/fontconfig/2":           testSnapshotDirectory("1:4", 3),
+		"Cellar/fontconfig/2/share":     testSnapshotDirectory("1:5", 3),
+		"Cellar/fontconfig/2/share/xml": testSnapshotDirectory("1:6", 3),
+		"Cellar/fontconfig/2/share/xml/fontconfig": testSnapshotDirectory("1:7", 2),
+		"Cellar/fontconfig/2/share/xml/fontconfig/fonts.dtd": {
+			Type: "regular", Mode: 0o644, Size: 4, Digest: strings.Repeat("a", 64),
+			Inode: "1:8", Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true,
+		},
+		"opt":       testSnapshotDirectory("1:9", 2),
+		"etc":       testSnapshotDirectory("1:10", 2),
+		"var":       testSnapshotDirectory("1:11", 2),
+		"share":     testSnapshotDirectory("1:12", 3),
+		"share/xml": {Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "../Cellar/fontconfig/2/share/xml", Inode: "1:13", Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true},
+	}
+	after := maps.Clone(before)
+	after["Cellar/dbus"] = testSnapshotDirectory("1:14", 3)
+	after["Cellar/dbus/1"] = testSnapshotDirectory("1:15", 3)
+	after["Cellar/dbus/1/share"] = testSnapshotDirectory("1:16", 3)
+	after["Cellar/dbus/1/share/xml"] = testSnapshotDirectory("1:17", 3)
+	after["Cellar/dbus/1/share/xml/dbus-1"] = testSnapshotDirectory("1:18", 2)
+	after["Cellar/dbus/1/share/xml/dbus-1/busconfig.dtd"] = fileState{
+		Type: "regular", Mode: 0o644, Size: 4, Digest: strings.Repeat("b", 64),
+		Inode: "1:19", Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true,
+	}
+	after["opt/dbus"] = fileState{Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "../Cellar/dbus/1", Inode: "1:20", Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true}
+	after["share/xml"] = testSnapshotDirectory("1:21", 4)
+	after["share/xml/fontconfig"] = testSnapshotDirectory("1:22", 2)
+	after["share/xml/fontconfig/fonts.dtd"] = fileState{Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "../../../Cellar/fontconfig/2/share/xml/fontconfig/fonts.dtd", Inode: "1:23", Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true}
+	after["share/xml/dbus-1"] = fileState{Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "../../Cellar/dbus/1/share/xml/dbus-1", Inode: "1:24", Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true}
+	return node, before, after
+}
+
+func testSnapshotDirectory(inode string, links uint64) fileState {
+	return fileState{
+		Type: "directory", Mode: os.ModeDir | 0o755,
+		Inode: inode, Links: links, UID: 1000, GID: 1000, OwnershipKnown: true,
+	}
+}
+
+func TestReconcileAllowsOwnerWriteForDeclaredChangedFile(t *testing.T) {
+	node := resolution.Node{
+		Name:       "hello",
+		PkgVersion: "1",
+		Bottle:     resolution.Bottle{Tab: resolution.BottleTab{ChangedFiles: []string{"lib/config"}}},
+	}
+	verified := bottle.Result{
+		Name:       "hello",
+		PkgVersion: "1",
+		KegPrefix:  "hello/1",
+		Inventory: []bottle.InventoryEntry{{
+			Path:    "hello/1/lib/config",
+			KegPath: "lib/config",
+			Type:    bottle.EntryRegular,
+			Mode:    0o444,
+			SHA256:  "sha256:" + strings.Repeat("a", 64),
+		}},
+	}
+	after := map[string]fileState{
+		"Cellar/hello/1/lib/config": {Type: "regular", Mode: 0o644, Digest: strings.Repeat("b", 64)},
+	}
+	if err := reconcileInstalledKeg("/prefix", node, verified, after); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReconcileRejectsOtherPermissionChangesForDeclaredChangedFile(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected uint32
+		actual   fs.FileMode
+	}{
+		{name: "remove owner write", expected: 0o644, actual: 0o444},
+		{name: "add owner execute", expected: 0o444, actual: 0o544},
+		{name: "add group write", expected: 0o444, actual: 0o464},
+		{name: "add other write", expected: 0o444, actual: 0o446},
+		{name: "add sticky", expected: 0o444, actual: os.ModeSticky | 0o644},
+		{name: "add setuid", expected: 0o555, actual: os.ModeSetuid | 0o755},
+		{name: "add setgid", expected: 0o555, actual: os.ModeSetgid | 0o755},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			node := resolution.Node{
+				Name:       "hello",
+				PkgVersion: "1",
+				Bottle:     resolution.Bottle{Tab: resolution.BottleTab{ChangedFiles: []string{"lib/config"}}},
+			}
+			verified := bottle.Result{
+				Name:       "hello",
+				PkgVersion: "1",
+				KegPrefix:  "hello/1",
+				Inventory: []bottle.InventoryEntry{{
+					Path:    "hello/1/lib/config",
+					KegPath: "lib/config",
+					Type:    bottle.EntryRegular,
+					Mode:    tc.expected,
+					SHA256:  "sha256:" + strings.Repeat("a", 64),
+				}},
+			}
+			after := map[string]fileState{
+				"Cellar/hello/1/lib/config": {Type: "regular", Mode: tc.actual, Digest: strings.Repeat("b", 64)},
+			}
+			if err := reconcileInstalledKeg("/prefix", node, verified, after); err == nil {
+				t.Fatal("non-owner-write permission change accepted")
+			}
+		})
+	}
+}
+
+func TestReconcileAllowsPythonVenvTemplateOwnerWritePostInstall(t *testing.T) {
+	node := resolution.Node{Name: "python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"}
+	paths := []string{
+		"lib/python3.14/venv/scripts/common/Activate.ps1",
+		"lib/python3.14/venv/scripts/common/activate",
+		"lib/python3.14/venv/scripts/common/activate.fish",
+		"lib/python3.14/venv/scripts/posix/activate.csh",
+	}
+	verified := bottle.Result{
+		Name:       node.Name,
+		PkgVersion: node.PkgVersion,
+		KegPrefix:  node.Name + "/" + node.PkgVersion,
+		Formula: bottle.FormulaEvidence{
+			Path:      node.Name + "/" + node.PkgVersion + "/.brew/" + node.Name + ".rb",
+			ClassName: "PythonAT314",
+			SHA256:    "sha256:" + strings.Repeat("f", 64),
+			Size:      1,
+		},
+	}
+	after := map[string]fileState{}
+	for _, kegPath := range paths {
+		verified.Inventory = append(verified.Inventory, bottle.InventoryEntry{
+			Path:    verified.KegPrefix + "/" + kegPath,
+			KegPath: kegPath,
+			Type:    bottle.EntryRegular,
+			Mode:    0o444,
+			SHA256:  "sha256:" + strings.Repeat("a", 64),
+		})
+		after["Cellar/"+verified.KegPrefix+"/"+kegPath] = fileState{
+			Type:   "regular",
+			Mode:   0o644,
+			Digest: strings.Repeat("a", 64),
+		}
+	}
+	if err := reconcileInstalledKeg("/prefix", node, verified, after); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReconcileRejectsBroaderPythonVenvPostInstallChanges(t *testing.T) {
+	tests := []struct {
+		name           string
+		node           resolution.Node
+		kegPath        string
+		expectedMode   uint32
+		actualMode     fs.FileMode
+		expectedDigest string
+		actualDigest   string
+		omitFormula    bool
+	}{
+		{
+			name:    "wrong formula minor",
+			node:    resolution.Node{Name: "python@3.13", FormulaVersion: "3.13.9", PkgVersion: "3.13.9"},
+			kegPath: "lib/python3.14/venv/scripts/common/Activate.ps1", expectedMode: 0o444, actualMode: 0o644,
+		},
+		{
+			name:    "malformed formula name",
+			node:    resolution.Node{Name: "python@3.14-extra", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
+			kegPath: "lib/python3.14/venv/scripts/common/Activate.ps1", expectedMode: 0o444, actualMode: 0o644,
+		},
+		{
+			name:    "mismatched formula version",
+			node:    resolution.Node{Name: "python@3.14", FormulaVersion: "3.13.9", PkgVersion: "3.13.9"},
+			kegPath: "lib/python3.14/venv/scripts/common/Activate.ps1", expectedMode: 0o444, actualMode: 0o644,
+		},
+		{
+			name:    "outside scripts subtree",
+			node:    resolution.Node{Name: "python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
+			kegPath: "lib/python3.14/venv/Activate.ps1", expectedMode: 0o444, actualMode: 0o644,
+		},
+		{
+			name:    "scripts prefix spoof",
+			node:    resolution.Node{Name: "python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
+			kegPath: "lib/python3.14/venv/scripts-evil/Activate.ps1", expectedMode: 0o444, actualMode: 0o644,
+		},
+		{
+			name:    "missing verified formula evidence",
+			node:    resolution.Node{Name: "python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
+			kegPath: "lib/python3.14/venv/scripts/common/Activate.ps1", expectedMode: 0o444, actualMode: 0o644,
+			omitFormula: true,
+		},
+		{
+			name:    "content mutation",
+			node:    resolution.Node{Name: "python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
+			kegPath: "lib/python3.14/venv/scripts/common/Activate.ps1", expectedMode: 0o444, actualMode: 0o644,
+			expectedDigest: strings.Repeat("a", 64), actualDigest: strings.Repeat("b", 64),
+		},
+		{
+			name:    "group writable",
+			node:    resolution.Node{Name: "python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
+			kegPath: "lib/python3.14/venv/scripts/common/Activate.ps1", expectedMode: 0o444, actualMode: 0o664,
+		},
+		{
+			name:    "made executable",
+			node:    resolution.Node{Name: "python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
+			kegPath: "lib/python3.14/venv/scripts/common/Activate.ps1", expectedMode: 0o444, actualMode: 0o744,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			expectedDigest := tc.expectedDigest
+			if expectedDigest == "" {
+				expectedDigest = strings.Repeat("a", 64)
+			}
+			actualDigest := tc.actualDigest
+			if actualDigest == "" {
+				actualDigest = expectedDigest
+			}
+			verified := bottle.Result{
+				Name:       tc.node.Name,
+				PkgVersion: tc.node.PkgVersion,
+				KegPrefix:  tc.node.Name + "/" + tc.node.PkgVersion,
+				Inventory: []bottle.InventoryEntry{{
+					Path:    tc.node.Name + "/" + tc.node.PkgVersion + "/" + tc.kegPath,
+					KegPath: tc.kegPath,
+					Type:    bottle.EntryRegular,
+					Mode:    tc.expectedMode,
+					SHA256:  "sha256:" + expectedDigest,
+				}},
+			}
+			if !tc.omitFormula {
+				minor := strings.TrimPrefix(tc.node.Name, "python@")
+				verified.Formula = bottle.FormulaEvidence{
+					Path:      verified.KegPrefix + "/.brew/" + tc.node.Name + ".rb",
+					ClassName: "PythonAT" + strings.ReplaceAll(minor, ".", ""),
+					SHA256:    "sha256:" + strings.Repeat("f", 64),
+					Size:      1,
+				}
+			}
+			after := map[string]fileState{
+				"Cellar/" + verified.KegPrefix + "/" + tc.kegPath: {
+					Type: "regular", Mode: tc.actualMode, Digest: actualDigest,
+				},
+			}
+			if err := reconcileInstalledKeg("/prefix", tc.node, verified, after); err == nil {
+				t.Fatal("broader Python post-install mutation accepted")
+			}
+		})
 	}
 }
 
@@ -364,6 +1066,471 @@ func TestClassifyRejectsRegularFileInGlobalLib(t *testing.T) {
 	changes := []Change{{Path: "opt", Kind: "created"}, {Path: "opt/hello", Kind: "created"}, {Path: "etc", Kind: "created"}, {Path: "var", Kind: "created"}, {Path: "lib", Kind: "created"}, {Path: "lib/evil.so", Kind: "created"}}
 	if err := classify("/prefix", resolution.Node{Name: "hello", PkgVersion: "1"}, nil, after, changes); err == nil {
 		t.Fatal("regular global library accepted")
+	}
+}
+
+const (
+	gdkPixbufTestLibrsvg    = "librsvg"
+	gdkPixbufTestWebP       = "webp-pixbuf-loader"
+	gdkPixbufTestRuntimeUID = uint32(4242)
+	gdkPixbufTestRuntimeGID = uint32(4343)
+)
+
+var gdkPixbufTestVersions = map[string]string{
+	gdkPixbufFormula:     "2.44.7",
+	gdkPixbufTestLibrsvg: "2.60.0",
+	gdkPixbufTestWebP:    "0.2.7",
+}
+
+var gdkPixbufTestModules = map[string]string{
+	gdkPixbufFormula:     "libpixbufloader-png.so",
+	gdkPixbufTestLibrsvg: "libpixbufloader_svg.so",
+	gdkPixbufTestWebP:    "libpixbufloader-webp.so",
+}
+
+type gdkPixbufCacheFixture struct {
+	prefix      string
+	node        resolution.Node
+	verified    bottle.Result
+	before      map[string]fileState
+	after       map[string]fileState
+	closureKegs map[string]struct{}
+	priorCache  []byte
+}
+
+func (fixture gdkPixbufCacheFixture) options() classifyOptions {
+	return classifyOptions{
+		optNames:            map[string]struct{}{fixture.node.Name: {}},
+		closureKegs:         fixture.closureKegs,
+		verified:            fixture.verified,
+		runtimeUID:          gdkPixbufTestRuntimeUID,
+		runtimeGID:          gdkPixbufTestRuntimeGID,
+		priorGdkPixbufCache: append([]byte(nil), fixture.priorCache...),
+	}
+}
+
+func newGdkPixbufCacheFixture(t *testing.T, writer string, includeContributor bool, transform func(string, string) string) gdkPixbufCacheFixture {
+	t.Helper()
+	prefix := t.TempDir()
+	for _, directory := range []string{"etc", "var", "opt", gdkPixbufLoadersDirectoryPath} {
+		if err := os.MkdirAll(filepath.Join(prefix, filepath.FromSlash(directory)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	formulae := []string{gdkPixbufFormula}
+	if includeContributor {
+		formulae = append(formulae, writer)
+	}
+	globalLoaderDirectory := filepath.Join(prefix, filepath.FromSlash(gdkPixbufLoadersDirectoryPath))
+	for _, formula := range formulae {
+		target := filepath.Join(prefix, "Cellar", formula, gdkPixbufTestVersions[formula], "lib", "gdk-pixbuf-2.0", "2.10.0", "loaders", gdkPixbufTestModules[formula])
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("loader\n"), 0o444); err != nil {
+			t.Fatal(err)
+		}
+		linkTarget, err := filepath.Rel(globalLoaderDirectory, target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(linkTarget, filepath.Join(globalLoaderDirectory, gdkPixbufTestModules[formula])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writerVersion, ok := gdkPixbufTestVersions[writer]
+	if !ok {
+		t.Fatalf("unsupported fixture writer %q", writer)
+	}
+	if err := os.Symlink(path.Join("../Cellar", writer, writerVersion), filepath.Join(prefix, "opt", writer)); err != nil {
+		t.Fatal(err)
+	}
+	content := gdkPixbufCacheContent(prefix, formulae)
+	if transform != nil {
+		content = transform(prefix, content)
+	}
+	cachePath := filepath.Join(prefix, filepath.FromSlash(gdkPixbufLoadersCachePath))
+	if err := os.WriteFile(cachePath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cachePath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after, err := snapshot(prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheState := after[gdkPixbufLoadersCachePath]
+	cacheState.UID = gdkPixbufTestRuntimeUID
+	cacheState.GID = gdkPixbufTestRuntimeGID
+	cacheState.OwnershipKnown = true
+	after[gdkPixbufLoadersCachePath] = cacheState
+
+	before := map[string]fileState{}
+	var priorCache []byte
+	if includeContributor {
+		before = maps.Clone(after)
+		for rel := range before {
+			if snapshotPathWithin(rel, path.Join("Cellar", writer)) || rel == path.Join("opt", writer) || rel == path.Join(gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[writer]) {
+				delete(before, rel)
+			}
+		}
+		priorCache = []byte(gdkPixbufCacheContent(prefix, []string{gdkPixbufFormula}))
+		prior := cacheState
+		prior.Size = int64(len(priorCache))
+		sum := sha256.Sum256(priorCache)
+		prior.Digest = fmt.Sprintf("%x", sum[:])
+		before[gdkPixbufLoadersCachePath] = prior
+	}
+	closureKegs := map[string]struct{}{}
+	for _, formula := range formulae {
+		closureKegs[path.Join("Cellar", formula, gdkPixbufTestVersions[formula])] = struct{}{}
+	}
+	node := resolution.Node{Name: writer, PkgVersion: writerVersion}
+	if writer != gdkPixbufFormula {
+		node.Dependencies = []resolution.Requirement{{Name: gdkPixbufFormula}}
+	}
+	kegPath := path.Join(gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[writer])
+	verified := bottle.Result{
+		Name:       writer,
+		PkgVersion: writerVersion,
+		KegPrefix:  path.Join(writer, writerVersion),
+		Inventory: []bottle.InventoryEntry{{
+			Path:    path.Join(writer, writerVersion, kegPath),
+			KegPath: kegPath,
+			Type:    bottle.EntryRegular,
+			Mode:    0o444,
+			SHA256:  "sha256:" + strings.Repeat("c", sha256.Size*2),
+		}},
+	}
+	return gdkPixbufCacheFixture{prefix: prefix, node: node, verified: verified, before: before, after: after, closureKegs: closureKegs, priorCache: priorCache}
+}
+
+func gdkPixbufCacheContent(prefix string, formulae []string) string {
+	prefix = filepath.ToSlash(prefix)
+	var content strings.Builder
+	content.WriteString("# GdkPixbuf Image Loader Modules file\n")
+	content.WriteString("# Automatically generated file, do not edit\n")
+	content.WriteString("# Created by gdk-pixbuf-query-loaders from gdk-pixbuf-test\n")
+	content.WriteString("#\n")
+	fmt.Fprintf(&content, "# LoaderDir = %s\n#\n", path.Join(prefix, gdkPixbufLoadersDirectoryPath))
+	for _, formula := range formulae {
+		fmt.Fprintf(&content, "\"%s\"\n", path.Join(prefix, gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[formula]))
+		fmt.Fprintf(&content, "\"%s\" 5 \"gdk-pixbuf\" \"test loader\" \"LGPL\"\n", formula)
+		content.WriteString("\"image/test\" \"\"\n")
+		content.WriteString("\"test\" \"\"\n")
+		content.WriteString("\"abc\" \"\" 100\n\n")
+	}
+	return content.String()
+}
+
+func TestClassifyAllowsControlledGdkPixbufLoaderCacheWriters(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		writer             string
+		includeContributor bool
+		kind               string
+	}{
+		{name: "gdk-pixbuf creates cache", writer: gdkPixbufFormula, kind: "created"},
+		{name: "librsvg underscore loader refreshes cache", writer: gdkPixbufTestLibrsvg, includeContributor: true, kind: "modified"},
+		{name: "verified future contributor refreshes cache", writer: gdkPixbufTestWebP, includeContributor: true, kind: "modified"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newGdkPixbufCacheFixture(t, tc.writer, tc.includeContributor, nil)
+			changes := []Change{{Path: gdkPixbufLoadersCachePath, Kind: tc.kind}}
+			if err := classify(fixture.prefix, fixture.node, fixture.before, fixture.after, changes, fixture.options()); err != nil {
+				t.Fatal(err)
+			}
+			if changes[0].Classification != "gdk-pixbuf-loader-cache" {
+				t.Fatalf("classification=%q", changes[0].Classification)
+			}
+		})
+	}
+}
+
+func TestClassifyRejectsUncontrolledGdkPixbufLoaderCacheWriters(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		writer string
+		kind   string
+	}{
+		{name: "unrelated formula creation", writer: "hello", kind: "created"},
+		{name: "gdk-pixbuf modification", writer: gdkPixbufFormula, kind: "modified"},
+		{name: "librsvg creation", writer: gdkPixbufTestLibrsvg, kind: "created"},
+		{name: "librsvg removal", writer: gdkPixbufTestLibrsvg, kind: "removed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixtureWriter := tc.writer
+			if fixtureWriter != gdkPixbufFormula && fixtureWriter != gdkPixbufTestLibrsvg {
+				fixtureWriter = gdkPixbufFormula
+			}
+			fixture := newGdkPixbufCacheFixture(t, fixtureWriter, fixtureWriter == gdkPixbufTestLibrsvg, nil)
+			fixture.node.Name = tc.writer
+			fixture.node.PkgVersion = gdkPixbufTestVersions[fixtureWriter]
+			changes := []Change{{Path: gdkPixbufLoadersCachePath, Kind: tc.kind}}
+			if tc.kind == "removed" {
+				fixture.after = maps.Clone(fixture.after)
+				delete(fixture.after, gdkPixbufLoadersCachePath)
+			}
+			if err := classify(fixture.prefix, fixture.node, fixture.before, fixture.after, changes, classifyOptions{
+				optNames:    map[string]struct{}{tc.writer: {}},
+				closureKegs: fixture.closureKegs,
+			}); err == nil {
+				t.Fatal("uncontrolled loader-cache mutation accepted")
+			}
+		})
+	}
+}
+
+func TestGdkPixbufLoaderBasenameValidation(t *testing.T) {
+	for _, name := range []string{"libpixbufloader-png.so", "libpixbufloader_svg.so", "libpixbufloader-webp_2.so"} {
+		if !isGdkPixbufLoaderBasename(name) {
+			t.Errorf("valid loader basename %q rejected", name)
+		}
+	}
+	for _, name := range []string{"libpixbufloader.so", "libpixbufloader-.so", "libpixbufloader_.so", "libpixbufloader.svg.so", "libpixbufloader-../evil.so", "other-svg.so"} {
+		if isGdkPixbufLoaderBasename(name) {
+			t.Errorf("unsafe loader basename %q accepted", name)
+		}
+	}
+}
+
+func TestGdkPixbufLoaderCacheRejectsUnverifiedContributorCapabilities(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*gdkPixbufCacheFixture)
+	}{
+		{name: "missing gdk dependency", mutate: func(fixture *gdkPixbufCacheFixture) { fixture.node.Dependencies = nil }},
+		{name: "hardlink inventory entry", mutate: func(fixture *gdkPixbufCacheFixture) { fixture.verified.Inventory[0].Type = bottle.EntryHardlink }},
+		{name: "non-loader inventory path", mutate: func(fixture *gdkPixbufCacheFixture) { fixture.verified.Inventory[0].KegPath = "lib/libother.so" }},
+		{name: "mismatched verified bottle", mutate: func(fixture *gdkPixbufCacheFixture) { fixture.verified.Name = "other" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestWebP, true, nil)
+			tc.mutate(&fixture)
+			changes := []Change{{Path: gdkPixbufLoadersCachePath, Kind: "modified"}}
+			if err := classify(fixture.prefix, fixture.node, fixture.before, fixture.after, changes, fixture.options()); err == nil {
+				t.Fatal("unverified loader contributor was accepted")
+			}
+		})
+	}
+}
+
+func TestGdkPixbufLoaderCacheRequiresExactGlobalModuleSet(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufFormula, false, nil)
+	base := "libpixbufloader-extra.so"
+	targetRel := path.Join("Cellar", gdkPixbufFormula, gdkPixbufTestVersions[gdkPixbufFormula], gdkPixbufLoadersDirectoryPath, base)
+	moduleRel := path.Join(gdkPixbufLoadersDirectoryPath, base)
+	fixture.after[targetRel] = fileState{Type: "regular", Mode: 0o444}
+	fixture.after[moduleRel] = fileState{Type: "symlink", Link: path.Join("../../../../Cellar", gdkPixbufFormula, gdkPixbufTestVersions[gdkPixbufFormula], gdkPixbufLoadersDirectoryPath, base)}
+	state := fixture.after[gdkPixbufLoadersCachePath]
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "created", fixture.before, state, fixture.after, fixture.options()); err == nil {
+		t.Fatal("cache omitting an installed global loader symlink was accepted")
+	}
+}
+
+func TestClassifyRejectsLoaderAdditionWithoutCacheRefresh(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestLibrsvg, true, nil)
+	changes := []Change{{Path: path.Join(gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[gdkPixbufTestLibrsvg]), Kind: "created"}}
+	if err := classify(fixture.prefix, fixture.node, fixture.before, fixture.after, changes, fixture.options()); err == nil {
+		t.Fatal("loader addition without cache refresh was accepted")
+	}
+}
+
+func TestClassifyRejectsLoaderCacheTypeReplacement(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestLibrsvg, true, nil)
+	fixture.after[gdkPixbufLoadersCachePath] = fileState{Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "/etc/shadow"}
+	changes := []Change{
+		{Path: path.Join(gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[gdkPixbufTestLibrsvg]), Kind: "created"},
+		{Path: gdkPixbufLoadersCachePath, Kind: "modified"},
+	}
+	if err := classify(fixture.prefix, fixture.node, fixture.before, fixture.after, changes, fixture.options()); err == nil {
+		t.Fatal("loader cache type replacement was accepted")
+	}
+}
+
+func TestGdkPixbufLoaderCacheRejectsRewrittenExistingBlock(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestLibrsvg, true, func(_ string, content string) string {
+		return strings.Replace(content, `"gdk-pixbuf" 5 "gdk-pixbuf" "test loader" "LGPL"`, `"gdk-pixbuf" 5 "gdk-pixbuf" "rewritten loader" "LGPL"`, 1)
+	})
+	state := fixture.after[gdkPixbufLoadersCachePath]
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "modified", fixture.before, state, fixture.after, fixture.options()); err == nil {
+		t.Fatal("rewritten pre-existing loader block was accepted")
+	}
+}
+
+func TestGdkPixbufLoaderCacheRejectsPreviousModuleRemoval(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestLibrsvg, true, nil)
+	gdkModule := filepath.Join(fixture.prefix, filepath.FromSlash(path.Join(gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[gdkPixbufFormula])))
+	if err := os.Remove(gdkModule); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(fixture.prefix, filepath.FromSlash(gdkPixbufLoadersCachePath))
+	if err := os.WriteFile(cachePath, []byte(gdkPixbufCacheContent(fixture.prefix, []string{gdkPixbufTestLibrsvg})), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after, err := snapshot(fixture.prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheState := after[gdkPixbufLoadersCachePath]
+	cacheState.UID, cacheState.GID, cacheState.OwnershipKnown = gdkPixbufTestRuntimeUID, gdkPixbufTestRuntimeGID, true
+	after[gdkPixbufLoadersCachePath] = cacheState
+	fixture.after = after
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "modified", fixture.before, cacheState, fixture.after, fixture.options()); err == nil {
+		t.Fatal("refresh removed a previously registered loader")
+	}
+}
+
+func TestGdkPixbufLoaderCacheRequiresNewVerifiedRegistration(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestWebP, true, nil)
+	fixture.before = maps.Clone(fixture.after)
+	prior := fixture.before[gdkPixbufLoadersCachePath]
+	prior.Digest = strings.Repeat("d", sha256.Size*2)
+	fixture.before[gdkPixbufLoadersCachePath] = prior
+	state := fixture.after[gdkPixbufLoadersCachePath]
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "modified", fixture.before, state, fixture.after, fixture.options()); err == nil {
+		t.Fatal("modifier registered no new loader")
+	}
+}
+
+func TestGdkPixbufLoaderCacheRequiresNewLoaderFromVerifiedInventory(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestWebP, true, nil)
+	fixture.verified.Inventory[0].KegPath = path.Join(gdkPixbufLoadersDirectoryPath, "libpixbufloader-other.so")
+	state := fixture.after[gdkPixbufLoadersCachePath]
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "modified", fixture.before, state, fixture.after, fixture.options()); err == nil {
+		t.Fatal("new loader absent from verified bottle inventory was accepted")
+	}
+}
+
+func TestGdkPixbufLoaderCacheRejectsUnsafeMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*fileState)
+	}{
+		{name: "not regular", mutate: func(state *fileState) { state.Type = "symlink"; state.Mode = os.ModeSymlink | 0o777 }},
+		{name: "empty", mutate: func(state *fileState) { state.Size = 0 }},
+		{name: "oversized", mutate: func(state *fileState) { state.Size = gdkPixbufLoadersCacheMaxBytes + 1 }},
+		{name: "executable", mutate: func(state *fileState) { state.Mode |= 0o100 }},
+		{name: "group writable", mutate: func(state *fileState) { state.Mode |= 0o020 }},
+		{name: "other writable", mutate: func(state *fileState) { state.Mode |= 0o002 }},
+		{name: "setuid", mutate: func(state *fileState) { state.Mode |= os.ModeSetuid }},
+		{name: "hard linked", mutate: func(state *fileState) { state.Links = 2 }},
+		{name: "unknown owner", mutate: func(state *fileState) { state.OwnershipKnown = false }},
+		{name: "wrong uid", mutate: func(state *fileState) { state.UID = 0 }},
+		{name: "wrong gid", mutate: func(state *fileState) { state.GID = 0 }},
+		{name: "missing digest", mutate: func(state *fileState) { state.Digest = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newGdkPixbufCacheFixture(t, gdkPixbufFormula, false, nil)
+			state := fixture.after[gdkPixbufLoadersCachePath]
+			tc.mutate(&state)
+			if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "created", fixture.before, state, fixture.after, fixture.options()); err == nil {
+				t.Fatal("unsafe loader-cache metadata accepted")
+			}
+		})
+	}
+}
+
+func TestLibrsvgLoaderCacheRefreshRejectsUnsafePriorMetadata(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestLibrsvg, true, nil)
+	prior := fixture.before[gdkPixbufLoadersCachePath]
+	prior.Mode |= 0o020
+	fixture.before[gdkPixbufLoadersCachePath] = prior
+	state := fixture.after[gdkPixbufLoadersCachePath]
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "modified", fixture.before, state, fixture.after, fixture.options()); err == nil {
+		t.Fatal("librsvg refreshed an unsafe pre-existing cache")
+	}
+}
+
+func TestGdkPixbufLoaderCacheRejectsUnsafeContent(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		transform func(string, string) string
+	}{
+		{
+			name: "materializer path",
+			transform: func(_ string, content string) string {
+				return strings.Replace(content, "#\n", "#\n# /run/dalec-homebrew/input/resolution.json\n", 1)
+			},
+		},
+		{
+			name: "nul byte",
+			transform: func(_ string, content string) string {
+				return content + "\x00"
+			},
+		},
+		{
+			name: "control byte",
+			transform: func(_ string, content string) string {
+				return strings.Replace(content, "Automatically generated", "Automatically\tgenerated", 1)
+			},
+		},
+		{
+			name: "invalid utf8",
+			transform: func(_ string, content string) string {
+				return content + string([]byte{0xff})
+			},
+		},
+		{
+			name: "path traversal",
+			transform: func(prefix, content string) string {
+				loaderDir := path.Join(filepath.ToSlash(prefix), gdkPixbufLoadersDirectoryPath)
+				return strings.Replace(content, loaderDir, loaderDir+"/../loaders", 1)
+			},
+		},
+		{
+			name: "outside prefix",
+			transform: func(prefix, content string) string {
+				module := path.Join(filepath.ToSlash(prefix), gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[gdkPixbufFormula])
+				return strings.Replace(content, module, "/tmp/libpixbufloader-png.so", 1)
+			},
+		},
+		{
+			name: "direct keg reference",
+			transform: func(prefix, content string) string {
+				module := path.Join(filepath.ToSlash(prefix), gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[gdkPixbufFormula])
+				kegModule := path.Join(filepath.ToSlash(prefix), "Cellar", gdkPixbufFormula, gdkPixbufTestVersions[gdkPixbufFormula], "lib", "gdk-pixbuf-2.0", "2.10.0", "loaders", gdkPixbufTestModules[gdkPixbufFormula])
+				return strings.Replace(content, module, kegModule, 1)
+			},
+		},
+		{
+			name: "incomplete block",
+			transform: func(_ string, content string) string {
+				return strings.Replace(content, "\"gdk-pixbuf\" 5 \"gdk-pixbuf\" \"test loader\" \"LGPL\"\n", "", 1)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newGdkPixbufCacheFixture(t, gdkPixbufFormula, false, tc.transform)
+			state := fixture.after[gdkPixbufLoadersCachePath]
+			if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "created", fixture.before, state, fixture.after, fixture.options()); err == nil {
+				t.Fatal("unsafe loader-cache content accepted")
+			}
+		})
+	}
+}
+
+func TestGdkPixbufLoaderCacheRejectsTargetsOutsideResolvedClosure(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufTestLibrsvg, true, nil)
+	delete(fixture.closureKegs, path.Join("Cellar", gdkPixbufTestLibrsvg, gdkPixbufTestVersions[gdkPixbufTestLibrsvg]))
+	state := fixture.after[gdkPixbufLoadersCachePath]
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "modified", fixture.before, state, fixture.after, fixture.options()); err == nil {
+		t.Fatal("loader target outside the resolved closure was accepted")
+	}
+}
+
+func TestGdkPixbufLoaderCacheRejectsArbitraryFileInsideClosureKeg(t *testing.T) {
+	fixture := newGdkPixbufCacheFixture(t, gdkPixbufFormula, false, nil)
+	moduleRel := path.Join(gdkPixbufLoadersDirectoryPath, gdkPixbufTestModules[gdkPixbufFormula])
+	arbitraryRel := path.Join("Cellar", gdkPixbufFormula, gdkPixbufTestVersions[gdkPixbufFormula], "lib", "libarbitrary.so")
+	fixture.after[arbitraryRel] = fileState{Type: "regular", Mode: 0o444}
+	moduleState := fixture.after[moduleRel]
+	moduleState.Link = path.Join("../../../../Cellar", gdkPixbufFormula, gdkPixbufTestVersions[gdkPixbufFormula], "lib", "libarbitrary.so")
+	fixture.after[moduleRel] = moduleState
+	state := fixture.after[gdkPixbufLoadersCachePath]
+	if err := validateGdkPixbufLoadersCache(fixture.prefix, fixture.node, gdkPixbufLoadersCachePath, "created", fixture.before, state, fixture.after, fixture.options()); err == nil {
+		t.Fatal("arbitrary closure-keg file was accepted as a loader module")
 	}
 }
 
@@ -462,5 +1629,646 @@ func TestSnapshotResolverPreservesDirectorySuffixAndRoot(t *testing.T) {
 	}
 	if _, err := resolveSnapshotPath("/prefix", snapshot, "bad"); err == nil {
 		t.Fatal("file/. accepted without directory")
+	}
+}
+
+func TestNormalizeInstalledReceiptAtomicallyRecordsEvidence(t *testing.T) {
+	root, closure, expected := materializerReceiptNormalizationFixture()
+	epoch := time.Unix(1_800_000_123, 0).UTC()
+	input := materializerInstalledReceipt(t, root, expected[:1])
+
+	prefix := t.TempDir()
+	receiptPath := writeMaterializerReceipt(t, prefix, root, input, 0o644)
+	beforeInfo, err := os.Lstat(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInode, _ := snapshotInodeMeta(beforeInfo)
+
+	evidence, err := normalizeInstalledReceipt(prefix, root, closure, epoch.Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence == nil {
+		t.Fatal("incomplete generated receipt was not normalized")
+	}
+	if evidence.Formula != root.Name || evidence.ReceiptPath != "Cellar/cairo/1.18.4/INSTALL_RECEIPT.json" || evidence.Reason != receiptNormalizationReason {
+		t.Fatalf("evidence identity = %#v", evidence)
+	}
+	if evidence.BeforeSHA256 != sha256Digest(input) || evidence.BeforeRuntimeDependencyCount != 1 || evidence.AfterRuntimeDependencyCount != len(expected) {
+		t.Fatalf("evidence before/counts = %#v", evidence)
+	}
+
+	output, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.AfterSHA256 != sha256Digest(output) || evidence.BeforeSHA256 == evidence.AfterSHA256 {
+		t.Fatalf("evidence digests = %#v", evidence)
+	}
+	if _, err := bottle.VerifyInstalledReceipt(output, root, closure); err != nil {
+		t.Fatalf("committed receipt failed strict verification: %v", err)
+	}
+	afterInfo, err := os.Lstat(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterInode, links := snapshotInodeMeta(afterInfo)
+	uid, gid, ownershipKnown := snapshotOwnership(afterInfo)
+	if beforeInode == afterInode || links != 1 {
+		t.Fatalf("receipt was not atomically replaced: before=%q after=%q links=%d", beforeInode, afterInode, links)
+	}
+	if !ownershipKnown || int(uid) != os.Geteuid() || int(gid) != os.Getegid() {
+		t.Fatalf("normalized receipt ownership = %d:%d known=%v", uid, gid, ownershipKnown)
+	}
+	if afterInfo.Mode().Perm() != 0o644 || afterInfo.ModTime().Unix() != epoch.Unix() {
+		t.Fatalf("normalized receipt metadata = mode %o mtime %s", afterInfo.Mode().Perm(), afterInfo.ModTime())
+	}
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(receiptPath), receiptNormalizationTempName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("normalization temporary file remains: %v", err)
+	}
+
+	encoded, err := json.Marshal(Evidence{ReceiptNormalizations: []ReceiptNormalizationEvidence{*evidence}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{root.Name, evidence.BeforeSHA256, evidence.AfterSHA256, receiptNormalizationReason} {
+		if !strings.Contains(string(encoded), value) {
+			t.Fatalf("materialization evidence omitted %q: %s", value, encoded)
+		}
+	}
+
+	secondPrefix := t.TempDir()
+	secondPath := writeMaterializerReceipt(t, secondPrefix, root, input, 0o644)
+	secondEvidence, err := normalizeInstalledReceipt(secondPrefix, root, closure, epoch.Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondOutput, err := os.ReadFile(secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondEvidence == nil || secondEvidence.AfterSHA256 != evidence.AfterSHA256 || !bytes.Equal(secondOutput, output) {
+		t.Fatal("receipt normalization is not deterministic")
+	}
+}
+
+func TestNormalizeInstalledReceiptLeavesStrictReceiptUntouched(t *testing.T) {
+	root, closure, expected := materializerReceiptNormalizationFixture()
+	input := materializerInstalledReceipt(t, root, expected)
+	prefix := t.TempDir()
+	receiptPath := writeMaterializerReceipt(t, prefix, root, input, 0o644)
+	before, err := os.Lstat(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInode, _ := snapshotInodeMeta(before)
+	beforeMTime := before.ModTime()
+
+	evidence, err := normalizeInstalledReceipt(prefix, root, closure, time.Unix(1_800_000_123, 0).Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence != nil {
+		t.Fatalf("valid receipt produced normalization evidence: %#v", evidence)
+	}
+	after, err := os.Lstat(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterInode, _ := snapshotInodeMeta(after)
+	output, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeInode != afterInode || !after.ModTime().Equal(beforeMTime) || !bytes.Equal(output, input) {
+		t.Fatal("already-valid receipt was modified")
+	}
+}
+
+func TestNormalizeInstalledReceiptRejectsUnsafeFilesAndTampering(t *testing.T) {
+	root, closure, expected := materializerReceiptNormalizationFixture()
+	validIncomplete := materializerInstalledReceipt(t, root, expected[:1])
+	epoch := time.Unix(1_800_000_123, 0).Unix()
+
+	t.Run("extra dependency", func(t *testing.T) {
+		prefix := t.TempDir()
+		extra := append([]bottle.ReceiptDependency(nil), expected[:1]...)
+		extra = append(extra, bottle.ReceiptDependency{FullName: "unrelated", Version: "9", PkgVersion: "9"})
+		input := materializerInstalledReceipt(t, root, extra)
+		path := writeMaterializerReceipt(t, prefix, root, input, 0o644)
+		before, _ := os.ReadFile(path)
+		if _, err := normalizeInstalledReceipt(prefix, root, closure, epoch); err == nil {
+			t.Fatal("extra dependency was normalized away")
+		}
+		after, _ := os.ReadFile(path)
+		if !bytes.Equal(before, after) {
+			t.Fatal("tampered receipt changed on rejection")
+		}
+	})
+
+	t.Run("identity tamper", func(t *testing.T) {
+		prefix := t.TempDir()
+		input := bytes.Replace(validIncomplete, []byte(`"arch": "x86_64"`), []byte(`"arch": "arm64"`), 1)
+		path := writeMaterializerReceipt(t, prefix, root, input, 0o644)
+		beforeInfo, _ := os.Lstat(path)
+		beforeInode, _ := snapshotInodeMeta(beforeInfo)
+		if _, err := normalizeInstalledReceipt(prefix, root, closure, epoch); err == nil {
+			t.Fatal("tampered receipt identity was normalized")
+		}
+		afterInfo, _ := os.Lstat(path)
+		afterInode, _ := snapshotInodeMeta(afterInfo)
+		if beforeInode != afterInode {
+			t.Fatal("tampered receipt was replaced")
+		}
+	})
+
+	t.Run("receipt symlink", func(t *testing.T) {
+		prefix := t.TempDir()
+		keg := filepath.Join(prefix, "Cellar", root.Name, root.PkgVersion)
+		if err := os.MkdirAll(keg, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		outside := filepath.Join(t.TempDir(), "outside.json")
+		if err := os.WriteFile(outside, validIncomplete, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(keg, installReceiptFilename)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := normalizeInstalledReceipt(prefix, root, closure, epoch); err == nil {
+			t.Fatal("symlink receipt was followed")
+		}
+		outsideData, _ := os.ReadFile(outside)
+		if !bytes.Equal(outsideData, validIncomplete) {
+			t.Fatal("symlink target was modified")
+		}
+	})
+
+	t.Run("symlinked keg directory", func(t *testing.T) {
+		prefix := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(prefix, "Cellar"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		outside := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(outside, root.PkgVersion), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(outside, root.PkgVersion, installReceiptFilename), validIncomplete, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(prefix, "Cellar", root.Name)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := normalizeInstalledReceipt(prefix, root, closure, epoch); err == nil {
+			t.Fatal("symlinked keg directory was followed")
+		}
+	})
+
+	t.Run("hardlinked receipt", func(t *testing.T) {
+		prefix := t.TempDir()
+		path := writeMaterializerReceipt(t, prefix, root, validIncomplete, 0o644)
+		alias := filepath.Join(filepath.Dir(path), "receipt-alias")
+		if err := os.Link(path, alias); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := normalizeInstalledReceipt(prefix, root, closure, epoch); err == nil {
+			t.Fatal("hardlinked receipt was replaced")
+		}
+		aliasData, _ := os.ReadFile(alias)
+		if !bytes.Equal(aliasData, validIncomplete) {
+			t.Fatal("hardlink alias changed")
+		}
+	})
+
+	t.Run("preexisting temporary", func(t *testing.T) {
+		prefix := t.TempDir()
+		path := writeMaterializerReceipt(t, prefix, root, validIncomplete, 0o644)
+		temporaryPath := filepath.Join(filepath.Dir(path), receiptNormalizationTempName)
+		if err := os.WriteFile(temporaryPath, []byte("sentinel"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := normalizeInstalledReceipt(prefix, root, closure, epoch); err == nil {
+			t.Fatal("preexisting temporary file was overwritten")
+		}
+		temporaryData, _ := os.ReadFile(temporaryPath)
+		targetData, _ := os.ReadFile(path)
+		if string(temporaryData) != "sentinel" || !bytes.Equal(targetData, validIncomplete) {
+			t.Fatal("files changed after preexisting temporary rejection")
+		}
+	})
+
+	t.Run("world writable receipt", func(t *testing.T) {
+		prefix := t.TempDir()
+		writeMaterializerReceipt(t, prefix, root, validIncomplete, 0o666)
+		if _, err := normalizeInstalledReceipt(prefix, root, closure, epoch); err == nil {
+			t.Fatal("world-writable receipt was normalized")
+		}
+	})
+}
+
+func materializerReceiptNormalizationFixture() (resolution.Node, []resolution.Node, []bottle.ReceiptDependency) {
+	root := resolution.Node{
+		Name: "cairo", FullName: "homebrew/core/cairo", FormulaVersion: "1.18.4", PkgVersion: "1.18.4",
+		Dependencies: []resolution.Requirement{{Name: "pixman", Minimum: "0.46.4", Direct: true}},
+		Bottle: resolution.Bottle{
+			Tag: "x86_64_linux",
+			Tab: resolution.BottleTab{
+				Arch: "x86_64", Compiler: "gcc",
+				Dependencies: []resolution.RuntimeDependency{
+					{FullName: "libpng", Version: "1.6.50", PkgVersion: "1.6.50", DeclaredDirectly: true},
+					{FullName: "obsolete-transitive", Version: "1", PkgVersion: "1"},
+				},
+			},
+		},
+	}
+	pixman := resolution.Node{Name: "pixman", FullName: "homebrew/core/pixman", FormulaVersion: "0.46.4", PkgVersion: "0.46.4", BottleRebuild: 1}
+	libpng := resolution.Node{
+		Name: "libpng", FullName: "homebrew/core/libpng", FormulaVersion: "1.6.50", PkgVersion: "1.6.50",
+		Dependencies: []resolution.Requirement{{Name: "zlib-ng-compat", Minimum: "2.2.4", Direct: true}},
+	}
+	zlib := resolution.Node{Name: "zlib-ng-compat", FullName: "homebrew/core/zlib-ng-compat", FormulaVersion: "2.3.3", FormulaRevision: 1, PkgVersion: "2.3.3_1"}
+	closure := []resolution.Node{root, pixman, libpng, zlib}
+	expected := []bottle.ReceiptDependency{
+		{FullName: "libpng", Version: "1.6.50", PkgVersion: "1.6.50"},
+		{FullName: "pixman", Version: "0.46.4", BottleRebuild: 1, PkgVersion: "0.46.4"},
+		{FullName: "zlib-ng-compat", Version: "2.3.3", Revision: 1, PkgVersion: "2.3.3_1"},
+	}
+	return root, closure, expected
+}
+
+func materializerInstalledReceipt(t *testing.T, node resolution.Node, dependencies []bottle.ReceiptDependency) []byte {
+	t.Helper()
+	receipt := map[string]any{
+		"name":                 node.Name,
+		"full_name":            node.FullName,
+		"pkg_version":          node.PkgVersion,
+		"revision":             node.FormulaRevision,
+		"bottle_rebuild":       node.BottleRebuild,
+		"homebrew_version":     "6.0.0",
+		"built_as_bottle":      true,
+		"poured_from_bottle":   true,
+		"arch":                 node.Bottle.Tab.Arch,
+		"compiler":             node.Bottle.Tab.Compiler,
+		"runtime_dependencies": dependencies,
+		"source": map[string]any{
+			"spec": "stable", "tap": "homebrew/core",
+			"versions": map[string]any{"stable": node.FormulaVersion, "version_scheme": node.VersionScheme},
+		},
+		"custom_homebrew_metadata": map[string]any{"retained": true},
+	}
+	data, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(data, '\n')
+}
+
+func writeMaterializerReceipt(t *testing.T, prefix string, node resolution.Node, data []byte, mode os.FileMode) string {
+	t.Helper()
+	keg := filepath.Join(prefix, "Cellar", node.Name, node.PkgVersion)
+	if err := os.MkdirAll(keg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(keg, installReceiptFilename)
+	if err := os.WriteFile(path, data, mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestReconcileAllowsBoundGlibcPostInstallLocaleData(t *testing.T) {
+	node := resolution.Node{Name: "glibc", PkgVersion: "2.39_1"}
+	verified := bottle.Result{
+		Name:       "glibc",
+		PkgVersion: "2.39_1",
+		KegPrefix:  "glibc/2.39_1",
+		Inventory: []bottle.InventoryEntry{{
+			Path: "glibc/2.39_1/lib/libc.so.6", KegPath: "lib/libc.so.6",
+			Type: bottle.EntryRegular, Mode: 0o755, SHA256: "sha256:" + strings.Repeat("a", 64),
+		}},
+	}
+	after := map[string]fileState{
+		"Cellar/glibc/2.39_1/lib":                        {Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true},
+		"Cellar/glibc/2.39_1/lib/libc.so.6":              {Type: "regular", Mode: 0o755, Digest: strings.Repeat("a", 64)},
+		"Cellar/glibc/2.39_1/lib/locale":                 {Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true},
+		"Cellar/glibc/2.39_1/lib/locale/C.utf8":          {Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true},
+		"Cellar/glibc/2.39_1/lib/locale/C.utf8/LC_CTYPE": {Type: "regular", Mode: 0o644, Size: 1024, Digest: strings.Repeat("b", 64), Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true},
+	}
+	if err := reconcileInstalledKeg("/home/linuxbrew/.linuxbrew", node, verified, after); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGlibcPostInstallLocaleDataRejectsUnsafeContent(t *testing.T) {
+	root := "Cellar/glibc/2.39_1/lib/locale"
+	base := map[string]fileState{
+		root:                     {Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true},
+		root + "/locale-archive": {Type: "regular", Mode: 0o644, Size: 1024, Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true},
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(map[string]fileState)
+	}{
+		{name: "executable", mutate: func(after map[string]fileState) {
+			state := after[root+"/locale-archive"]
+			state.Mode = 0o755
+			after[root+"/locale-archive"] = state
+		}},
+		{name: "writable", mutate: func(after map[string]fileState) {
+			state := after[root+"/locale-archive"]
+			state.Mode = 0o664
+			after[root+"/locale-archive"] = state
+		}},
+		{name: "symlink", mutate: func(after map[string]fileState) {
+			after[root+"/locale-archive"] = fileState{Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "/etc/shadow", OwnershipKnown: true}
+		}},
+		{name: "large", mutate: func(after map[string]fileState) {
+			state := after[root+"/locale-archive"]
+			state.Size = glibcLocaleMaxFile + 1
+			after[root+"/locale-archive"] = state
+		}},
+		{name: "hardlink", mutate: func(after map[string]fileState) {
+			state := after[root+"/locale-archive"]
+			state.Links = 2
+			after[root+"/locale-archive"] = state
+		}},
+		{name: "unknown-owner", mutate: func(after map[string]fileState) {
+			state := after[root+"/locale-archive"]
+			state.OwnershipKnown = false
+			after[root+"/locale-archive"] = state
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			after := maps.Clone(base)
+			tc.mutate(after)
+			if _, err := allowedPostInstallKegPaths(resolution.Node{Name: "glibc"}, "Cellar/glibc/2.39_1", after); err == nil {
+				t.Fatal("unsafe generated locale content accepted")
+			}
+		})
+	}
+}
+
+func TestReconcileGlibcStillRejectsOtherGeneratedKegPaths(t *testing.T) {
+	node := resolution.Node{Name: "glibc", PkgVersion: "2.39_1"}
+	verified := bottle.Result{Name: "glibc", PkgVersion: "2.39_1", KegPrefix: "glibc/2.39_1"}
+	after := map[string]fileState{
+		"Cellar/glibc/2.39_1/lib/locale":   {Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true},
+		"Cellar/glibc/2.39_1/bin/injected": {Type: "regular", Mode: 0o755, UID: 1000, GID: 1000, OwnershipKnown: true},
+	}
+	if err := reconcileInstalledKeg("/home/linuxbrew/.linuxbrew", node, verified, after); err == nil || !strings.Contains(err.Error(), "unattributed path") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+const (
+	sharedMimeTestUID = uint32(4242)
+	sharedMimeTestGID = uint32(4343)
+)
+
+type sharedMimeFixture struct {
+	prefix   string
+	node     resolution.Node
+	verified bottle.Result
+	before   map[string]fileState
+	after    map[string]fileState
+	options  classifyOptions
+}
+
+func newSharedMimeFixture(t *testing.T) sharedMimeFixture {
+	t.Helper()
+	prefix := t.TempDir()
+	node := resolution.Node{Name: sharedMimeInfoFormula, PkgVersion: "2.5.1"}
+	keg := filepath.Join(prefix, "Cellar", node.Name, node.PkgVersion)
+	sourceData := []byte("<mime-info/>\n")
+	source := filepath.Join(keg, filepath.FromSlash(sharedMimeVerifiedSourcePath))
+	writeSharedMimeTestFile(t, source, sourceData, 0o644)
+
+	for _, directory := range []string{"etc", "var", "opt", "share/mime/packages"} {
+		if err := os.MkdirAll(filepath.Join(prefix, filepath.FromSlash(directory)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(path.Join("../Cellar", node.Name, node.PkgVersion), filepath.Join(prefix, "opt", node.Name)); err != nil {
+		t.Fatal(err)
+	}
+	globalSource := filepath.Join(prefix, filepath.FromSlash(sharedMimeVerifiedSourcePath))
+	linkTarget, err := filepath.Rel(filepath.Dir(globalSource), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(linkTarget, globalSource); err != nil {
+		t.Fatal(err)
+	}
+	for name := range sharedMimeFixedOutputs {
+		data := []byte(name + "\n")
+		if name == "icons" {
+			data = nil
+		}
+		writeSharedMimeTestFile(t, filepath.Join(prefix, filepath.FromSlash(path.Join(sharedMimeDatabaseRoot, name))), data, 0o644)
+	}
+	for mimeType := range sharedMimeGeneratedTypes {
+		data := []byte("<?xml version=\"1.0\"?><mime-type xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\" type=\"" + mimeType + "/x-test\"/>\n")
+		writeSharedMimeTestFile(t, filepath.Join(prefix, filepath.FromSlash(path.Join(sharedMimeDatabaseRoot, mimeType, "x-test.xml"))), data, 0o644)
+	}
+
+	after := snapshotSharedMimeFixture(t, prefix)
+	verified := bottle.Result{
+		Name:       node.Name,
+		PkgVersion: node.PkgVersion,
+		KegPrefix:  path.Join(node.Name, node.PkgVersion),
+		Inventory: []bottle.InventoryEntry{{
+			Path:    path.Join(node.Name, node.PkgVersion, sharedMimeVerifiedSourcePath),
+			KegPath: sharedMimeVerifiedSourcePath,
+			Type:    bottle.EntryRegular,
+			Mode:    0o644,
+			Size:    int64(len(sourceData)),
+			SHA256:  sha256Digest(sourceData),
+		}},
+	}
+	options := classifyOptions{
+		optNames:    map[string]struct{}{node.Name: {}},
+		closureKegs: map[string]struct{}{path.Join("Cellar", node.Name, node.PkgVersion): {}},
+		verified:    verified,
+		runtimeUID:  sharedMimeTestUID,
+		runtimeGID:  sharedMimeTestGID,
+	}
+	return sharedMimeFixture{prefix: prefix, node: node, verified: verified, before: map[string]fileState{}, after: after, options: options}
+}
+
+func writeSharedMimeTestFile(t *testing.T, filename string, data []byte, mode os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filename, data, mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filename, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func snapshotSharedMimeFixture(t *testing.T, prefix string) map[string]fileState {
+	t.Helper()
+	after, err := snapshot(prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rel, state := range after {
+		if snapshotPathWithin(rel, sharedMimeDatabaseRoot) {
+			state.UID = sharedMimeTestUID
+			state.GID = sharedMimeTestGID
+			state.OwnershipKnown = true
+			after[rel] = state
+		}
+	}
+	return after
+}
+
+func TestClassifyAllowsVerifiedSharedMimeDatabaseGeneration(t *testing.T) {
+	fixture := newSharedMimeFixture(t)
+	changes := diff(fixture.before, fixture.after)
+	if err := classify(fixture.prefix, fixture.node, fixture.before, fixture.after, changes, fixture.options); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, change := range changes {
+		if change.Path == path.Join(sharedMimeDatabaseRoot, "XMLnamespaces") {
+			found = true
+			if change.Classification != "shared-mime-database" {
+				t.Fatalf("classification=%q", change.Classification)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("generated shared MIME output was absent from install delta")
+	}
+}
+
+func TestSharedMimeDatabaseRejectsMissingOrUnsafeGeneratedData(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*sharedMimeFixture)
+	}{
+		{name: "missing fixed output", mutate: func(f *sharedMimeFixture) {
+			delete(f.after, path.Join(sharedMimeDatabaseRoot, "XMLnamespaces"))
+		}},
+		{name: "unexpected path", mutate: func(f *sharedMimeFixture) {
+			f.after[path.Join(sharedMimeDatabaseRoot, "nested", "bad", "file.xml")] = fileState{Type: "regular", Mode: 0o644, Size: 1, Digest: strings.Repeat("a", 64), Links: 1, UID: sharedMimeTestUID, GID: sharedMimeTestGID, OwnershipKnown: true}
+		}},
+		{name: "writable output", mutate: func(f *sharedMimeFixture) {
+			p := path.Join(sharedMimeDatabaseRoot, "aliases")
+			state := f.after[p]
+			state.Mode = 0o666
+			f.after[p] = state
+		}},
+		{name: "wrong owner", mutate: func(f *sharedMimeFixture) {
+			p := path.Join(sharedMimeDatabaseRoot, "aliases")
+			state := f.after[p]
+			state.UID++
+			f.after[p] = state
+		}},
+		{name: "hardlink", mutate: func(f *sharedMimeFixture) {
+			p := path.Join(sharedMimeDatabaseRoot, "aliases")
+			state := f.after[p]
+			state.Links = 2
+			f.after[p] = state
+		}},
+		{name: "pre-existing database", mutate: func(f *sharedMimeFixture) {
+			f.before[sharedMimeDatabaseRoot] = f.after[sharedMimeDatabaseRoot]
+		}},
+		{name: "mismatched verified bottle", mutate: func(f *sharedMimeFixture) {
+			f.options.verified.Name = "other"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newSharedMimeFixture(t)
+			tc.mutate(&fixture)
+			if _, err := validateSharedMimeInfoDatabase(fixture.prefix, fixture.node, fixture.before, fixture.after, fixture.options); err == nil {
+				t.Fatal("unsafe shared MIME database accepted")
+			}
+		})
+	}
+}
+
+func TestSharedMimeDatabaseRejectsMalformedGeneratedXML(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{name: "malformed", data: "<mime-type>"},
+		{name: "wrong root", data: `<other xmlns="http://www.freedesktop.org/standards/shared-mime-info" type="application/x-test"/>`},
+		{name: "wrong namespace", data: `<mime-type xmlns="https://example.invalid" type="application/x-test"/>`},
+		{name: "wrong type", data: `<mime-type xmlns="http://www.freedesktop.org/standards/shared-mime-info" type="text/other"/>`},
+		{name: "unicode folded type", data: `<mime-type xmlns="http://www.freedesktop.org/standards/shared-mime-info" type="application/x-teſt"/>`},
+		{name: "leading character data", data: `junk<mime-type xmlns="http://www.freedesktop.org/standards/shared-mime-info" type="application/x-test"/>`},
+		{name: "trailing character data", data: `<mime-type xmlns="http://www.freedesktop.org/standards/shared-mime-info" type="application/x-test"/>junk`},
+		{name: "non XML whitespace", data: "\u00a0<mime-type xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\" type=\"application/x-test\"/>"},
+		{name: "duplicate type", data: `<mime-type xmlns="http://www.freedesktop.org/standards/shared-mime-info" type="" type="application/x-test"/>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newSharedMimeFixture(t)
+			filename := filepath.Join(fixture.prefix, filepath.FromSlash(path.Join(sharedMimeDatabaseRoot, "application", "x-test.xml")))
+			writeSharedMimeTestFile(t, filename, []byte(tc.data), 0o644)
+			fixture.after = snapshotSharedMimeFixture(t, fixture.prefix)
+			if _, err := validateSharedMimeInfoDatabase(fixture.prefix, fixture.node, fixture.before, fixture.after, fixture.options); err == nil {
+				t.Fatal("invalid generated shared MIME XML accepted")
+			}
+		})
+	}
+}
+
+func TestClassifyRejectsUnverifiedGeneratedSharedMimeFile(t *testing.T) {
+	node := resolution.Node{Name: "hello", PkgVersion: "1"}
+	after := map[string]fileState{
+		".":                              {Type: "directory"},
+		"Cellar":                         {Type: "directory"},
+		"Cellar/hello":                   {Type: "directory"},
+		"Cellar/hello/1":                 {Type: "directory"},
+		"etc":                            {Type: "directory"},
+		"var":                            {Type: "directory"},
+		"opt":                            {Type: "directory"},
+		"opt/hello":                      {Type: "symlink", Link: "../Cellar/hello/1"},
+		"share":                          {Type: "directory"},
+		sharedMimeDatabaseRoot:           {Type: "directory"},
+		sharedMimeDatabaseRoot + "/evil": {Type: "regular", Mode: 0o644, Size: 1, Digest: strings.Repeat("a", 64), Links: 1},
+	}
+	if err := classify("/prefix", node, nil, after, diff(nil, after)); err == nil {
+		t.Fatal("unverified generated shared MIME file accepted")
+	}
+}
+
+func TestClassifyRejectsLaterSharedMimePackageCopyWithoutRefresh(t *testing.T) {
+	node := resolution.Node{Name: "mime-extension", PkgVersion: "1"}
+	rel := "share/mime/packages/extension.xml"
+	digest := strings.Repeat("a", 64)
+	keg := path.Join("Cellar", node.Name, node.PkgVersion)
+	after := map[string]fileState{
+		".":                         {Type: "directory"},
+		"Cellar":                    {Type: "directory"},
+		"Cellar/" + node.Name:       {Type: "directory"},
+		keg:                         {Type: "directory"},
+		path.Join(keg, rel):         {Type: "regular", Mode: 0o644, Size: 4, Digest: digest},
+		"etc":                       {Type: "directory"},
+		"var":                       {Type: "directory"},
+		"opt":                       {Type: "directory"},
+		path.Join("opt", node.Name): {Type: "symlink", Link: path.Join("../Cellar", node.Name, node.PkgVersion)},
+		"share":                     {Type: "directory"},
+		sharedMimeDatabaseRoot:      {Type: "directory"},
+		rel:                         {Type: "regular", Mode: 0o644, Size: 4, Digest: digest},
+	}
+	verified := bottle.Result{
+		Name:       node.Name,
+		PkgVersion: node.PkgVersion,
+		KegPrefix:  path.Join(node.Name, node.PkgVersion),
+		Inventory:  []bottle.InventoryEntry{{KegPath: rel, Type: bottle.EntryRegular, Mode: 0o644, Size: 4, SHA256: "sha256:" + digest}},
+	}
+	options := classifyOptions{optNames: map[string]struct{}{node.Name: {}}, verified: verified}
+	if err := classify("/prefix", node, nil, after, diff(nil, after), options); err == nil {
+		t.Fatal("later shared MIME package copy without database refresh was accepted")
 	}
 }

@@ -1,0 +1,19 @@
+package: hostname
+
+essential:
+  - hostname_copyright
+
+slices:
+  bins:
+    essential:
+      - libc6_libs
+    contents:
+      /usr/bin/dnsdomainname:
+      /usr/bin/domainname:
+      /usr/bin/hostname:
+      /usr/bin/nisdomainname:
+      /usr/bin/ypdomainname:
+
+  copyright:
+    contents:
+      /usr/share/doc/hostname/copyright:

@@ -1,0 +1,129 @@
+# syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
+name: homebrew-live-glibc
+version: 0.1.0
+revision: 1
+description: Advanced offline runtime validation for the verified Homebrew glibc closure
+website: https://www.gnu.org/software/libc/
+license: Apache-2.0
+
+dependencies:
+  runtime:
+    glibc: {}
+
+image:
+  entrypoint: /home/linuxbrew/.linuxbrew/opt/glibc/bin/locale
+  user: linuxbrew
+
+tests:
+  - name: glibc-runtime-closure
+    env:
+      HOMEBREW_PREFIX: /home/linuxbrew/.linuxbrew
+      LANG: C.UTF-8
+    steps:
+      - command: |
+          set -eu
+          loader="$HOMEBREW_PREFIX/lib/ld.so"
+          locale_bin="$HOMEBREW_PREFIX/opt/glibc/bin/locale"
+          iconv_bin="$HOMEBREW_PREFIX/opt/glibc/bin/iconv"
+
+          test "$(readlink "$loader")" = "$HOMEBREW_PREFIX/opt/glibc/bin/ld.so"
+          test -x "$locale_bin"
+          test -x "$iconv_bin"
+
+          "$loader" --verify "$locale_bin"
+          "$loader" --list "$locale_bin" > /tmp/glibc-loader-list
+          libc_path="$(awk '$1 == "libc.so.6" && $2 == "=>" { print $3; exit }' /tmp/glibc-loader-list)"
+          case "$libc_path" in
+            "$HOMEBREW_PREFIX"/Cellar/glibc/*/lib/libc.so.6|"$HOMEBREW_PREFIX"/opt/glibc/lib/libc.so.6) ;;
+            *) echo "unexpected libc path: $libc_path" >&2; exit 1 ;;
+          esac
+
+          "$loader" "$locale_bin" -a > /tmp/glibc-locales
+          grep -qx 'C' /tmp/glibc-locales
+          grep -qx 'C.utf8' /tmp/glibc-locales
+          grep -qx 'POSIX' /tmp/glibc-locales
+          grep -qx 'en_US.utf8' /tmp/glibc-locales
+          test "$(LC_ALL=en_US.UTF-8 "$loader" "$locale_bin" charmap)" = "UTF-8"
+
+          utf8_value="$(printf 'caf\303\251')"
+          round_trip="$(
+            printf '%s' "$utf8_value" |
+              "$iconv_bin" -f UTF-8 -t ISO-8859-1 |
+              "$iconv_bin" -f ISO-8859-1 -t UTF-8
+          )"
+          test "$round_trip" = "$utf8_value"
+          test -r "$HOMEBREW_PREFIX/opt/glibc/lib/gconv/ISO8859-1.so"
+
+          echo glibc-runtime-closure-ok
+        stdout:
+          equals: "glibc-runtime-closure-ok\n"
+    files:
+      /home/linuxbrew/.linuxbrew/lib/ld.so:
+        no_follow: true
+        link_target: /home/linuxbrew/.linuxbrew/opt/glibc/bin/ld.so
+      /home/linuxbrew/.linuxbrew/opt/glibc/lib/locale/locale-archive:
+        permissions: 0o444
+      /home/linuxbrew/.linuxbrew/opt/glibc/lib/gconv/gconv-modules:
+        permissions: 0o444
+
+  - name: runtime-invariants
+    env:
+      HOMEBREW_PREFIX: /home/linuxbrew/.linuxbrew
+    steps:
+      - command: |
+          set -eu
+          test "$(id -u):$(id -g)" = "1000:1000"
+          grep -q '^VERSION_ID="24.04"$' /etc/os-release
+          grep -q '^VERSION_CODENAME=noble$' /etc/os-release
+          test "$(find /usr/share/dalec-homebrew -maxdepth 1 -type f | wc -l)" -eq 9
+          test -z "$(find "$HOMEBREW_PREFIX" -type f -perm /111 -writable -print -quit)"
+          echo runtime-invariants-ok
+        stdout:
+          equals: "runtime-invariants-ok\n"
+    files:
+      /home/linuxbrew/.linuxbrew/bin/brew:
+        not_exist: true
+      /home/linuxbrew/.linuxbrew/Homebrew:
+        not_exist: true
+      /home/linuxbrew/.cache/Homebrew:
+        not_exist: true
+      /usr/bin/apt:
+        not_exist: true
+      /usr/bin/dpkg:
+        not_exist: true
+      /var/lib/dpkg/status:
+        not_exist: true
+      /usr/local/bin/chisel:
+        not_exist: true
+      /usr/local/bin/dalec-homebrew-materializer:
+        not_exist: true
+      /usr/local/bin/dalec-homebrew-test-runner:
+        not_exist: true
+      /usr/local/libexec/dalec-homebrew-pour.rb:
+        not_exist: true
+      /usr/share/dalec-homebrew/manifest.json:
+        permissions: 0o444
+        contains: ['dalec-homebrew-runtime-manifest/v1']
+      /usr/share/dalec-homebrew/resolution.json:
+        permissions: 0o444
+        contains: ['dalec-homebrew-resolution/v1']
+      /usr/share/dalec-homebrew/runtime-inventory.json:
+        permissions: 0o444
+        contains: ['dalec-homebrew-runtime-inventory/v1']
+      /usr/share/dalec-homebrew/prune-manifest.json:
+        permissions: 0o444
+        contains: ['dalec-homebrew-prune-manifest/v2']
+      /usr/share/dalec-homebrew/sbom.spdx.json:
+        permissions: 0o444
+        contains:
+          - 'SPDX-2.3'
+          - 'dalec-homebrew-linux-'
+      /usr/share/dalec-homebrew/materialization.json:
+        permissions: 0o444
+        contains: ['verified_bottles']
+      /usr/share/dalec-homebrew/runtime-base-packages.tsv:
+        permissions: 0o444
+      /usr/share/dalec-homebrew/runtime-base-artifacts.tsv:
+        permissions: 0o444
+      /usr/share/dalec-homebrew/runtime-base-chisel.manifest.wall:
+        permissions: 0o644

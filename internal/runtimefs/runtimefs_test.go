@@ -432,6 +432,35 @@ func newFixture(t *testing.T) fixture {
 	return fixture{source: root, record: record, opts: opts, calls: &calls}
 }
 
+func TestPruneOptionalDependencyTooling(t *testing.T) {
+	entry := func() *sourceEntry {
+		return &sourceEntry{rel: "bin/scan-build-py", typeName: TypeSymlink, retain: true, packageName: "llvm@21"}
+	}
+	t.Run("transitive llvm tooling", func(t *testing.T) {
+		scan := &sourceScan{entries: []*sourceEntry{entry()}}
+		pruneOptionalDependencyTooling(scan, &normalizedPolicy{requested: map[string]struct{}{}})
+		if scan.entries[0].retain || scan.entries[0].pruneReason != PruneOptionalTooling {
+			t.Fatalf("optional LLVM tool was not pruned: %#v", scan.entries[0])
+		}
+	})
+	t.Run("requested llvm tooling", func(t *testing.T) {
+		scan := &sourceScan{entries: []*sourceEntry{entry()}}
+		pruneOptionalDependencyTooling(scan, &normalizedPolicy{requested: map[string]struct{}{"llvm@21": {}}})
+		if !scan.entries[0].retain {
+			t.Fatal("requested LLVM tool was pruned")
+		}
+	})
+	t.Run("unrelated package", func(t *testing.T) {
+		other := entry()
+		other.packageName = "other"
+		scan := &sourceScan{entries: []*sourceEntry{other}}
+		pruneOptionalDependencyTooling(scan, &normalizedPolicy{requested: map[string]struct{}{}})
+		if !other.retain {
+			t.Fatal("unrelated global executable was pruned")
+		}
+	})
+}
+
 func validResolutionRecord() *resolution.Record {
 	tm := time.Unix(1_800_000_000, 0).UTC()
 	d := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -690,6 +719,25 @@ func TestOwnerRulesDoNotOverrideSymlinkTargetPackage(t *testing.T) {
 	}
 	if link.packageName != "jq" {
 		t.Fatalf("symlink attributed to %q", link.packageName)
+	}
+}
+
+func TestOwnerRulesDoNotOverrideExactGlobalCopyPackage(t *testing.T) {
+	target := &sourceEntry{rel: "Cellar/jq/1/share/mime/packages/jq.xml", typeName: TypeRegular, retain: true, sha256: "same", mode: 0o644}
+	global := &sourceEntry{rel: "share/mime/packages/jq.xml", typeName: TypeRegular, retain: true, sha256: "same", mode: 0o644}
+	scan := &sourceScan{entries: []*sourceEntry{target, global}, byPath: map[string]*sourceEntry{target.rel: target, global.rel: global}}
+	policy := &normalizedPolicy{
+		nodes: map[string]resolution.Node{
+			"jq":               {Name: "jq", PkgVersion: "1"},
+			"shared-mime-info": {Name: "shared-mime-info", PkgVersion: "1"},
+		},
+		allowlist: normalizedAllowlist{Owners: []normalizedRule{{Path: "share/mime", Package: "shared-mime-info"}}},
+	}
+	if err := attributeEntries(scan, policy); err != nil {
+		t.Fatal(err)
+	}
+	if global.packageName != "jq" {
+		t.Fatalf("exact global copy attributed to %q", global.packageName)
 	}
 }
 

@@ -53,7 +53,10 @@ func AssembleContext(ctx context.Context, sourcePrefix, outputPrefix string, rec
 		return nil, runtimeError(CodeInvalidRecord, "", "canonical resolution digest: %v", err)
 	}
 	inventory := buildInventory(scan, record, policy, resolutionDigest.String())
-	prune := buildPruneManifest(scan, record, policy, resolutionDigest.String())
+	prune, err := buildPruneManifest(scan, record, policy, resolutionDigest.String())
+	if err != nil {
+		return nil, err
+	}
 
 	parent := filepath.Dir(outputRoot)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
