@@ -180,6 +180,12 @@ why the live check was skipped. Never claim a check passed unless it was run.
 - **Concurrency:** test both platforms and use race detection for shared caches,
   clients, snapshot state, and callback coordination.
 
+## Skills
+
+| Skill | Use for |
+| --- | --- |
+| `$autoreview` | Review before commit/land on non-trivial code changes. Repeat until no accepted/actionable findings remain. Skip for trivial/docs-only work, equivalent manual review, or when the human opts out. |
+
 ## Git and completion
 
 - Keep patches focused; avoid unrelated refactors, formatting churn, or
