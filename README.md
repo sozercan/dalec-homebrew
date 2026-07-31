@@ -6,28 +6,21 @@
 
 ---
 
-`dalec-homebrew` is an out-of-tree [Dalec](https://github.com/project-dalec/dalec) BuildKit gateway frontend. It turns packages declared in `dependencies.runtime` into a non-root Linux image built from authenticated `homebrew/core` metadata and exact bottle layers.
+`dalec-homebrew` uses [Dalec](https://github.com/project-dalec/dalec) to turn Homebrew packages into minimal, non-root Linux container images.
 
 ## What you get
 
-- **Straightforward specs** — add Homebrew Formulae through Dalec's normal runtime dependency field.
-- **Verified inputs** — bind signed Formula metadata, checksums, and OCI descriptors into a replayable resolution record.
-- **Offline installation** — materialize the resolved bottle closure with networking disabled.
-- **A clean runtime** — start from a snapshot-pinned Ubuntu Chisel base without OS package managers, Chisel, the Homebrew repository or download cache, or materializer tooling.
-- **Build evidence** — include an SPDX SBOM, runtime inventory, resolution record, pruning data, and base-image provenance.
+- Choose packages from `homebrew/core`.
+- Get a minimal, non-root image without Homebrew or package managers.
+- Keep an SBOM and a record of everything included in the image.
 
 ## Build an image
 
-You need Docker Buildx backed by BuildKit 0.31.2 or newer. The builder must be able to reach the frontend and its bound components, `formulae.brew.sh`, and `ghcr.io`.
+You need Docker Buildx and a digest-pinned `dalec-homebrew` frontend. This repository does not currently publish one; use a digest supplied by your release pipeline or see [Contributing](CONTRIBUTING.md) to build it yourself.
 
-The checked-in examples are templates; this repository does not currently publish a ready-to-use frontend digest. Build the components from source or use a digest supplied by your release pipeline.
+### Build from the command line
 
-> [!IMPORTANT]
-> Frontend references must use `@sha256:...`. Mutable tags are rejected. To build the frontend and its components from source, follow [`CONTRIBUTING.md`](CONTRIBUTING.md).
-
-### Without a spec file
-
-Following [Dalec's container-only build pattern](https://project-dalec.github.io/dalec/container-only-builds/), you can send the build definition over stdin instead of creating a spec file. This form requires `jq`:
+Build directly from the command line with `jq`:
 
 ```console
 docker buildx build \
@@ -40,7 +33,7 @@ docker buildx build \
 docker run --rm hello-runtime:inline
 ```
 
-### From a minimal spec
+### Build from YAML
 
 Save this as `hello.yaml`, replacing `<frontend-digest>` with the same immutable frontend digest:
 
@@ -78,28 +71,16 @@ See the [usage reference](docs/usage.md) for image settings, tests, dependency r
 
 ## Scope
 
-| Supported | Not currently supported |
+| Supported | Not supported |
 | --- | --- |
 | Linux `amd64` and `arm64` | Other platforms |
-| Current `homebrew/core` Formulae with compatible Linux bottles | Casks, third-party taps, or source builds |
-| Canonical versioned Formulae such as `python@3.14` | Historical versions or version ranges |
-| Non-root runtime identities | Root users or custom image bases |
-| Dalec command and file tests without mounts | Networked tests or test mounts |
+| Current `homebrew/core` bottles | Casks, third-party taps, and source builds |
+| Non-root images | Custom base images and networked tests |
 
 ## Examples
 
-| Example | Demonstrates |
-| --- | --- |
-| [`hello.yaml`](examples/hello.yaml) | Smallest complete runtime |
-| [`live-python.yaml`](examples/live-python.yaml) | Extensions, TLS, SQLite, compression, and time zones |
-| [`live-redis.yaml`](examples/live-redis.yaml) | Stateful non-root execution |
-| [`live-graphviz.yaml`](examples/live-graphviz.yaml) | Plugins and generated runtime indexes |
-| [`live-glibc.yaml`](examples/live-glibc.yaml) | Brewed loader, locales, and conversion data |
+More examples: [Python](examples/live-python.yaml), [Redis](examples/live-redis.yaml), [Graphviz](examples/live-graphviz.yaml), and [glibc](examples/live-glibc.yaml).
 
-## Documentation
+## Learn more
 
-- [Usage reference](docs/usage.md) — specs, builds, supported fields, and image contents
-- [Security policy](SECURITY.md) — trust boundaries, verification properties, and reporting
-- [Architecture](docs/architecture.md) — resolution, materialization, and runtime assembly
-- [Release and rollback](docs/release.md) — component tuples, immutable releases, and promotion
-- [Contributing](CONTRIBUTING.md) — local development, validation, and live tests
+[Usage](docs/usage.md) · [Security](SECURITY.md) · [Architecture](docs/architecture.md) · [Releases](docs/release.md) · [Contributing](CONTRIBUTING.md)
