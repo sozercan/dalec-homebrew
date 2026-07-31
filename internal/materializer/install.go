@@ -1084,6 +1084,10 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 			allowedDirs[parent] = struct{}{}
 		}
 	}
+	postInstallPaths, err := allowedPostInstallKegPaths(node, base, after)
+	if err != nil {
+		return err
+	}
 	changed := map[string]struct{}{}
 	for _, value := range node.Bottle.Tab.ChangedFiles {
 		changed[value] = struct{}{}
@@ -1194,6 +1198,9 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 		if _, ok := expected[rel]; ok {
 			continue
 		}
+		if _, ok := postInstallPaths[rel]; ok {
+			continue
+		}
 		if rel == base+"/INSTALL_RECEIPT.json" {
 			if actual.Type != "regular" || actual.Size > bottle.DefaultLimits().MaxReceiptBytes || actual.Mode.Perm()&0o022 != 0 || (actual.Links != 0 && actual.Links != 1) {
 				return fmt.Errorf("installed receipt is not a bounded regular file")
@@ -1208,6 +1215,73 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 		return fmt.Errorf("installed keg contains unattributed path %s", rel)
 	}
 	return nil
+}
+
+const (
+	glibcLocaleMaxEntries = 4096
+	glibcLocaleMaxFile    = 64 << 20
+	glibcLocaleMaxTotal   = 128 << 20
+)
+
+// allowedPostInstallKegPaths validates narrowly scoped, deterministic data that
+// a verified Formula is documented to create after pouring. The raw bottle
+// inventory remains authoritative for every other path.
+func allowedPostInstallKegPaths(node resolution.Node, base string, after map[string]fileState) (map[string]struct{}, error) {
+	allowed := map[string]struct{}{}
+	if node.Name != "glibc" {
+		return allowed, nil
+	}
+
+	// Homebrew glibc's verified post_install invokes its brewed localedef to
+	// generate C.utf8/en_US.UTF-8 data below lib/locale. Bound the tree, require
+	// ordinary immutable data, and reject links, executables, special modes, or
+	// unknown ownership rather than accepting arbitrary Formula output.
+	root := base + "/lib/locale"
+	rootState, present := after[root]
+	if !present {
+		return allowed, nil
+	}
+	if rootState.Type != "directory" {
+		return nil, fmt.Errorf("glibc post-install locale root is not a directory")
+	}
+	var count int
+	var total int64
+	for rel, state := range after {
+		if rel != root && !strings.HasPrefix(rel, root+"/") {
+			continue
+		}
+		count++
+		if count > glibcLocaleMaxEntries {
+			return nil, fmt.Errorf("glibc post-install locale tree exceeds %d entries", glibcLocaleMaxEntries)
+		}
+		if !state.OwnershipKnown {
+			return nil, fmt.Errorf("glibc post-install locale path %s has unknown ownership", rel)
+		}
+		if state.Mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || state.Mode.Perm()&0o022 != 0 {
+			return nil, fmt.Errorf("glibc post-install locale path %s has unsafe permissions", rel)
+		}
+		switch state.Type {
+		case "directory":
+		case "regular":
+			if state.Mode.Perm()&0o111 != 0 {
+				return nil, fmt.Errorf("glibc post-install locale path %s is executable", rel)
+			}
+			if state.Size < 0 || state.Size > glibcLocaleMaxFile {
+				return nil, fmt.Errorf("glibc post-install locale path %s exceeds the file limit", rel)
+			}
+			if state.Links != 0 && state.Links != 1 {
+				return nil, fmt.Errorf("glibc post-install locale path %s has unexpected hardlinks", rel)
+			}
+			total += state.Size
+			if total > glibcLocaleMaxTotal {
+				return nil, fmt.Errorf("glibc post-install locale tree exceeds the size limit")
+			}
+		default:
+			return nil, fmt.Errorf("glibc post-install locale path %s has unsupported type %s", rel, state.Type)
+		}
+		allowed[rel] = struct{}{}
+	}
+	return allowed, nil
 }
 
 func allowsPostInstallOwnerWrite(node resolution.Node, verified bottle.Result, entry bottle.InventoryEntry, declaredChanged bool, expectedMode, actualMode fs.FileMode) bool {

@@ -10,9 +10,10 @@ go test -race \
   ./internal/bottle \
   ./internal/resolution \
   ./internal/runtimefs \
+  ./internal/runtimebase \
   ./internal/testrunner
 for arch in amd64 arm64; do
-  for cmd in frontend materializer record-verify release-verify test-runner resolve; do
+  for cmd in frontend materializer record-verify release-verify test-runner resolve runtime-base-evidence snapshot-proxy; do
     CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -o "/tmp/dalec-homebrew-${cmd}-${arch}" "./cmd/${cmd}"
   done
 done

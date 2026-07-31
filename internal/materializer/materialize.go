@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -133,12 +134,24 @@ func mergeRuntimeBaseSBOM(doc runtimefs.SPDXDocument, filename string) (runtimef
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	for scanner.Scan() {
 		parts := strings.Split(scanner.Text(), "\t")
-		if len(parts) != 3 || parts[0] == "" || parts[1] == "" {
+		if (len(parts) != 3 && len(parts) != 5) || parts[0] == "" || parts[1] == "" || parts[2] == "" {
 			return doc, nil, fmt.Errorf("invalid runtime base package row %q", scanner.Text())
+		}
+		var checksums []runtimefs.SPDXChecksum
+		if len(parts) == 5 {
+			selectedBytes, err := strconv.ParseInt(parts[3], 10, 64)
+			if err != nil || selectedBytes < 0 {
+				return doc, nil, fmt.Errorf("runtime base package %q has invalid selected size %q", parts[0], parts[3])
+			}
+			d, err := digest.Parse(parts[4])
+			if err != nil || d.Algorithm() != digest.SHA256 {
+				return doc, nil, fmt.Errorf("runtime base package %q has invalid sha256 %q", parts[0], parts[4])
+			}
+			checksums = []runtimefs.SPDXChecksum{{Algorithm: "SHA256", ChecksumValue: d.Encoded()}}
 		}
 		sum := sha256.Sum256([]byte(parts[0] + "\x00" + parts[1] + "\x00" + parts[2]))
 		id := "SPDXRef-Ubuntu-" + hex.EncodeToString(sum[:8])
-		doc.Packages = append(doc.Packages, runtimefs.SPDXPackage{Name: parts[0], SPDXID: id, VersionInfo: parts[1], PackageFileName: "runtime-base", DownloadLocation: "NOASSERTION", FilesAnalyzed: false, LicenseConcluded: "NOASSERTION", LicenseDeclared: "NOASSERTION", CopyrightText: "NOASSERTION", ExternalRefs: []runtimefs.SPDXExternalRef{{ReferenceCategory: "PACKAGE-MANAGER", ReferenceType: "purl", ReferenceLocator: "pkg:deb/ubuntu/" + url.QueryEscape(parts[0]) + "@" + url.QueryEscape(parts[1]) + "?arch=" + url.QueryEscape(parts[2])}}})
+		doc.Packages = append(doc.Packages, runtimefs.SPDXPackage{Name: parts[0], SPDXID: id, VersionInfo: parts[1], PackageFileName: "runtime-base", DownloadLocation: "NOASSERTION", FilesAnalyzed: false, LicenseConcluded: "NOASSERTION", LicenseDeclared: "NOASSERTION", CopyrightText: "NOASSERTION", Checksums: checksums, ExternalRefs: []runtimefs.SPDXExternalRef{{ReferenceCategory: "PACKAGE-MANAGER", ReferenceType: "purl", ReferenceLocator: "pkg:deb/ubuntu/" + url.QueryEscape(parts[0]) + "@" + url.QueryEscape(parts[1]) + "?arch=" + url.QueryEscape(parts[2])}}})
 		doc.DocumentDescribes = append(doc.DocumentDescribes, id)
 	}
 	if err := scanner.Err(); err != nil {

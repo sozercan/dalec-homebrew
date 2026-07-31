@@ -162,7 +162,7 @@ func Verify(opts Options) error {
 
 func relocatableObjectDataPath(filename string) bool {
 	switch strings.ToLower(filepath.Ext(filename)) {
-	case ".o", ".lo", ".syso":
+	case ".a", ".o", ".lo", ".syso":
 		return true
 	default:
 		return false

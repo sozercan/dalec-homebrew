@@ -1471,3 +1471,87 @@ func writeMaterializerReceipt(t *testing.T, prefix string, node resolution.Node,
 	}
 	return path
 }
+
+func TestReconcileAllowsBoundGlibcPostInstallLocaleData(t *testing.T) {
+	node := resolution.Node{Name: "glibc", PkgVersion: "2.39_1"}
+	verified := bottle.Result{
+		Name:       "glibc",
+		PkgVersion: "2.39_1",
+		KegPrefix:  "glibc/2.39_1",
+		Inventory: []bottle.InventoryEntry{{
+			Path: "glibc/2.39_1/lib/libc.so.6", KegPath: "lib/libc.so.6",
+			Type: bottle.EntryRegular, Mode: 0o755, SHA256: "sha256:" + strings.Repeat("a", 64),
+		}},
+	}
+	after := map[string]fileState{
+		"Cellar/glibc/2.39_1/lib":                        {Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true},
+		"Cellar/glibc/2.39_1/lib/libc.so.6":              {Type: "regular", Mode: 0o755, Digest: strings.Repeat("a", 64)},
+		"Cellar/glibc/2.39_1/lib/locale":                 {Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true},
+		"Cellar/glibc/2.39_1/lib/locale/C.utf8":          {Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true},
+		"Cellar/glibc/2.39_1/lib/locale/C.utf8/LC_CTYPE": {Type: "regular", Mode: 0o644, Size: 1024, Digest: strings.Repeat("b", 64), Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true},
+	}
+	if err := reconcileInstalledKeg("/home/linuxbrew/.linuxbrew", node, verified, after); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGlibcPostInstallLocaleDataRejectsUnsafeContent(t *testing.T) {
+	root := "Cellar/glibc/2.39_1/lib/locale"
+	base := map[string]fileState{
+		root:                     {Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true},
+		root + "/locale-archive": {Type: "regular", Mode: 0o644, Size: 1024, Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true},
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(map[string]fileState)
+	}{
+		{name: "executable", mutate: func(after map[string]fileState) {
+			state := after[root+"/locale-archive"]
+			state.Mode = 0o755
+			after[root+"/locale-archive"] = state
+		}},
+		{name: "writable", mutate: func(after map[string]fileState) {
+			state := after[root+"/locale-archive"]
+			state.Mode = 0o664
+			after[root+"/locale-archive"] = state
+		}},
+		{name: "symlink", mutate: func(after map[string]fileState) {
+			after[root+"/locale-archive"] = fileState{Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "/etc/shadow", OwnershipKnown: true}
+		}},
+		{name: "large", mutate: func(after map[string]fileState) {
+			state := after[root+"/locale-archive"]
+			state.Size = glibcLocaleMaxFile + 1
+			after[root+"/locale-archive"] = state
+		}},
+		{name: "hardlink", mutate: func(after map[string]fileState) {
+			state := after[root+"/locale-archive"]
+			state.Links = 2
+			after[root+"/locale-archive"] = state
+		}},
+		{name: "unknown-owner", mutate: func(after map[string]fileState) {
+			state := after[root+"/locale-archive"]
+			state.OwnershipKnown = false
+			after[root+"/locale-archive"] = state
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			after := maps.Clone(base)
+			tc.mutate(after)
+			if _, err := allowedPostInstallKegPaths(resolution.Node{Name: "glibc"}, "Cellar/glibc/2.39_1", after); err == nil {
+				t.Fatal("unsafe generated locale content accepted")
+			}
+		})
+	}
+}
+
+func TestReconcileGlibcStillRejectsOtherGeneratedKegPaths(t *testing.T) {
+	node := resolution.Node{Name: "glibc", PkgVersion: "2.39_1"}
+	verified := bottle.Result{Name: "glibc", PkgVersion: "2.39_1", KegPrefix: "glibc/2.39_1"}
+	after := map[string]fileState{
+		"Cellar/glibc/2.39_1/lib/locale":   {Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true},
+		"Cellar/glibc/2.39_1/bin/injected": {Type: "regular", Mode: 0o755, UID: 1000, GID: 1000, OwnershipKnown: true},
+	}
+	if err := reconcileInstalledKeg("/home/linuxbrew/.linuxbrew", node, verified, after); err == nil || !strings.Contains(err.Error(), "unattributed path") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

@@ -500,6 +500,21 @@ func TestPrivateExecutableObjectFileIsRuntimeData(t *testing.T) {
 	}
 }
 
+func TestPrivateExecutableRelocatableStaticObjectIsRuntimeData(t *testing.T) {
+	root := t.TempDir()
+	prefix := filepath.Join(root, "home/linuxbrew/.linuxbrew")
+	if err := os.MkdirAll(filepath.Join(prefix, "Cellar/glibc/2.39_1/lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// glibc's verified libmcheck.a bottle payload is a raw ET_REL object, not
+	// an ar container, and is marked executable. Its .a path still makes it
+	// authenticated linker data; a global/exposed link to it remains rejected.
+	writeMinimalELFType(t, filepath.Join(prefix, "Cellar/glibc/2.39_1/lib/libmcheck.a"), 62, 1, 0o555)
+	if err := Verify(Options{Root: root, Prefix: "/home/linuxbrew/.linuxbrew", Arch: "amd64"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPrivateExecutableRelocatableELFIsRejected(t *testing.T) {
 	root := t.TempDir()
 	prefix := filepath.Join(root, "home/linuxbrew/.linuxbrew")

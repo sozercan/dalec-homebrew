@@ -679,8 +679,38 @@ def parse_dpkg_status(data):
             "version": fields.get("Version"),
             "architecture": architecture,
             "installed_size_kib": installed_size,
+            "selected_size_bytes": None,
+            "sha256": None,
         })
     packages.sort(key=lambda p: (-p["installed_size_kib"], p["name"]))
+    return packages
+
+
+def parse_runtime_package_inventory(data):
+    packages = []
+    for line in data.decode("utf-8", "replace").splitlines():
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) not in (3, 5) or not all(parts[:3]):
+            raise ValueError("invalid runtime base package row: " + repr(line))
+        selected_size = None
+        checksum = None
+        if len(parts) == 5:
+            selected_size = int(parts[3])
+            if selected_size < 0 or not parts[4].startswith("sha256:") or len(parts[4]) != 71:
+                raise ValueError("invalid chisel runtime base package row: " + repr(line))
+            int(parts[4][7:], 16)
+            checksum = parts[4]
+        packages.append({
+            "name": parts[0],
+            "version": parts[1],
+            "architecture": parts[2],
+            "installed_size_kib": ((selected_size + 1023) // 1024) if selected_size is not None else 0,
+            "selected_size_bytes": selected_size,
+            "sha256": checksum,
+        })
+    packages.sort(key=lambda p: (-(p["selected_size_bytes"] or 0), p["name"]))
     return packages
 
 
@@ -692,6 +722,7 @@ other = set()
 directory_bytes = {}
 excluded_paths = []
 dpkg_status = None
+runtime_package_inventory = None
 
 archive = tarfile.open(fileobj=sys.stdin.buffer, mode="r|*")
 for member in archive:
@@ -714,6 +745,10 @@ for member in archive:
             f = archive.extractfile(member)
             if f is not None:
                 dpkg_status = f.read()
+        elif path == "/usr/share/dalec-homebrew/runtime-base-packages.tsv":
+            f = archive.extractfile(member)
+            if f is not None:
+                runtime_package_inventory = f.read()
     elif member.islnk():
         hardlinks[path] = normalize(member.linkname)
     elif member.issym():
@@ -750,7 +785,18 @@ largest_directories = [
 ]
 largest_directories.sort(key=lambda entry: (-entry["size_bytes"], entry["path"]))
 
-packages = parse_dpkg_status(dpkg_status) if dpkg_status is not None else []
+if dpkg_status is not None:
+    packages = parse_dpkg_status(dpkg_status)
+    package_database = "dpkg"
+    package_size_basis = "dpkg Installed-Size"
+elif runtime_package_inventory is not None:
+    packages = parse_runtime_package_inventory(runtime_package_inventory)
+    package_database = "runtime-base-packages"
+    package_size_basis = "selected Chisel regular payload bytes"
+else:
+    packages = []
+    package_database = None
+    package_size_basis = None
 evidence_files = sorted(
     path for path in list(regular_sizes) + list(hardlinks)
     if posixpath.dirname(path) == "/usr/share/dalec-homebrew"
@@ -791,8 +837,10 @@ json.dump({
         "files": evidence_files,
     },
     "packages": {
-        "database": "dpkg" if dpkg_status is not None else None,
+        "database": package_database,
+        "size_basis": package_size_basis,
         "installed_size_kib_total": sum(p["installed_size_kib"] for p in packages),
+        "selected_size_bytes_total": sum(p["selected_size_bytes"] or 0 for p in packages),
         "largest": packages[:TOP_N],
     },
     "largest_directories": largest_directories[:TOP_N],

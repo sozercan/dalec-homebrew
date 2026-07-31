@@ -10,6 +10,7 @@ PLATFORM=${DALEC_HOMEBREW_LIVE_PLATFORM:-}
 SPEC=${DALEC_HOMEBREW_LIVE_SPEC:-examples/live-test.yaml}
 FINAL_IMAGE=${DALEC_HOMEBREW_LIVE_IMAGE:-dalec-homebrew-live:dev}
 PROGRESS=${DALEC_HOMEBREW_LIVE_PROGRESS:-plain}
+SOURCE_DATE_EPOCH=${DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH:-1781049600}
 
 if [[ -z "$BUILDER" || -z "$REGISTRY" || -z "$PLATFORM" ]]; then
   cat >&2 <<'USAGE'
@@ -60,6 +61,7 @@ docker buildx build \
   --platform "$PLATFORM" \
   --target runtime-base \
   --build-arg "RUNTIME_BASE=$RUNTIME_BASE" \
+  --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
   --tag "$REGISTRY/dalec-homebrew-runtime-base:$RUN_ID" \
   --metadata-file "$WORK/base.json" \
   --provenance=false \
@@ -74,6 +76,7 @@ docker buildx build \
   --platform "$PLATFORM" \
   --target materializer \
   --build-arg "RUNTIME_BASE=$RUNTIME_BASE" \
+  --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
   --tag "$REGISTRY/dalec-homebrew-materializer:$RUN_ID" \
   --metadata-file "$WORK/materializer.json" \
   --provenance=false \
@@ -89,6 +92,7 @@ docker buildx build \
   --target frontend \
   --build-arg "RUNTIME_BASE_REF=$BASE_REF" \
   --build-arg "MATERIALIZER_REF=$MATERIALIZER_REF" \
+  --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
   --tag "$REGISTRY/dalec-homebrew:$RUN_ID" \
   --metadata-file "$WORK/frontend.json" \
   --provenance=false \
