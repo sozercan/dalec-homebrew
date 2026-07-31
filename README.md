@@ -1,8 +1,7 @@
 <div align="center">
   <h1>dalec-homebrew</h1>
-  <p><strong>Verified Homebrew bottles. Clean Dalec runtime images.</strong></p>
-  <p>Declare packages once, verify the complete closure, and ship a purpose-built runtime.</p>
-  <p><code>Dalec spec</code> → <code>authenticated metadata</code> → <code>verified bottles</code> → <code>runtime image</code></p>
+  <p><strong>Build minimal Linux container images with Homebrew packages.</strong></p>
+  <p>Choose the packages you need. <code>dalec-homebrew</code> builds a ready-to-run image for you.</p>
 </div>
 
 ---
