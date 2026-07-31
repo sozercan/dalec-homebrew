@@ -27,35 +27,75 @@ You need Docker Buildx backed by BuildKit 0.31.2 or newer. The builder must be a
 
 The checked-in examples are templates; this repository does not currently publish a ready-to-use frontend digest. Build the components from source or use a digest supplied by your release pipeline.
 
-After replacing `<frontend-digest>` in [`examples/hello.yaml`](examples/hello.yaml) with that immutable digest, run:
+> [!IMPORTANT]
+> Frontend references must use `@sha256:...`. Mutable tags are rejected. To build the frontend and its components from source, follow [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+### Without a spec file
+
+Following [Dalec's container-only build pattern](https://project-dalec.github.io/dalec/container-only-builds/), you can send the build definition over stdin instead of creating a spec file. This form requires `jq`:
+
+```console
+FRONTEND='ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>'
+
+jq -nc '{
+  name: "hello-runtime",
+  description: "GNU hello from a verified Homebrew bottle",
+  website: "https://www.gnu.org/software/hello/",
+  version: "0.1.0",
+  revision: "1",
+  license: "Apache-2.0",
+  dependencies: {runtime: {hello: {}}},
+  image: {entrypoint: "/home/linuxbrew/.linuxbrew/bin/hello"}
+}' |
+  docker buildx build \
+    --build-arg "BUILDKIT_SYNTAX=$FRONTEND" \
+    --platform linux/amd64 \
+    --tag hello-runtime:inline \
+    --load \
+    -
+
+docker run --rm hello-runtime:inline
+```
+
+### From a minimal spec
+
+Save this as `hello.yaml`, replacing `<frontend-digest>` with the same immutable frontend digest:
+
+```yaml
+# syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
+
+name: hello-runtime
+description: GNU hello from a verified Homebrew bottle
+website: https://www.gnu.org/software/hello/
+version: 0.1.0
+revision: 1
+license: Apache-2.0
+
+dependencies:
+  runtime:
+    hello: {}
+
+image:
+  entrypoint: /home/linuxbrew/.linuxbrew/bin/hello
+```
+
+Build and run it:
 
 ```console
 docker buildx build \
   --platform linux/amd64 \
-  --file examples/hello.yaml \
-  --tag hello-runtime:local \
+  --file hello.yaml \
+  --tag hello-runtime:spec \
   --load \
   .
 
-docker run --rm hello-runtime:local
+docker run --rm hello-runtime:spec
 ```
+
+Both forms print:
 
 ```text
 Hello, world!
-```
-
-> [!IMPORTANT]
-> The frontend reference must use `@sha256:...`. Mutable tags are rejected. To build the frontend and its components from source, follow [`CONTRIBUTING.md`](CONTRIBUTING.md).
-
-Adding packages is just a spec change:
-
-```yaml
-dependencies:
-  runtime:
-    hello: {}
-    jq: {}
-    ripgrep:
-      arch: [amd64, arm64]
 ```
 
 See the [usage reference](docs/usage.md) for image settings, tests, dependency rules, and the complete supported contract.
