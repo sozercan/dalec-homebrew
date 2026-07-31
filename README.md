@@ -3,10 +3,6 @@
   <p><strong>Verified Homebrew bottles. Clean Dalec runtime images.</strong></p>
   <p>Declare packages once, verify the complete closure, and ship a purpose-built runtime.</p>
   <p><code>Dalec spec</code> → <code>authenticated metadata</code> → <code>verified bottles</code> → <code>runtime image</code></p>
-  <p>
-    <a href="https://github.com/sozercan/dalec-homebrew/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/sozercan/dalec-homebrew/actions/workflows/ci.yml/badge.svg"></a>
-    <a href="LICENSE"><img alt="Apache-2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-4c6ef5.svg"></a>
-  </p>
 </div>
 
 ---
@@ -108,7 +104,3 @@ See the [usage reference](docs/usage.md) for image settings, tests, dependency r
 - [Architecture](docs/architecture.md) — resolution, materialization, and runtime assembly
 - [Release and rollback](docs/release.md) — component tuples, immutable releases, and promotion
 - [Contributing](CONTRIBUTING.md) — local development, validation, and live tests
-
-## License
-
-Licensed under the [Apache License 2.0](LICENSE).
