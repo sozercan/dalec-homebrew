@@ -8,25 +8,40 @@ The V1 implementation is expected to preserve these properties:
 2. Formula identity and bottle checksums come from a verified Homebrew JWS payload and a pinned public-key set.
 3. Registry tags are discovery inputs only. Resolution records bind raw index, manifest, config, and layer descriptors.
 4. The compressed bottle digest must equal both the selected OCI layer digest and the authenticated Homebrew checksum.
-5. Bottle archives are scanned before installation and cannot contain traversal, escaping links, special files, setid bits, security capabilities/xattrs, collisions, or unbounded expansion.
-6. The independent resolution verifier and every bottle verifier complete before `brew` executes.
+5. Bottle archives are scanned before installation and cannot contain traversal, escaping links, special files, setid bits, security capabilities or xattrs, collisions, or unbounded expansion.
+6. The independent resolution verifier and every bottle verifier complete before Homebrew executes.
 7. Materialization has no network, secrets, SSH agents, sockets, devices, or shared writable caches.
-8. Homebrew is invoked only with local bottles, `--ignore-dependencies`, and `--force-bottle`; unexpected kegs and source-built receipts fail.
-9. Only an inventory-selected filesystem subset is copied into a fresh runtime base.
+8. Homebrew is invoked only with local bottles, dependency selection and source fallback disabled, and every resulting prefix mutation checked. Unexpected kegs and source-built receipts fail.
+9. Only an inventory-selected filesystem subset is copied into the final runtime state.
 10. Runtime code, links, libraries, plugins, and ancestors are root-owned and non-writable. Only explicitly versioned `var/<formula>` paths are writable by the runtime identity.
-11. Runtime tests use the final pruned state, final user, final environment/working directory, and no network.
-12. The Noble runtime base is cut from a fixed Ubuntu snapshot with a SHA-256-pinned Chisel binary and immutable checksummed slice definitions. The build-only proxy accepts only Ubuntu archive hosts, while Chisel remains responsible for signed Release and package-digest verification; neither Chisel nor the proxy reaches the final image.
-13. Generated shared runtime indexes are accepted only at versioned paths with
-    package/capability checks, bounded structure and size, authenticated runtime
-    ownership, and explicit runtime evidence attribution; unrelated global
-    `lib` or shared-data mutations continue to fail closed.
+11. Runtime tests use the final pruned state, final user, final environment and working directory, and no network.
+12. The Noble runtime base is cut from a fixed Ubuntu snapshot with a SHA-256-pinned Chisel binary and immutable, checksummed slice definitions. The build-only proxy accepts only Ubuntu archive hosts, while Chisel remains responsible for signed Release and package-digest verification; neither Chisel nor the proxy reaches the final image.
+13. Generated shared runtime indexes are accepted only at versioned paths with package and capability checks, bounded structure and size, authenticated runtime ownership, and explicit evidence attribution. Unrelated global `lib` or shared-data mutations continue to fail closed.
 
-## Out of scope / external controls
+## Upstream trust limitations
 
-The frontend does not hold signing credentials and cannot itself guarantee registry retention, CI builder identity, vulnerability database freshness, VEX approval, or immutable rollback mirrors. Release automation must sign the frontend/base/materializer tuple, exact platform images, resolution/evidence artifacts, and provenance, then promote by digest without rebuilding.
+Homebrew's public `formula.jws.json` authenticates Formula metadata and bottle checksums but does not provide a signed timestamp. The implementation records whether freshness came from signed payload data or HTTP `Last-Modified`; production release jobs should supply a monotonic rollback floor and persist accepted snapshot identities.
 
-The public Homebrew Formula JWS does not currently provide a signed timestamp or bind the OCI `sh.brew.tab` annotation. See the trust notes in the README. Reports that demonstrate a practical violation of the checks above are in scope even when the root cause is an upstream metadata-format limitation.
+The Formula JWS authenticates the compressed bottle checksum, but it does not bind the OCI index annotations containing `sh.brew.tab`. This implementation:
+
+1. treats signed Formula declarations as package identity authority,
+2. verifies the complete fetched OCI descriptor chain by digest and size,
+3. requires the selected layer digest to equal the signed Homebrew checksum,
+4. treats bottle-tab dependencies as minimum and consistency evidence, and
+5. records an explicit upstream-attestation waiver unless release infrastructure supplies a stronger attestation policy.
+
+Current Homebrew bottle tarballs generally do not contain `INSTALL_RECEIPT.json`; Homebrew creates it while pouring the bottle. The archive verifier can require a pre-install receipt for fixtures or alternate producers, while production verifies the generated receipt after offline installation.
+
+Modern Homebrew forbids local bottle paths by default, and its public `brew install` command performs mutable tap and prefix preflight. The materializer therefore invokes the pinned Homebrew `FormulaInstaller` through a minimal read-only Ruby adapter after independent bottle verification. Resolution, dependency selection, network access, and source fallback remain disabled; normal Homebrew extraction, relocation, linking, `etc` and `var` handling, and Formula post-install hooks still run.
+
+See [`docs/architecture.md`](docs/architecture.md) for the complete resolution, materialization, and runtime-base flow.
+
+## Out of scope and external controls
+
+The frontend does not hold signing credentials and cannot itself guarantee registry retention, CI builder identity, vulnerability database freshness, VEX approval, or immutable rollback mirrors. Release automation must sign the frontend, base, and materializer tuple; exact platform images; resolution and evidence artifacts; and provenance, then promote by digest without rebuilding.
+
+Reports that demonstrate a practical violation of the properties above are in scope even when the root cause is an upstream metadata-format limitation.
 
 ## Reporting
 
-Please report vulnerabilities privately to the repository maintainers. Include a minimal Dalec spec or resolution record, the affected platform/component digests, and a reproduction where possible. Do not include credentials or private registry tokens.
+Please report vulnerabilities privately to the repository maintainers. Include a minimal Dalec spec or resolution record, the affected platform and component digests, and a reproduction where possible. Do not include credentials or private registry tokens.
