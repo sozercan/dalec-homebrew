@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"debug/elf"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,8 +14,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+
+	"github.com/sozercan/dalec-homebrew/internal/resolution"
 )
 
 type Options struct {
@@ -24,6 +29,11 @@ type Options struct {
 	CPUBaseline   string
 	LogicalPrefix string
 	SearchPATH    []string
+}
+
+type scriptScope struct {
+	required  map[string]struct{}
+	auxiliary map[string]string
 }
 
 func Verify(opts Options) error {
@@ -69,6 +79,17 @@ func Verify(opts Options) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("runtime prefix %s is not a real directory", prefix)
 	}
+	exposedExecutables, err := discoverExposedExecutables(root, prefix, opts.LogicalPrefix, opts.SearchPATH)
+	if err != nil {
+		return err
+	}
+	scope, bound, err := runtimeScriptScope(root, prefix, opts)
+	if err != nil {
+		return err
+	}
+	if !bound {
+		scope.required = exposedExecutables
+	}
 	err = filepath.WalkDir(prefix, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			errs = append(errs, walkErr)
@@ -94,26 +115,40 @@ func Verify(opts Options) error {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		if err := verifyNoForbiddenReferences(p); err != nil {
-			errs = append(errs, err)
-		}
 		f, err := os.Open(p)
 		if err != nil {
 			errs = append(errs, err)
 			return nil
 		}
 		defer f.Close()
-		var magic [4]byte
+		var magic [8]byte
 		n, _ := io.ReadFull(f, magic[:])
 		_, _ = f.Seek(0, io.SeekStart)
-		if n == 4 && string(magic[:]) == "\x7fELF" {
-			if err := verifyELF(root, prefix, opts.LogicalPrefix, p, opts.Arch, opts.CPUBaseline); err != nil {
+		isELF := n >= 4 && string(magic[:4]) == "\x7fELF"
+		if err := verifyNoForbiddenReferences(p); err != nil {
+			errs = append(errs, err)
+		}
+		if isELF {
+			clean := filepath.Clean(p)
+			_, required := scope.required[clean]
+			_, exposed := exposedExecutables[clean]
+			objectData := relocatableObjectDataPath(p)
+			executableObject := info.Mode().Perm()&0o111 != 0 && !objectData
+			runtimeCandidate := required || exposed || executableObject
+			if err := verifyELF(root, prefix, opts.LogicalPrefix, p, opts.Arch, opts.CPUBaseline, runtimeCandidate, objectData); err != nil {
 				errs = append(errs, err)
 			}
 			return nil
 		}
 		if n >= 2 && magic[0] == '#' && magic[1] == '!' && info.Mode().Perm()&0o111 != 0 {
-			if err := verifyShebang(root, prefix, opts.LogicalPrefix, opts.SearchPATH, opts.Arch, f, p); err != nil {
+			clean := filepath.Clean(p)
+			_, required := scope.required[clean]
+			_, exposed := exposedExecutables[clean]
+			expectedAuxiliaryShebang := ""
+			if !required && !exposed {
+				expectedAuxiliaryShebang = scope.auxiliary[clean]
+			}
+			if err := verifyShebang(root, prefix, opts.LogicalPrefix, opts.SearchPATH, opts.Arch, f, p, expectedAuxiliaryShebang); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -125,12 +160,33 @@ func Verify(opts Options) error {
 	return errors.Join(errs...)
 }
 
-func verifyELF(root, prefix, logicalPrefix, filename, arch, baseline string) error {
+func relocatableObjectDataPath(filename string) bool {
+	switch strings.ToLower(filepath.Ext(filename)) {
+	case ".o", ".lo", ".syso":
+		return true
+	default:
+		return false
+	}
+}
+
+func verifyELF(root, prefix, logicalPrefix, filename, arch, baseline string, runtimeCandidate, objectData bool) error {
 	f, err := elf.Open(filename)
 	if err != nil {
 		return fmt.Errorf("parse ELF %s: %w", filename, err)
 	}
 	defer f.Close()
+	if f.Type == elf.ET_REL {
+		// Relocatable objects are runtime inputs, not host-loadable programs, but
+		// only at authenticated object-data paths. A .so/plugin or arbitrary helper
+		// containing ET_REL is malformed even when it is not executable or exposed.
+		if runtimeCandidate || !objectData {
+			return fmt.Errorf("ELF %s is a relocatable object exposed as a runtime executable or stored outside an object-data path", filename)
+		}
+		return nil
+	}
+	if f.Type != elf.ET_EXEC && f.Type != elf.ET_DYN {
+		return fmt.Errorf("ELF %s has unsupported runtime type %s", filename, f.Type)
+	}
 	want := elf.EM_NONE
 	switch arch {
 	case "amd64":
@@ -159,6 +215,9 @@ func verifyELF(root, prefix, logicalPrefix, filename, arch, baseline string) err
 		if interp == "" || !filepath.IsAbs(interp) {
 			return fmt.Errorf("ELF %s has invalid interpreter %q", filename, interp)
 		}
+		if ref := forbiddenRuntimeReference(interp); ref != "" {
+			return fmt.Errorf("ELF %s interpreter references materializer-only path %q", filename, ref)
+		}
 		interpreterPath, err := resolveInRoot(root, prefix, logicalPrefix, interp)
 		if err != nil {
 			return fmt.Errorf("ELF %s interpreter %s escapes runtime root: %w", filename, interp, err)
@@ -166,13 +225,6 @@ func verifyELF(root, prefix, logicalPrefix, filename, arch, baseline string) err
 		if err := verifyExecutable(interpreterPath, arch); err != nil {
 			return fmt.Errorf("ELF %s interpreter %s is unusable: %w", filename, interp, err)
 		}
-	}
-	libs, err := f.ImportedLibraries()
-	if err != nil {
-		return fmt.Errorf("read ELF dependencies %s: %w", filename, err)
-	}
-	if len(libs) == 0 {
-		return nil
 	}
 	var dirs []string
 	values, _ := f.DynString(elf.DT_RUNPATH)
@@ -185,6 +237,9 @@ func verifyELF(root, prefix, logicalPrefix, filename, arch, baseline string) err
 	}
 	logicalOrigin := filepath.Join(logicalPrefix, originRel)
 	for _, value := range values {
+		if ref := forbiddenRuntimeReference(value); ref != "" {
+			return fmt.Errorf("ELF %s runtime library path references materializer-only path %q", filename, ref)
+		}
 		for _, dir := range strings.Split(value, ":") {
 			dir = strings.ReplaceAll(dir, "${ORIGIN}", logicalOrigin)
 			dir = strings.ReplaceAll(dir, "$ORIGIN", logicalOrigin)
@@ -193,6 +248,13 @@ func verifyELF(root, prefix, logicalPrefix, filename, arch, baseline string) err
 			}
 			dirs = appendUnique(dirs, filepath.Clean(dir))
 		}
+	}
+	libs, err := f.ImportedLibraries()
+	if err != nil {
+		return fmt.Errorf("read ELF dependencies %s: %w", filename, err)
+	}
+	if len(libs) == 0 {
+		return nil
 	}
 	systemDirs, err := systemLibraryDirs(root, arch)
 	if err != nil {
@@ -304,7 +366,7 @@ func verifyCPUProperties(f *elf.File, arch, baseline string) error {
 	return nil
 }
 
-func verifyShebang(root, prefix, logicalPrefix string, searchPATH []string, arch string, f *os.File, filename string) error {
+func verifyShebang(root, prefix, logicalPrefix string, searchPATH []string, arch string, f *os.File, filename, expectedAuxiliaryShebang string) error {
 	_, _ = f.Seek(0, io.SeekStart)
 	line, err := bufio.NewReader(io.LimitReader(f, 4096)).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -315,23 +377,37 @@ func verifyShebang(root, prefix, logicalPrefix string, searchPATH []string, arch
 	if len(fields) == 0 {
 		return fmt.Errorf("script %s has an empty shebang", filename)
 	}
+	auxiliary := expectedAuxiliaryShebang != ""
+	if auxiliary && line != expectedAuxiliaryShebang {
+		return fmt.Errorf("script %s auxiliary shebang %q does not match authenticated fixture %q", filename, line, expectedAuxiliaryShebang)
+	}
 	interpreter := fields[0]
 	if !filepath.IsAbs(interpreter) {
+		if auxiliary {
+			return nil
+		}
 		return fmt.Errorf("script %s has non-absolute interpreter %q", filename, interpreter)
+	}
+	isEnv := interpreter == "/usr/bin/env" || interpreter == "/bin/env"
+	if isEnv && (len(fields) != 2 || strings.HasPrefix(fields[1], "-")) {
+		return fmt.Errorf("script %s uses unsupported env shebang %q", filename, line)
 	}
 	interpreterPath, err := resolveInRoot(root, prefix, logicalPrefix, interpreter)
 	if err != nil {
+		if auxiliary && errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return fmt.Errorf("script %s interpreter %s escapes runtime root: %w", filename, interpreter, err)
 	}
 	if err := verifyExecutable(interpreterPath, arch); err != nil {
 		return fmt.Errorf("script %s interpreter %s is unusable: %w", filename, interpreter, err)
 	}
-	if interpreter == "/usr/bin/env" || interpreter == "/bin/env" {
-		if len(fields) != 2 || strings.HasPrefix(fields[1], "-") {
-			return fmt.Errorf("script %s uses unsupported env shebang %q", filename, line)
-		}
+	if isEnv {
 		resolved, err := resolvePATHCommand(root, prefix, logicalPrefix, searchPATH, fields[1])
 		if err != nil {
+			if auxiliary && errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
 			return fmt.Errorf("script %s env interpreter %q is unavailable: %w", filename, fields[1], err)
 		}
 		if err := verifyExecutable(resolved, arch); err != nil {
@@ -429,6 +505,259 @@ func resolvePATHCommand(root, prefix, logicalPrefix string, searchPATH []string,
 		}
 	}
 	return "", os.ErrNotExist
+}
+
+func discoverExposedExecutables(root, prefix, logicalPrefix string, searchPATH []string) (map[string]struct{}, error) {
+	dirs := appendUnique(nil, filepath.Join(logicalPrefix, "bin"), filepath.Join(logicalPrefix, "sbin"))
+	dirs = appendUnique(dirs, searchPATH...)
+	exposed := map[string]struct{}{}
+	for _, dir := range dirs {
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		resolvedDir, err := resolveInRoot(root, prefix, logicalPrefix, dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolve executable search directory %q: %w", dir, err)
+		}
+		rel, err := filepath.Rel(prefix, resolvedDir)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			// Runtime-base PATH entries are outside the Homebrew prefix and are
+			// not part of the tree walked by Verify.
+			continue
+		}
+		info, err := os.Stat(resolvedDir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("stat executable search directory %q: %w", dir, err)
+		}
+		if !info.IsDir() {
+			continue
+		}
+		entries, err := os.ReadDir(resolvedDir)
+		if err != nil {
+			return nil, fmt.Errorf("read executable search directory %q: %w", dir, err)
+		}
+		for _, entry := range entries {
+			candidate := filepath.Join(resolvedDir, entry.Name())
+			resolved, err := resolveHostWithinRoot(root, candidate)
+			if err != nil {
+				// The main walk reports unsafe or dangling links with their full
+				// source path. They cannot expand the exposed-script allowlist.
+				continue
+			}
+			info, err := os.Stat(resolved)
+			if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+				continue
+			}
+			exposed[filepath.Clean(resolved)] = struct{}{}
+		}
+	}
+	return exposed, nil
+}
+
+func runtimeScriptScope(root, prefix string, opts Options) (scriptScope, bool, error) {
+	resolutionData, resolutionFound, err := readRuntimeEvidence(root, prefix, opts.LogicalPrefix, "/usr/share/dalec-homebrew/resolution.json", 16<<20)
+	if err != nil {
+		return scriptScope{}, false, err
+	}
+	manifestData, manifestFound, err := readRuntimeEvidence(root, prefix, opts.LogicalPrefix, "/usr/share/dalec-homebrew/manifest.json", 16<<20)
+	if err != nil {
+		return scriptScope{}, false, err
+	}
+	if resolutionFound != manifestFound {
+		return scriptScope{}, false, fmt.Errorf("runtime resolution and manifest evidence must either both exist or both be absent")
+	}
+	if !resolutionFound {
+		return scriptScope{required: map[string]struct{}{}, auxiliary: map[string]string{}}, false, nil
+	}
+	record, err := resolution.Decode(resolutionData)
+	if err != nil {
+		return scriptScope{}, false, fmt.Errorf("decode runtime resolution evidence: %w", err)
+	}
+	digest, err := resolution.Digest(record)
+	if err != nil {
+		return scriptScope{}, false, fmt.Errorf("digest runtime resolution evidence: %w", err)
+	}
+	var manifest struct {
+		SchemaVersion    string              `json:"schema_version"`
+		ResolutionDigest string              `json:"resolution_digest"`
+		Platform         resolution.Platform `json:"platform"`
+		Prefix           string              `json:"prefix"`
+	}
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return scriptScope{}, false, fmt.Errorf("decode runtime manifest evidence: %w", err)
+	}
+	if manifest.SchemaVersion != "dalec-homebrew-runtime-manifest/v1" || manifest.ResolutionDigest != digest.String() {
+		return scriptScope{}, false, fmt.Errorf("runtime manifest does not bind the embedded resolution")
+	}
+	if manifest.Prefix != opts.LogicalPrefix || manifest.Platform != record.Input.Platform || record.Input.Platform.Architecture != opts.Arch {
+		return scriptScope{}, false, fmt.Errorf("runtime resolution scope does not match verification target")
+	}
+	if record.Runtime.CPUBaseline != opts.CPUBaseline || !slices.Equal(record.Runtime.GeneratedPATH, opts.SearchPATH) {
+		return scriptScope{}, false, fmt.Errorf("runtime resolution policy does not match verification options")
+	}
+	byName := make(map[string]resolution.Node, len(record.Nodes))
+	for _, node := range record.Nodes {
+		byName[node.Name] = node
+	}
+	requestedNames := make(map[string]struct{}, len(record.Requested))
+	scope := scriptScope{required: map[string]struct{}{}, auxiliary: map[string]string{}}
+	for _, requested := range record.Requested {
+		requestedNames[requested.Canonical] = struct{}{}
+		node, ok := byName[requested.Canonical]
+		if !ok {
+			return scriptScope{}, false, fmt.Errorf("requested runtime root %q is missing from resolution", requested.Canonical)
+		}
+		for _, executable := range node.ExecutablePaths {
+			executable = filepath.ToSlash(executable)
+			clean := path.Clean(executable)
+			if clean != executable || clean == "." || path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
+				return scriptScope{}, false, fmt.Errorf("requested executable path %q is unsafe", executable)
+			}
+			logical := path.Join(filepath.ToSlash(opts.LogicalPrefix), "Cellar", node.Name, node.PkgVersion, clean)
+			resolved, err := resolveInRoot(root, prefix, opts.LogicalPrefix, filepath.FromSlash(logical))
+			if err != nil {
+				return scriptScope{}, false, fmt.Errorf("resolve requested executable %q: %w", logical, err)
+			}
+			info, err := os.Stat(resolved)
+			if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+				return scriptScope{}, false, fmt.Errorf("requested executable %q is unavailable or unusable", logical)
+			}
+			scope.required[filepath.Clean(resolved)] = struct{}{}
+		}
+	}
+	add := func(node resolution.Node, subpath, expected string) error {
+		logical := path.Join(filepath.ToSlash(opts.LogicalPrefix), "Cellar", node.Name, node.PkgVersion, subpath)
+		resolved, err := resolveInRoot(root, prefix, opts.LogicalPrefix, filepath.FromSlash(logical))
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("resolve authenticated auxiliary script %q: %w", logical, err)
+		}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return fmt.Errorf("stat authenticated auxiliary script %q: %w", logical, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("authenticated auxiliary script %q is not a regular file", logical)
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			// Some upstream packages carry shebang-bearing examples or modules as
+			// ordinary data. The main walk does not execute or shebang-check them, so
+			// they do not need an interpreter exception.
+			return nil
+		}
+		resolved = filepath.Clean(resolved)
+		if previous := scope.auxiliary[resolved]; previous != "" && previous != expected {
+			return fmt.Errorf("conflicting auxiliary shebang policy for %q", logical)
+		}
+		scope.auxiliary[resolved] = expected
+		return nil
+	}
+	for _, node := range record.Nodes {
+		switch {
+		case node.Name == "go":
+			for _, name := range []string{"all.rc", "clean.rc", "make.rc", "run.rc"} {
+				if err := add(node, path.Join("libexec/src", name), "/bin/rc -e"); err != nil {
+					return scriptScope{}, false, err
+				}
+			}
+		case node.Name == "ncurses":
+			for _, name := range []string{"debian", "debian-mingw", "debian-mingw64"} {
+				if err := add(node, path.Join("share/ncurses/test/package", name, "rules"), "/usr/bin/make -f"); err != nil {
+					return scriptScope{}, false, err
+				}
+			}
+		case strings.HasPrefix(node.Name, "python@3."):
+			minor := strings.TrimPrefix(node.Name, "python@")
+			pythonAuxiliary := map[string]string{
+				path.Join("lib/python"+minor, "idlelib/idle_test/example_noext"):             "usr/bin/env python",
+				path.Join("lib/python"+minor, "encodings/rot_13.py"):                         "/usr/bin/env python",
+				path.Join("lib/python"+minor, "site-packages/pip/_vendor/distro/distro.py"):  "/usr/bin/env python",
+				path.Join("lib/python"+minor, "site-packages/pip/_vendor/requests/certs.py"): "/usr/bin/env python",
+			}
+			for subpath, expected := range pythonAuxiliary {
+				if err := add(node, subpath, expected); err != nil {
+					return scriptScope{}, false, err
+				}
+			}
+		case node.Name == "dbus":
+			if err := add(node, "share/doc/dbus/examples/GetAllMatchRules.py", "/usr/bin/env python"); err != nil {
+				return scriptScope{}, false, err
+			}
+		case node.Name == "llvm" || strings.HasPrefix(node.Name, "llvm@"):
+			if _, requested := requestedNames[node.Name]; requested {
+				continue
+			}
+			major := strings.TrimPrefix(node.Name, "llvm@")
+			if major == "llvm" || major == "" {
+				major, _, _ = strings.Cut(node.FormulaVersion, ".")
+			}
+			llvmScripts := map[string]string{
+				"bin/analyze-build":    "/usr/bin/env python3",
+				"bin/git-clang-format": "/usr/bin/env python3",
+				"bin/hmaptool":         "/usr/bin/env python3",
+				"bin/intercept-build":  "/usr/bin/env python3",
+				"bin/run-clang-tidy":   "/usr/bin/env python3",
+				"bin/scan-build-py":    "/usr/bin/env python3",
+				"bin/scan-view":        "/usr/bin/env python",
+				path.Join("lib/clang", major, "bin/hwasan_symbolize"): "/usr/bin/env python3",
+				"libexec/analyze-c++":                 "/usr/bin/env python3",
+				"libexec/analyze-cc":                  "/usr/bin/env python3",
+				"libexec/intercept-c++":               "/usr/bin/env python3",
+				"libexec/intercept-cc":                "/usr/bin/env python3",
+				"share/clang/clang-format-diff.py":    "/usr/bin/env python3",
+				"share/clang/clang-tidy-diff.py":      "/usr/bin/env python3",
+				"share/clang/run-find-all-symbols.py": "/usr/bin/env python",
+				"share/opt-viewer/opt-diff.py":        "/usr/bin/env python",
+				"share/opt-viewer/opt-stats.py":       "/usr/bin/env python",
+				"share/opt-viewer/opt-viewer.py":      "/usr/bin/env python",
+				"share/opt-viewer/optrecord.py":       "/usr/bin/env python",
+			}
+			for subpath, expected := range llvmScripts {
+				if err := add(node, subpath, expected); err != nil {
+					return scriptScope{}, false, err
+				}
+			}
+		}
+	}
+	return scope, true, nil
+}
+
+func readRuntimeEvidence(root, prefix, logicalPrefix, logicalPath string, limit int64) ([]byte, bool, error) {
+	resolved, err := resolveInRoot(root, prefix, logicalPrefix, logicalPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("resolve runtime evidence %q: %w", logicalPath, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return nil, false, err
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > limit {
+		return nil, false, fmt.Errorf("runtime evidence %q is not a bounded regular file", logicalPath)
+	}
+	f, err := os.Open(resolved)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(data)) != info.Size() || int64(len(data)) > limit {
+		return nil, false, fmt.Errorf("runtime evidence %q changed while reading", logicalPath)
+	}
+	return data, true, nil
 }
 
 func verifyLink(root, prefix, logicalPrefix, filename string) error {
@@ -531,47 +860,409 @@ func resolveHostWithinRoot(root, candidate string) (string, error) {
 	return current, nil
 }
 
+const cargoRegistryPrefix = homebrewCachePath + "/cargo_cache/registry/src/"
+
+var cargoReadOnlyProvenancePattern = regexp.MustCompile(`/home/linuxbrew/\.cache/Homebrew/cargo_cache/registry/src/[A-Za-z0-9._-]+/[A-Za-z0-9._+~-]+(?:/[A-Za-z0-9._+~/-]+\.rs(?::[0-9]+)?|\x00)`)
+var cargoDebugProvenancePattern = regexp.MustCompile(`/home/linuxbrew/\.cache/Homebrew/cargo_cache/registry/src/[A-Za-z0-9._-]+/[A-Za-z0-9._+~-]+(?:/[A-Za-z0-9._+~@:/-]+)?\x00`)
+
+var unresolvedRelocationPatterns = [][]byte{
+	[]byte("@@HOMEBREW_PREFIX@@"),
+	[]byte("@@HOMEBREW_CELLAR@@"),
+	[]byte("@@HOMEBREW_REPOSITORY@@"),
+	[]byte("@@HOMEBREW_LIBRARY@@"),
+	[]byte("@@HOMEBREW_PERL@@"),
+	[]byte("@@HOMEBREW_JAVA@@"),
+}
+
+const (
+	homebrewCachePath      = "/home/linuxbrew/.cache/Homebrew"
+	homebrewRepositoryPath = "/home/linuxbrew/.linuxbrew/Homebrew/Library/Homebrew"
+)
+
+type fileRange struct {
+	start int64
+	end   int64
+	debug bool
+}
+
 func verifyNoForbiddenReferences(filename string) error {
-	patterns := [][]byte{
-		[]byte("@@HOMEBREW_PREFIX@@"),
-		[]byte("@@HOMEBREW_CELLAR@@"),
-		[]byte("@@HOMEBREW_REPOSITORY@@"),
-		[]byte("@@HOMEBREW_LIBRARY@@"),
-		[]byte("@@HOMEBREW_PERL@@"),
-		[]byte("@@HOMEBREW_JAVA@@"),
-		[]byte("/home/linuxbrew/.cache/Homebrew"),
-		[]byte("/home/linuxbrew/.linuxbrew/Homebrew/Library/Homebrew"),
-	}
 	f, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	const chunkSize = 64 << 10
-	const overlap = 256
-	buffer := make([]byte, chunkSize+overlap)
-	carry := 0
-	for {
-		n, readErr := f.Read(buffer[carry:])
-		total := carry + n
-		for _, pattern := range patterns {
-			if bytes.Contains(buffer[:total], pattern) {
-				return fmt.Errorf("retained file %s references materializer-only path %q", filename, pattern)
-			}
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	for _, pattern := range append(append([][]byte{}, unresolvedRelocationPatterns...), []byte(homebrewRepositoryPath)) {
+		offsets, err := findPatternOffsets(f, info.Size(), pattern, 1)
+		if err != nil {
+			return err
 		}
-		if readErr == io.EOF {
-			return nil
-		}
-		if readErr != nil {
-			return readErr
-		}
-		if total > overlap {
-			copy(buffer[:overlap], buffer[total-overlap:total])
-			carry = overlap
-		} else {
-			carry = total
+		if len(offsets) > 0 {
+			return fmt.Errorf("retained file %s references materializer-only path %q", filename, pattern)
 		}
 	}
+	cacheOffsets, err := findPatternOffsets(f, info.Size(), []byte(homebrewCachePath), 1_000_000)
+	if err != nil || len(cacheOffsets) == 0 {
+		return err
+	}
+	var magic [8]byte
+	n, readErr := f.ReadAt(magic[:], 0)
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return readErr
+	}
+	switch {
+	case n >= 4 && string(magic[:4]) == "\x7fELF":
+		ef, err := elf.NewFile(f)
+		if err != nil {
+			return fmt.Errorf("retained ELF %s with build path is malformed: %w", filename, err)
+		}
+		defer ef.Close()
+		allowed, err := elfProvenanceRanges(ef, info.Size())
+		if err != nil {
+			return fmt.Errorf("retained ELF %s provenance sections: %w", filename, err)
+		}
+		return validateCargoSourceProvenance(f, info.Size(), cacheOffsets, allowed)
+	case n == len(magic) && string(magic[:]) == "!<arch>\n":
+		return verifyARProvenance(f, info.Size(), len(cacheOffsets))
+	default:
+		return fmt.Errorf("retained file %s references materializer-only path %q", filename, homebrewCachePath)
+	}
+}
+
+func elfProvenanceRanges(file *elf.File, size int64) ([]fileRange, error) {
+	allowed := make([]fileRange, 0)
+	for _, section := range file.Sections {
+		if section.Type != elf.SHT_PROGBITS || section.Flags&(elf.SHF_WRITE|elf.SHF_EXECINSTR) != 0 {
+			continue
+		}
+		readOnlyRuntimeData := section.Flags&elf.SHF_ALLOC != 0 && (section.Name == ".rodata" || strings.HasPrefix(section.Name, ".rodata."))
+		debugProvenance := section.Flags&elf.SHF_ALLOC == 0 && (strings.HasPrefix(section.Name, ".debug_") || strings.HasPrefix(section.Name, ".zdebug_"))
+		if !readOnlyRuntimeData && !debugProvenance {
+			continue
+		}
+		if section.Offset > uint64(size) || section.Size > uint64(size)-section.Offset {
+			return nil, fmt.Errorf("invalid provenance section %q", section.Name)
+		}
+		allowed = append(allowed, fileRange{start: int64(section.Offset), end: int64(section.Offset + section.Size), debug: debugProvenance})
+	}
+	return allowed, nil
+}
+
+func validateCargoSourceProvenance(r io.ReaderAt, size int64, offsets []int64, allowed []fileRange) error {
+	for _, offset := range offsets {
+		var containing *fileRange
+		for i := range allowed {
+			if offset >= allowed[i].start && offset < allowed[i].end {
+				containing = &allowed[i]
+				break
+			}
+		}
+		if containing == nil {
+			return fmt.Errorf("build cache reference at offset %d is outside authenticated provenance data", offset)
+		}
+		remaining := size - offset
+		if remaining <= 0 {
+			return fmt.Errorf("invalid build cache reference offset %d", offset)
+		}
+		window := int64(4096)
+		if remaining < window {
+			window = remaining
+		}
+		data := make([]byte, window)
+		n, err := r.ReadAt(data, offset)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		pattern := cargoReadOnlyProvenancePattern
+		if containing.debug {
+			pattern = cargoDebugProvenancePattern
+		}
+		match := pattern.FindIndex(data[:n])
+		if match == nil || match[0] != 0 {
+			return fmt.Errorf("build cache reference at offset %d is not authenticated Cargo source provenance", offset)
+		}
+		continuation := []byte(nil)
+		if !containing.debug && data[match[1]-1] != 0 {
+			continuation, err = readCargoContinuation(r, offset+int64(match[1]), min(containing.end, size))
+			if err != nil {
+				return fmt.Errorf("build cache reference at offset %d continuation: %w", offset, err)
+			}
+		}
+		if err := validateCargoProvenanceReference(data[:n], match[1], containing.debug, continuation); err != nil {
+			return fmt.Errorf("build cache reference at offset %d: %w", offset, err)
+		}
+		if offset+int64(match[1]) > containing.end {
+			return fmt.Errorf("Cargo source provenance at offset %d crosses its provenance section", offset)
+		}
+	}
+	return nil
+}
+
+func readCargoContinuation(r io.ReaderAt, start, end int64) ([]byte, error) {
+	if start >= end {
+		return nil, nil
+	}
+	const maxContinuation = 1 << 20
+	length := end - start
+	if length > maxContinuation {
+		length = maxContinuation
+	}
+	data := make([]byte, length)
+	n, err := r.ReadAt(data, start)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	data = data[:n]
+	delimiter := len(data)
+	if nul := bytes.IndexByte(data, 0); nul >= 0 && nul < delimiter {
+		delimiter = nul
+	}
+	if next := bytes.Index(data, []byte(cargoRegistryPrefix)); next >= 0 && next < delimiter {
+		delimiter = next
+	}
+	if delimiter == len(data) && start+int64(n) < end {
+		return nil, fmt.Errorf("compiler provenance continuation exceeds %d bytes without a boundary", maxContinuation)
+	}
+	return data[:delimiter], nil
+}
+
+func cargoContinuationTraverses(data []byte) bool {
+	text := filepath.ToSlash(string(data))
+	return strings.HasPrefix(text, "../") || strings.Contains(text, "/../") || strings.HasSuffix(text, "/..") ||
+		strings.HasPrefix(text, "./") || strings.Contains(text, "/./") || strings.HasSuffix(text, "/.")
+}
+
+func validateCargoProvenanceReference(window []byte, matchEnd int, debug bool, continuation []byte) error {
+	if matchEnd <= 0 || matchEnd > len(window) {
+		return fmt.Errorf("invalid Cargo provenance match")
+	}
+	matched := window[:matchEnd]
+	terminated := matched[len(matched)-1] == 0
+	if terminated {
+		matched = matched[:len(matched)-1]
+	}
+	if !bytes.HasPrefix(matched, []byte(cargoRegistryPrefix)) {
+		return fmt.Errorf("Cargo provenance has an invalid registry prefix")
+	}
+	relative := string(matched[len(cargoRegistryPrefix):])
+	if relative == "" || path.IsAbs(relative) || strings.ContainsRune(relative, '\\') {
+		return fmt.Errorf("Cargo provenance path %q is invalid", relative)
+	}
+	components := strings.Split(relative, "/")
+	if len(components) < 2 || components[0] == "" || components[1] == "" || components[0] == "." || components[0] == ".." || components[1] == "." || components[1] == ".." {
+		return fmt.Errorf("Cargo provenance path %q lacks a safe index or crate identity", relative)
+	}
+	depth := 0
+	for _, component := range components[2:] {
+		switch component {
+		case "":
+			return fmt.Errorf("Cargo provenance path %q contains an empty component", relative)
+		case ".":
+			continue
+		case "..":
+			if depth == 0 {
+				return fmt.Errorf("Cargo provenance path %q escapes its crate root", relative)
+			}
+			depth--
+		default:
+			depth++
+		}
+	}
+	if debug && !terminated {
+		return fmt.Errorf("debug Cargo provenance is not NUL-terminated")
+	}
+	if !debug && !terminated && len(continuation) > 0 {
+		// Rust binaries concatenate file!() source strings with symbol or diagnostic
+		// text. The caller reads that complete suffix through its NUL, section end,
+		// or next authenticated Cargo prefix. It may be opaque compiler data, but it
+		// must not continue the matched .rs path or introduce path traversal.
+		if continuation[0] == '.' || continuation[0] == '/' || continuation[0] == '\\' || cargoContinuationTraverses(continuation) {
+			return fmt.Errorf("Cargo source path continues beyond its .rs boundary")
+		}
+	}
+	return nil
+}
+
+func verifyARProvenance(f *os.File, size int64, expectedCacheReferences int) error {
+	if size < 8 {
+		return fmt.Errorf("malformed ar archive: truncated global header")
+	}
+	var global [8]byte
+	if _, err := f.ReadAt(global[:], 0); err != nil || string(global[:]) != "!<arch>\n" {
+		return fmt.Errorf("malformed ar archive: invalid global header")
+	}
+	offset := int64(8)
+	handled := 0
+	for offset < size {
+		if size-offset < 60 {
+			return fmt.Errorf("malformed ar archive: truncated member header at offset %d", offset)
+		}
+		var header [60]byte
+		if _, err := f.ReadAt(header[:], offset); err != nil {
+			return err
+		}
+		if string(header[58:60]) != "`\n" {
+			return fmt.Errorf("malformed ar archive: invalid member trailer at offset %d", offset)
+		}
+		if _, err := parseARNumber("mtime", header[16:28], 10, true); err != nil {
+			return err
+		}
+		if _, err := parseARNumber("uid", header[28:34], 10, true); err != nil {
+			return err
+		}
+		if _, err := parseARNumber("gid", header[34:40], 10, true); err != nil {
+			return err
+		}
+		if _, err := parseARNumber("mode", header[40:48], 8, true); err != nil {
+			return err
+		}
+		memberSize, err := parseARNumber("size", header[48:58], 10, false)
+		if err != nil {
+			return err
+		}
+		dataOffset := offset + 60
+		if memberSize < 0 || dataOffset > size || memberSize > size-dataOffset {
+			return fmt.Errorf("malformed ar archive: member at offset %d exceeds archive", offset)
+		}
+		name := strings.TrimSpace(string(header[:16]))
+		contentOffset, contentSize := dataOffset, memberSize
+		if strings.HasPrefix(name, "#1/") {
+			nameSize, err := strconv.ParseInt(strings.TrimPrefix(name, "#1/"), 10, 64)
+			if err != nil || nameSize <= 0 || nameSize > contentSize {
+				return fmt.Errorf("malformed ar archive: invalid BSD member name at offset %d", offset)
+			}
+			contentOffset += nameSize
+			contentSize -= nameSize
+		}
+		member := io.NewSectionReader(f, contentOffset, contentSize)
+		offsets, err := findPatternOffsets(member, contentSize, []byte(homebrewCachePath), 1_000_000)
+		if err != nil {
+			return err
+		}
+		handled += len(offsets)
+		if len(offsets) > 0 {
+			if name == "/" || name == "//" || name == "/SYM64/" || strings.HasPrefix(name, "__.SYMDEF") {
+				return fmt.Errorf("ar metadata member %q contains a build cache reference", name)
+			}
+			ef, err := elf.NewFile(member)
+			if err != nil {
+				return fmt.Errorf("ar member %q with build path is not valid ELF: %w", name, err)
+			}
+			if ef.Type != elf.ET_REL {
+				_ = ef.Close()
+				return fmt.Errorf("ar member %q with build path is ELF type %s, expected ET_REL", name, ef.Type)
+			}
+			allowed, rangeErr := elfProvenanceRanges(ef, contentSize)
+			_ = ef.Close()
+			if rangeErr != nil {
+				return fmt.Errorf("ar member %q provenance sections: %w", name, rangeErr)
+			}
+			if err := validateCargoSourceProvenance(member, contentSize, offsets, allowed); err != nil {
+				return fmt.Errorf("ar member %q: %w", name, err)
+			}
+		}
+		offset = dataOffset + memberSize
+		if memberSize%2 != 0 {
+			if offset >= size {
+				return fmt.Errorf("malformed ar archive: missing alignment byte")
+			}
+			var padding [1]byte
+			if _, err := f.ReadAt(padding[:], offset); err != nil || padding[0] != '\n' {
+				return fmt.Errorf("malformed ar archive: invalid alignment byte")
+			}
+			offset++
+		}
+	}
+	if offset != size || handled != expectedCacheReferences {
+		return fmt.Errorf("malformed ar archive: unaccounted build cache references")
+	}
+	return nil
+}
+
+func parseARNumber(label string, field []byte, base int, allowEmpty bool) (int64, error) {
+	value := strings.TrimSpace(string(field))
+	if value == "" {
+		if allowEmpty {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("malformed ar archive: empty %s", label)
+	}
+	parsed, err := strconv.ParseInt(value, base, 64)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("malformed ar archive: invalid %s %q", label, value)
+	}
+	return parsed, nil
+}
+
+func findPatternOffsets(r io.ReaderAt, size int64, pattern []byte, limit int) ([]int64, error) {
+	if len(pattern) == 0 || size <= 0 {
+		return nil, nil
+	}
+	const chunkSize = 64 << 10
+	overlap := len(pattern) - 1
+	buffer := make([]byte, chunkSize+overlap)
+	var offsets []int64
+	var position int64
+	carry := 0
+	next := int64(0)
+	for position < size {
+		want := chunkSize
+		if remaining := size - position; remaining < int64(want) {
+			want = int(remaining)
+		}
+		n, err := r.ReadAt(buffer[carry:carry+want], position)
+		total := carry + n
+		base := position - int64(carry)
+		for search := 0; search < total; {
+			index := bytes.Index(buffer[search:total], pattern)
+			if index < 0 {
+				break
+			}
+			absolute := base + int64(search+index)
+			if absolute >= next {
+				offsets = append(offsets, absolute)
+				if len(offsets) > limit {
+					return nil, fmt.Errorf("too many occurrences of %q", pattern)
+				}
+				next = absolute + 1
+			}
+			search += index + 1
+		}
+		position += int64(n)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		if n == 0 {
+			break
+		}
+		carry = overlap
+		if carry > total {
+			carry = total
+		}
+		copy(buffer[:carry], buffer[total-carry:total])
+	}
+	return offsets, nil
+}
+
+func forbiddenRuntimeReference(value string) string {
+	for _, pattern := range []string{
+		"@@HOMEBREW_PREFIX@@",
+		"@@HOMEBREW_CELLAR@@",
+		"@@HOMEBREW_REPOSITORY@@",
+		"@@HOMEBREW_LIBRARY@@",
+		"@@HOMEBREW_PERL@@",
+		"@@HOMEBREW_JAVA@@",
+		"/home/linuxbrew/.cache/Homebrew",
+		"/home/linuxbrew/.linuxbrew/Homebrew/Library/Homebrew",
+	} {
+		if strings.Contains(value, pattern) {
+			return pattern
+		}
+	}
+	return ""
 }
 
 func systemLibraryDirs(root, arch string) ([]string, error) {

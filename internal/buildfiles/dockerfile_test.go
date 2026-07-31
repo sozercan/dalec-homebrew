@@ -74,7 +74,9 @@ func TestFrontendImageContainsOnlyGatewayAndCABundle(t *testing.T) {
 func TestMaterializerAvoidsRedundantHelperLayers(t *testing.T) {
 	stage := dockerfileStage(t, dockerfileText(t), "FROM runtime-base AS materializer")
 	for _, want := range []string{
-		"install -d -o root -g root -m 0755 /usr/local/libexec",
+		"install -d -o root -g root -m 0755 /usr/local/libexec /etc/homebrew",
+		"HOMEBREW_SYSTEM_ENV_TAKES_PRIORITY=1",
+		"HOMEBREW_BASH_COMMAND=",
 		"COPY --chmod=0555 --from=helper-build /out/dalec-homebrew-materializer",
 		"COPY --chmod=0555 --from=helper-build /out/dalec-homebrew-test-runner",
 		"COPY --chmod=0444 internal/materializer/pour.rb",

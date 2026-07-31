@@ -212,6 +212,11 @@ type Result struct {
 	Inventory        []InventoryEntry `json:"inventory"`
 	Formula          FormulaEvidence  `json:"formula"`
 	Receipt          *ReceiptEvidence `json:"receipt,omitempty"`
+	// FormulaSource is the exact embedded Formula payload captured by the
+	// verifier after the complete compressed object and archive have passed all
+	// checks. It is transient materializer input and must never be serialized as
+	// evidence.
+	FormulaSource []byte `json:"-"`
 }
 
 // ErrorCode provides stable failure categories for callers and tests.

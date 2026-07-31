@@ -35,6 +35,14 @@ type Config struct {
 	User       string
 	Timeout    time.Duration
 	Runner     Runner
+
+	// Tests can stage into a caller-owned fixture and model a distinct runtime
+	// identity. Production leaves these at zero: the tap owner is root and the
+	// untrusted runtime identity comes from the authenticated resolution.
+	formulaTapUID        int
+	formulaTapGID        int
+	formulaTapRuntimeUID int
+	formulaTapRuntimeGID int
 }
 
 type Runner interface {
@@ -48,8 +56,10 @@ type Command struct {
 }
 
 type Evidence struct {
-	VerifiedBottles []bottle.Result `json:"verified_bottles"`
-	InstallDeltas   []InstallDelta  `json:"install_deltas"`
+	VerifiedBottles       []bottle.Result                `json:"verified_bottles"`
+	StagedFormulae        []StagedFormulaEvidence        `json:"staged_formulae"`
+	ReceiptNormalizations []ReceiptNormalizationEvidence `json:"receipt_normalizations,omitempty"`
+	InstallDeltas         []InstallDelta                 `json:"install_deltas"`
 }
 
 type InstallDelta struct {
@@ -115,6 +125,13 @@ func Install(ctx context.Context, cfg Config) (*Evidence, error) {
 	// Copy each input through an already-open rooted descriptor, then verify and later install that immutable private copy.
 	evidence := &Evidence{}
 	verifiedByName := map[string]bottle.Result{}
+	formulaSources := map[string][]byte{}
+	defer func() {
+		for name, source := range formulaSources {
+			clear(source)
+			delete(formulaSources, name)
+		}
+	}()
 	for _, name := range cfg.Record.InstallOrder {
 		node, ok := nodeByName(cfg.Record, name)
 		if !ok {
@@ -174,12 +191,39 @@ func Install(ctx context.Context, cfg Config) (*Evidence, error) {
 			return nil, closeErr
 		}
 		installPaths[name] = stagedPath
+		formulaSources[name] = verified.FormulaSource
+		verified.FormulaSource = nil
 		evidence.VerifiedBottles = append(evidence.VerifiedBottles, *verified)
 		verifiedByName[name] = *verified
+	}
+	formulaTapOptions := formulaTapStageOptions{
+		ownerUID:   cfg.formulaTapUID,
+		ownerGID:   cfg.formulaTapGID,
+		runtimeUID: cfg.Record.Runtime.UID,
+		runtimeGID: cfg.Record.Runtime.GID,
+	}
+	if cfg.formulaTapRuntimeUID != 0 || cfg.formulaTapRuntimeGID != 0 {
+		formulaTapOptions.runtimeUID = cfg.formulaTapRuntimeUID
+		formulaTapOptions.runtimeGID = cfg.formulaTapRuntimeGID
+	}
+	stagedFormulae, err := stageVerifiedFormulaClosure(cfg.Prefix, cfg.Record, verifiedByName, formulaSources, formulaTapOptions)
+	if err != nil {
+		return nil, fmt.Errorf("stage verified Formula closure: %w", err)
+	}
+	evidence.StagedFormulae = stagedFormulae
+	for name, source := range formulaSources {
+		clear(source)
+		delete(formulaSources, name)
 	}
 
 	for _, name := range cfg.Record.InstallOrder {
 		node, _ := nodeByName(cfg.Record, name)
+		if err := validateNoPrefixBrewEnv(cfg.Prefix); err != nil {
+			return nil, fmt.Errorf("validate Homebrew environment before %q: %w", name, err)
+		}
+		if err := validateProtectedHomebrewRepository(cfg.Prefix, formulaTapOptions, true); err != nil {
+			return nil, fmt.Errorf("validate protected Homebrew repository before %q: %w", name, err)
+		}
 		stepCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 		before, err := snapshotContext(stepCtx, cfg.Prefix)
 		if err != nil {
@@ -190,10 +234,26 @@ func Install(ctx context.Context, cfg Config) (*Evidence, error) {
 			cancel()
 			return nil, fmt.Errorf("validate prefix before %q: %w", name, err)
 		}
-		err = cfg.Runner.Run(stepCtx, Command{Path: filepath.Join(cfg.Prefix, "bin/brew"), Args: []string{"ruby", pourScriptPath, installPaths[name]}, Env: installEnv(cfg.Prefix), Dir: "/home/linuxbrew", User: cfg.User})
+		err = cfg.Runner.Run(stepCtx, Command{Path: filepath.Join(cfg.Prefix, filepath.FromSlash(protectedHomebrewBrew)), Args: []string{"ruby", pourScriptPath, installPaths[name]}, Env: installEnv(cfg.Prefix), Dir: "/home/linuxbrew", User: cfg.User})
 		if err != nil {
 			cancel()
 			return nil, fmt.Errorf("offline install %q: %w", name, err)
+		}
+		if err := validateProtectedHomebrewRepository(cfg.Prefix, formulaTapOptions, true); err != nil {
+			cancel()
+			return nil, fmt.Errorf("validate protected Homebrew repository after %q: %w", name, err)
+		}
+		if err := validateNoPrefixBrewEnv(cfg.Prefix); err != nil {
+			cancel()
+			return nil, fmt.Errorf("validate Homebrew environment after %q: %w", name, err)
+		}
+		normalization, err := normalizeInstalledReceipt(cfg.Prefix, node, cfg.Record.Nodes, cfg.Record.SourceDateEpoch)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		if normalization != nil {
+			evidence.ReceiptNormalizations = append(evidence.ReceiptNormalizations, *normalization)
 		}
 		after, err := snapshotContext(stepCtx, cfg.Prefix)
 		if err != nil {
@@ -246,11 +306,31 @@ func normalizeMaterializerPrefix(value string) (string, error) {
 	return clean, nil
 }
 
+func validateNoPrefixBrewEnv(prefix string) error {
+	directory := filepath.Join(prefix, "etc", "homebrew")
+	info, err := os.Lstat(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("prefix Homebrew environment directory is not a real directory")
+	}
+	if _, err := os.Lstat(filepath.Join(directory, "brew.env")); err == nil {
+		return fmt.Errorf("prefix Homebrew environment override is forbidden")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 func installEnv(prefix string) []string {
 	return []string{
 		"HOME=/home/linuxbrew", "USER=linuxbrew", "LOGNAME=linuxbrew", "PATH=" + prefix + "/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"HOMEBREW_PREFIX=" + prefix, "HOMEBREW_REPOSITORY=" + prefix + "/Homebrew", "HOMEBREW_CELLAR=" + prefix + "/Cellar", "HOMEBREW_CACHE=/home/linuxbrew/.cache/Homebrew",
-		"HOMEBREW_NO_AUTO_UPDATE=1", "HOMEBREW_NO_ANALYTICS=1", "HOMEBREW_NO_INSTALL_FROM_API=1", "HOMEBREW_NO_INSTALL_CLEANUP=1", "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1",
+		"HOMEBREW_NO_AUTO_UPDATE=1", "HOMEBREW_NO_ANALYTICS=1", "HOMEBREW_SYSTEM_ENV_TAKES_PRIORITY=1", "HOMEBREW_NO_INSTALL_FROM_API=1", "HOMEBREW_NO_INSTALL_CLEANUP=1", "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1",
 	}
 }
 
@@ -288,12 +368,14 @@ func (OSRunner) Run(ctx context.Context, command Command) error {
 }
 
 type fileState struct {
-	Type         string
-	Mode         fs.FileMode
-	Size         int64
-	Digest, Link string
-	Inode        string
-	Links        uint64
+	Type           string
+	Mode           fs.FileMode
+	Size           int64
+	Digest, Link   string
+	Inode          string
+	Links          uint64
+	UID, GID       uint32
+	OwnershipKnown bool
 }
 
 func snapshot(root string) (map[string]fileState, error) {
@@ -308,7 +390,10 @@ func snapshotContext(ctx context.Context, root string) (map[string]fileState, er
 		return nil, fmt.Errorf("snapshot root must be a real directory")
 	}
 	limits := bottle.DefaultLimits()
-	out := map[string]fileState{".": {Type: "directory", Mode: rootInfo.Mode()}}
+	rootState := fileState{Type: "directory", Mode: rootInfo.Mode()}
+	rootState.Inode, rootState.Links = snapshotInodeMeta(rootInfo)
+	rootState.UID, rootState.GID, rootState.OwnershipKnown = snapshotOwnership(rootInfo)
+	out := map[string]fileState{".": rootState}
 	hashes := map[string]string{}
 	files := 0
 	var uniqueBytes int64
@@ -335,6 +420,8 @@ func snapshotContext(ctx context.Context, root string) (map[string]fileState, er
 			return err
 		}
 		state := fileState{Mode: info.Mode()}
+		state.Inode, state.Links = snapshotInodeMeta(info)
+		state.UID, state.GID, state.OwnershipKnown = snapshotOwnership(info)
 		switch {
 		case info.Mode().IsDir():
 			state.Type = "directory"
@@ -344,9 +431,7 @@ func snapshotContext(ctx context.Context, root string) (map[string]fileState, er
 			if state.Size < 0 || state.Size > limits.MaxFileBytes {
 				return fmt.Errorf("snapshot file %s exceeds %d bytes", p, limits.MaxFileBytes)
 			}
-			key, links := snapshotInodeMeta(info)
-			state.Inode = key
-			state.Links = links
+			key := state.Inode
 			if digest, ok := hashes[key]; ok && key != "" {
 				state.Digest = digest
 			} else {
@@ -385,6 +470,13 @@ func snapshotInodeMeta(info os.FileInfo) (string, uint64) {
 		return fmt.Sprintf("%d:%d", stat.Dev, stat.Ino), uint64(stat.Nlink)
 	}
 	return "", 0
+}
+
+func snapshotOwnership(info os.FileInfo) (uint32, uint32, bool) {
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		return stat.Uid, stat.Gid, true
+	}
+	return 0, 0, false
 }
 func hashFileContext(ctx context.Context, p string, expected int64) (string, error) {
 	f, err := os.Open(p)
@@ -440,7 +532,7 @@ func diff(before, after map[string]fileState) []Change {
 			kind = "created"
 		case !aok:
 			kind = "removed"
-		case b != a:
+		case !snapshotStatesEqual(b, a):
 			kind = "modified"
 		}
 		if kind != "" {
@@ -450,6 +542,169 @@ func diff(before, after map[string]fileState) []Change {
 	slices.SortFunc(out, func(a, b Change) int { return strings.Compare(a.Path, b.Path) })
 	return out
 }
+
+func snapshotStatesEqual(before, after fileState) bool {
+	if before.Type == "directory" && after.Type == "directory" {
+		// A directory's link count and storage size are structural metadata: both
+		// may change solely because a verified install added or removed a child.
+		// Preserve inode identity, mode, type, and ownership while excluding only
+		// link count and storage size, which can change when children are added.
+		before.Links = 0
+		after.Links = 0
+		before.Size = 0
+		after.Size = 0
+	}
+	return before == after
+}
+
+func validateSharedDirectoryExpansions(prefix, currentKeg string, before, after map[string]fileState, changes []Change) (map[string]struct{}, error) {
+	allowed := map[string]struct{}{}
+	for _, change := range changes {
+		if change.Kind != "modified" || isGlobalRoot(change.Path) || !inGlobal(change.Path) {
+			continue
+		}
+		prior, existed := before[change.Path]
+		current, remains := after[change.Path]
+		if !existed || !remains || prior.Type != "symlink" || current.Type != "directory" {
+			continue
+		}
+		paths, err := validateSharedDirectoryExpansion(prefix, currentKeg, change.Path, before, after)
+		if err != nil {
+			return nil, fmt.Errorf("validate shared directory expansion %s: %w", change.Path, err)
+		}
+		maps.Copy(allowed, paths)
+	}
+	return allowed, nil
+}
+
+func validateSharedDirectoryExpansion(prefix, currentKeg, globalRoot string, before, after map[string]fileState) (map[string]struct{}, error) {
+	priorLink := before[globalRoot]
+	expandedRoot := after[globalRoot]
+	priorRoot, err := resolveSnapshotPath(prefix, before, globalRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve prior link: %w", err)
+	}
+	parts := strings.Split(priorRoot, "/")
+	if len(parts) < 4 || parts[0] != "Cellar" || snapshotPathWithin(priorRoot, currentKeg) {
+		return nil, fmt.Errorf("prior link does not resolve into a different installed keg")
+	}
+	priorRootState, ok := before[priorRoot]
+	if !ok || priorRootState.Type != "directory" {
+		return nil, fmt.Errorf("prior keg directory %s is absent", priorRoot)
+	}
+	currentRootPath := path.Join(currentKeg, globalRoot)
+	currentRootState, ok := after[currentRootPath]
+	if !ok || currentRootState.Type != "directory" {
+		return nil, fmt.Errorf("current keg directory %s is absent", currentRootPath)
+	}
+	if !sameDirectorySecurity(priorRootState, expandedRoot) || !sameDirectorySecurity(currentRootState, expandedRoot) {
+		return nil, fmt.Errorf("expanded directory mode or ownership differs from its keg directories")
+	}
+	if !sameSnapshotOwnership(priorLink, expandedRoot) {
+		return nil, fmt.Errorf("expanded directory ownership differs from prior global link")
+	}
+
+	priorPaths := map[string]string{}
+	for candidate := range before {
+		if !strings.HasPrefix(candidate, priorRoot+"/") {
+			continue
+		}
+		relative := strings.TrimPrefix(candidate, priorRoot+"/")
+		priorPaths[path.Join(globalRoot, relative)] = candidate
+	}
+	allowed := map[string]struct{}{globalRoot: {}}
+	for globalPath, priorPath := range priorPaths {
+		priorState := before[priorPath]
+		currentState, ok := after[globalPath]
+		if !ok {
+			return nil, fmt.Errorf("prior keg path %s is not represented at %s", priorPath, globalPath)
+		}
+		switch priorState.Type {
+		case "directory":
+			if !sameDirectorySecurity(priorState, currentState) {
+				return nil, fmt.Errorf("preserved directory %s changed mode or ownership", globalPath)
+			}
+			if overlapping, exists := after[path.Join(currentKeg, globalPath)]; exists && !sameDirectorySecurity(overlapping, currentState) {
+				return nil, fmt.Errorf("current keg conflicts with preserved directory %s", globalPath)
+			}
+		case "regular", "symlink":
+			if currentState.Type != "symlink" || !sameSnapshotOwnership(expandedRoot, currentState) {
+				return nil, fmt.Errorf("preserved path %s is not an owner-matched symlink", globalPath)
+			}
+			want, err := resolveSnapshotPath(prefix, before, priorPath)
+			if err != nil {
+				return nil, fmt.Errorf("resolve prior path %s: %w", priorPath, err)
+			}
+			got, err := resolveSnapshotPath(prefix, after, globalPath)
+			if err != nil || got != want {
+				return nil, fmt.Errorf("preserved link %s no longer resolves to %s", globalPath, want)
+			}
+			if _, overlaps := after[path.Join(currentKeg, globalPath)]; overlaps {
+				return nil, fmt.Errorf("current keg overlaps preserved non-directory %s", globalPath)
+			}
+		default:
+			return nil, fmt.Errorf("unsupported prior path type %s at %s", priorState.Type, priorPath)
+		}
+		allowed[globalPath] = struct{}{}
+	}
+
+	addedCurrent := 0
+	for globalPath, currentState := range after {
+		if !strings.HasPrefix(globalPath, globalRoot+"/") {
+			continue
+		}
+		if _, preserved := priorPaths[globalPath]; preserved {
+			continue
+		}
+		sourcePath := path.Join(currentKeg, globalPath)
+		sourceState, ok := after[sourcePath]
+		if !ok {
+			return nil, fmt.Errorf("expanded path %s has no current-keg source", globalPath)
+		}
+		switch currentState.Type {
+		case "directory":
+			if !sameDirectorySecurity(sourceState, currentState) {
+				return nil, fmt.Errorf("expanded directory %s differs from current-keg source", globalPath)
+			}
+		case "symlink":
+			if !sameSnapshotOwnership(expandedRoot, currentState) {
+				return nil, fmt.Errorf("expanded link %s has unexpected ownership", globalPath)
+			}
+			direct, err := directSnapshotSymlinkTarget(prefix, after, globalPath)
+			if err != nil || direct != sourcePath {
+				return nil, fmt.Errorf("expanded link %s bypasses current-keg source %s", globalPath, sourcePath)
+			}
+			want, err := resolveSnapshotPath(prefix, after, sourcePath)
+			if err != nil {
+				return nil, fmt.Errorf("resolve current-keg source %s: %w", sourcePath, err)
+			}
+			got, err := resolveSnapshotPath(prefix, after, globalPath)
+			if err != nil || got != want {
+				return nil, fmt.Errorf("expanded link %s does not resolve to current-keg source", globalPath)
+			}
+		default:
+			return nil, fmt.Errorf("expanded path %s has unsafe type %s", globalPath, currentState.Type)
+		}
+		allowed[globalPath] = struct{}{}
+		addedCurrent++
+	}
+	if addedCurrent == 0 {
+		return nil, fmt.Errorf("expansion added no current-keg paths")
+	}
+	return allowed, nil
+}
+
+func sameDirectorySecurity(expected, actual fileState) bool {
+	return expected.Type == "directory" && actual.Type == "directory" && expected.Mode == actual.Mode && sameSnapshotOwnership(expected, actual)
+}
+
+func sameSnapshotOwnership(expected, actual fileState) bool {
+	if expected.OwnershipKnown != actual.OwnershipKnown {
+		return false
+	}
+	return !expected.OwnershipKnown || (expected.UID == actual.UID && expected.GID == actual.GID)
+}
+
 func classify(prefix string, node resolution.Node, before, after map[string]fileState, changes []Change, optNamesArg ...map[string]struct{}) error {
 	keg := filepath.ToSlash(filepath.Join("Cellar", node.Name, node.PkgVersion))
 	opt := filepath.ToSlash(filepath.Join("opt", node.Name))
@@ -459,11 +714,16 @@ func classify(prefix string, node resolution.Node, before, after map[string]file
 			optNames[name] = struct{}{}
 		}
 	}
+	expandedSharedPaths, err := validateSharedDirectoryExpansions(prefix, keg, before, after, changes)
+	if err != nil {
+		return err
+	}
 	for i := range changes {
 		c := &changes[i]
 		p := c.Path
 		_, existed := before[p]
-		if existed && c.Kind != "created" && !isPackageManagerState(p) && !isBrewedLoaderMutation(prefix, node, p, after) && (p == "." || inGlobal(p) || p == "Cellar" || p == "etc" || strings.HasPrefix(p, "etc/") || p == "var" || strings.HasPrefix(p, "var/") || p == "opt" || strings.HasPrefix(p, "opt/")) {
+		_, safeSharedExpansion := expandedSharedPaths[p]
+		if existed && c.Kind != "created" && !safeSharedExpansion && !isPackageManagerState(p) && !isBrewedLoaderMutation(prefix, node, p, after) && (p == "." || inGlobal(p) || p == "Cellar" || p == "etc" || strings.HasPrefix(p, "etc/") || p == "var" || strings.HasPrefix(p, "var/") || p == "opt" || strings.HasPrefix(p, "opt/")) {
 			return fmt.Errorf("install modified or removed pre-existing shared path %s", p)
 		}
 		switch {
@@ -510,7 +770,7 @@ func classify(prefix string, node resolution.Node, before, after map[string]file
 			c.Classification = "configuration"
 			if a, ok := after[p]; ok && a.Type == "symlink" {
 				resolved, err := resolveSnapshotPath(prefix, after, p)
-				if err != nil || !snapshotPathWithin(resolved, "etc") {
+				if err != nil || (!snapshotPathWithin(resolved, "etc") && !isCurrentKegBashCompletionLink(prefix, after, p, resolved, keg)) {
 					return fmt.Errorf("configuration symlink %s escapes etc", p)
 				}
 			}
@@ -558,7 +818,8 @@ func classify(prefix string, node resolution.Node, before, after map[string]file
 			}
 			if a, ok := after[p]; ok && a.Type == "symlink" {
 				resolved, err := resolveSnapshotPath(prefix, after, p)
-				if err != nil || !snapshotPathWithin(resolved, keg) {
+				_, preservedByExpansion := expandedSharedPaths[p]
+				if err != nil || (!snapshotPathWithin(resolved, keg) && !preservedByExpansion) {
 					return fmt.Errorf("global link %s does not resolve into current keg", p)
 				}
 			}
@@ -759,6 +1020,44 @@ func snapshotPathWithin(candidate, root string) bool {
 	return candidate == root || strings.HasPrefix(candidate, root+"/")
 }
 
+func isCurrentKegBashCompletionLink(prefix string, snapshot map[string]fileState, linkPath, resolved, keg string) bool {
+	const completionRoot = "etc/bash_completion.d"
+	if !strings.HasPrefix(linkPath, completionRoot+"/") {
+		return false
+	}
+	expected := path.Join(keg, linkPath)
+	direct, err := directSnapshotSymlinkTarget(prefix, snapshot, linkPath)
+	if err != nil || direct != expected {
+		return false
+	}
+	source, ok := snapshot[expected]
+	if !ok || (source.Type != "regular" && source.Type != "symlink") {
+		return false
+	}
+	sourceResolved, err := resolveSnapshotPath(prefix, snapshot, expected)
+	return err == nil && sourceResolved == resolved && snapshotPathWithin(sourceResolved, keg)
+}
+
+func directSnapshotSymlinkTarget(prefix string, snapshot map[string]fileState, linkPath string) (string, error) {
+	state, ok := snapshot[linkPath]
+	if !ok || state.Type != "symlink" {
+		return "", fmt.Errorf("snapshot path %s is not a symlink", linkPath)
+	}
+	target := filepath.ToSlash(state.Link)
+	if path.IsAbs(target) {
+		components, _, err := absoluteSnapshotTarget(prefix, target)
+		if err != nil {
+			return "", err
+		}
+		return strings.Join(components, "/"), nil
+	}
+	direct := path.Clean(path.Join(path.Dir(linkPath), target))
+	if direct == ".." || strings.HasPrefix(direct, "../") {
+		return "", fmt.Errorf("snapshot path escapes prefix")
+	}
+	return direct, nil
+}
+
 func inGlobal(p string) bool {
 	for _, root := range []string{"bin", "sbin", "lib", "share", "include"} {
 		if p == root || strings.HasPrefix(p, root+"/") {
@@ -801,7 +1100,8 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 		if actual.Type != wantType {
 			return fmt.Errorf("verified bottle path %s has type %s, expected %s", rel, actual.Type, wantType)
 		}
-		_, mayChange := changed[entry.KegPath]
+		_, declaredChanged := changed[entry.KegPath]
+		mayChange := declaredChanged
 		isFormulaMetadata := entry.KegPath == ".brew" || strings.HasPrefix(entry.KegPath, ".brew/")
 		mayChange = mayChange || (entry.Relocatable && !isFormulaMetadata)
 		if entry.KegPath == "INSTALL_RECEIPT.json" || entry.KegPath == "sbom.spdx.json" {
@@ -822,6 +1122,9 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 			}
 		}
 		if entry.Type != bottle.EntrySymlink {
+			if actual.Mode&(os.ModeSetuid|os.ModeSetgid) != 0 {
+				return fmt.Errorf("verified bottle path %s gained setuid or setgid permissions", rel)
+			}
 			expectedMode := os.FileMode(entry.Mode & 0o777)
 			if entry.Mode&0o1000 != 0 {
 				expectedMode |= os.ModeSticky
@@ -830,7 +1133,7 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 			if actual.Mode&os.ModeSticky != 0 {
 				actualMode |= os.ModeSticky
 			}
-			if actualMode != expectedMode {
+			if actualMode != expectedMode && !allowsPostInstallOwnerWrite(node, verified, entry, declaredChanged, expectedMode, actualMode) {
 				return fmt.Errorf("verified bottle path %s permissions changed", rel)
 			}
 		}
@@ -907,6 +1210,62 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 	return nil
 }
 
+func allowsPostInstallOwnerWrite(node resolution.Node, verified bottle.Result, entry bottle.InventoryEntry, declaredChanged bool, expectedMode, actualMode fs.FileMode) bool {
+	if entry.Type != bottle.EntryRegular && entry.Type != bottle.EntryHardlink {
+		return false
+	}
+	// Homebrew post-install actions may make a verified read-only file writable
+	// by its owner. Accept exactly that one-bit transition: executable, group,
+	// other, and sticky permissions must remain identical. Content and type are
+	// still reconciled independently.
+	if expectedMode&0o200 != 0 || actualMode != expectedMode|0o200 {
+		return false
+	}
+	if declaredChanged {
+		return true
+	}
+	return isPythonVenvTemplate(node, verified, entry.KegPath)
+}
+
+func isPythonVenvTemplate(node resolution.Node, verified bottle.Result, kegPath string) bool {
+	minor, ok := strings.CutPrefix(node.Name, "python@")
+	if !ok || !validPythonMinor(minor) {
+		return false
+	}
+	if node.FormulaVersion == "" || (node.FormulaVersion != minor && !strings.HasPrefix(node.FormulaVersion, minor+".")) {
+		return false
+	}
+	expectedFormulaPath := path.Join(verified.KegPrefix, ".brew", node.Name+".rb")
+	expectedFormulaClass := "PythonAT" + strings.ReplaceAll(minor, ".", "")
+	formulaDigest := strings.TrimPrefix(verified.Formula.SHA256, "sha256:")
+	if verified.Formula.Path != expectedFormulaPath || verified.Formula.ClassName != expectedFormulaClass || verified.Formula.Size <= 0 || len(formulaDigest) != sha256.Size*2 {
+		return false
+	}
+	if _, err := hex.DecodeString(formulaDigest); err != nil {
+		return false
+	}
+	root := "lib/python" + minor + "/venv/scripts/"
+	return strings.HasPrefix(kegPath, root) && len(kegPath) > len(root)
+}
+
+func validPythonMinor(value string) bool {
+	parts := strings.Split(value, ".")
+	if len(parts) != 2 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func optNamesForNode(record *resolution.Record, name string) map[string]struct{} {
 	out := map[string]struct{}{name: {}}
 	for _, root := range record.Requested {
@@ -961,7 +1320,7 @@ func verifyClosure(prefix string, record *resolution.Record) error {
 		if versions[0].Name() != node.PkgVersion {
 			return fmt.Errorf("keg %q version %q, expected %q", e.Name(), versions[0].Name(), node.PkgVersion)
 		}
-		if err := verifyReceipt(filepath.Join(prefix, "Cellar", e.Name(), versions[0].Name(), "INSTALL_RECEIPT.json"), node); err != nil {
+		if err := verifyReceipt(filepath.Join(prefix, "Cellar", e.Name(), versions[0].Name(), "INSTALL_RECEIPT.json"), node, record.Nodes); err != nil {
 			return err
 		}
 	}
@@ -970,7 +1329,7 @@ func verifyClosure(prefix string, record *resolution.Record) error {
 	}
 	return nil
 }
-func verifyReceipt(filename string, node resolution.Node) error {
+func verifyReceipt(filename string, node resolution.Node, closure []resolution.Node) error {
 	directory, err := os.Open(filepath.Dir(filename))
 	if err != nil {
 		return err
@@ -1001,7 +1360,7 @@ func verifyReceipt(filename string, node resolution.Node) error {
 	if int64(len(data)) > limit {
 		return fmt.Errorf("receipt for %q exceeds %d bytes", node.Name, limit)
 	}
-	if _, err := bottle.VerifyInstalledReceipt(data, node); err != nil {
+	if _, err := bottle.VerifyInstalledReceipt(data, node, closure); err != nil {
 		return fmt.Errorf("verify installed receipt for %q: %w", node.Name, err)
 	}
 	return nil

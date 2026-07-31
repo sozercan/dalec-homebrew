@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -47,6 +48,17 @@ func TestVerifyValidBottleAndDeterministicInventory(t *testing.T) {
 	if resultA.Formula.ClassName != "Hello" || resultA.Formula.Path != "hello/1.0/.brew/hello.rb" {
 		t.Fatalf("Formula = %#v", resultA.Formula)
 	}
+	wantFormulaSource := []byte(validFormula())
+	if !bytes.Equal(resultA.FormulaSource, wantFormulaSource) || !bytes.Equal(resultB.FormulaSource, wantFormulaSource) {
+		t.Fatalf("transient Formula source was not captured exactly")
+	}
+	encoded, err := json.Marshal(resultA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, wantFormulaSource) || bytes.Contains(encoded, []byte("formula_source")) || bytes.Contains(encoded, []byte("FormulaSource")) {
+		t.Fatalf("transient Formula source leaked into JSON evidence: %s", encoded)
+	}
 	if resultA.Receipt != nil {
 		t.Fatalf("Receipt = %#v, want nil", resultA.Receipt)
 	}
@@ -64,6 +76,159 @@ func TestVerifyValidBottleAndDeterministicInventory(t *testing.T) {
 	assertInventoryEntry(t, resultA.Inventory, "hello/1.0/bin/hello", EntryRegular, "sha256:"+sha256Hex([]byte("hello\n")))
 	assertInventoryEntry(t, resultA.Inventory, "hello/1.0/bin/hello-hard", EntryHardlink, "sha256:"+sha256Hex([]byte("hello\n")))
 	assertInventoryEntry(t, resultA.Inventory, "hello/1.0/bin/hello-link", EntrySymlink, "")
+}
+
+func TestVerifyAcceptsHomebrewPAXHeaderWithUTF8PhysicalName(t *testing.T) {
+	t.Parallel()
+	blob, member := homebrewUTF8PAXBottle(t)
+	assertTarHeaderFormat(t, blob, member.header.Name, tar.FormatUnknown)
+
+	result, err := Verify(bytes.NewReader(blob), goExpectationFor(blob), Options{})
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	assertInventoryEntry(t, result.Inventory, member.header.Name, EntryRegular, "sha256:"+sha256Hex(member.body))
+}
+
+func TestVerifyAcceptsHomebrewPAXHeaderWithExact100BytePhysicalName(t *testing.T) {
+	t.Parallel()
+	blob, member := homebrewExact100ByteUTF8PAXBottle(t)
+	if got := len([]byte(member.header.Name)); got != 100 {
+		t.Fatalf("physical name length = %d, want 100", got)
+	}
+	assertTarHeaderFormat(t, blob, member.header.Name, tar.FormatUnknown)
+
+	result, err := Verify(bytes.NewReader(blob), goExpectationFor(blob), Options{})
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	assertInventoryEntry(t, result.Inventory, member.header.Name, EntryRegular, "sha256:"+sha256Hex(member.body))
+}
+
+func TestVerifyAcceptsKnownTarFormats(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		format tar.Format
+		path   string
+	}{
+		{name: "ustar", format: tar.FormatUSTAR, path: "hello/1.0/share/ustar"},
+		{name: "pax", format: tar.FormatPAX, path: "hello/1.0/share/Þpax"},
+		{name: "gnu", format: tar.FormatGNU, path: "hello/1.0/share/gnu"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			member := regularMember(tt.path, 0o644, tt.name)
+			member.header.Format = tt.format
+			blob := makeArchive(t, []archiveMember{formulaMember(validFormula()), member})
+			assertTarHeaderFormat(t, blob, tt.path, tt.format)
+			if _, err := Verify(bytes.NewReader(blob), expectationFor(blob), Options{}); err != nil {
+				t.Fatalf("Verify() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestVerifyRejectsMalformedUnknownTarFormats(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		goBottle bool
+		mutate   func(*testing.T) []byte
+	}{
+		{
+			name:     "pax raw name differs",
+			goBottle: true,
+			mutate: func(t *testing.T) []byte {
+				blob, _ := homebrewUTF8PAXBottle(t)
+				return patchRawTarHeader(t, blob,
+					"go/1.26.5/libexec/test/fixedbugs/issue27836.dir/Þfoo.go",
+					func(block []byte) {
+						clear(block[:100])
+						copy(block[:100], "go/1.26.5/libexec/test/fixedbugs/issue27836.dir/Ðfoo.go")
+					},
+				)
+			},
+		},
+		{
+			name:     "non-nul numeric field",
+			goBottle: true,
+			mutate: func(t *testing.T) []byte {
+				blob, _ := homebrewUTF8PAXBottle(t)
+				return patchRawTarHeader(t, blob,
+					"go/1.26.5/libexec/test/fixedbugs/issue27836.dir/Þfoo.go",
+					func(block []byte) { block[107] = ' ' },
+				)
+			},
+		},
+		{
+			name:     "non-ascii owner metadata",
+			goBottle: true,
+			mutate: func(t *testing.T) []byte {
+				blob, _ := homebrewUTF8PAXBottle(t)
+				return patchRawTarHeader(t, blob,
+					"go/1.26.5/libexec/test/fixedbugs/issue27836.dir/Þfoo.go",
+					func(block []byte) { copy(block[265:297], "Þ") },
+				)
+			},
+		},
+		{
+			name:     "non-empty physical prefix",
+			goBottle: true,
+			mutate: func(t *testing.T) []byte {
+				blob, _ := homebrewUTF8PAXBottle(t)
+				blob = patchRawTarHeader(t, blob,
+					"go/1.26.5/libexec/test/fixedbugs/issue27836.dir/Þfoo.go",
+					func(block []byte) {
+						clear(block[345:500])
+						copy(block[345:500], "../../escape")
+					},
+				)
+				assertTarHeaderFormat(t, blob, "go/1.26.5/libexec/test/fixedbugs/issue27836.dir/Þfoo.go", tar.FormatUnknown)
+				return blob
+			},
+		},
+		{
+			name:     "signed-only checksum",
+			goBottle: true,
+			mutate: func(t *testing.T) []byte {
+				blob, _ := homebrewUTF8PAXBottle(t)
+				blob = patchRawTarHeaderWithChecksum(t, blob,
+					"go/1.26.5/libexec/test/fixedbugs/issue27836.dir/Þfoo.go",
+					func([]byte) {},
+					writeSignedTarChecksum,
+				)
+				assertTarHeaderFormat(t, blob, "go/1.26.5/libexec/test/fixedbugs/issue27836.dir/Þfoo.go", tar.FormatUnknown)
+				return blob
+			},
+		},
+		{
+			name: "utf8 ustar without pax",
+			mutate: func(t *testing.T) []byte {
+				blob := makeArchive(t, []archiveMember{
+					formulaMember(validFormula()),
+					regularMember("hello/1.0/bin/tool", 0o755, "x"),
+				})
+				return patchRawTarHeader(t, blob, "hello/1.0/bin/tool", func(block []byte) {
+					clear(block[:100])
+					copy(block[:100], "hello/1.0/bin/Þtool")
+				})
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			blob := tt.mutate(t)
+			expected := expectationFor(blob)
+			if tt.goBottle {
+				expected = goExpectationFor(blob)
+			}
+			_, err := Verify(bytes.NewReader(blob), expected, Options{})
+			assertErrorCode(t, err, CodeInvalidTar)
+		})
+	}
 }
 
 func TestVerifyValidReceipt(t *testing.T) {
@@ -619,6 +784,122 @@ func patchFirstTarType(t *testing.T, blob []byte, typeflag byte) []byte {
 	return compressGzip(t, raw)
 }
 
+func assertTarHeaderFormat(t *testing.T, blob []byte, name string, want tar.Format) {
+	t.Helper()
+	gz, err := gzip.NewReader(bytes.NewReader(blob))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			t.Fatalf("tar entry %q not found", name)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hdr.Name == name {
+			if hdr.Format != want {
+				t.Fatalf("tar entry %q format = %v, want %v", name, hdr.Format, want)
+			}
+			return
+		}
+	}
+}
+
+func homebrewUTF8PAXBottle(t *testing.T) ([]byte, archiveMember) {
+	t.Helper()
+	const logicalName = "go/1.26.5/libexec/test/fixedbugs/issue27836.dir/Þfoo.go"
+	member := regularMember(logicalName, 0o644, "package Þfoo\n")
+	member.header.Format = tar.FormatPAX
+	blob := makeArchive(t, []archiveMember{
+		regularMember("go/1.26.5/.brew/go.rb", 0o644, "class Go < Formula\nend\n"),
+		member,
+	})
+	blob = patchRawTarHeader(t, blob,
+		"go/1.26.5/libexec/test/fixedbugs/issue27836.dir/foo.go",
+		func(block []byte) {
+			clear(block[:100])
+			copy(block[:100], logicalName)
+		},
+	)
+	return blob, member
+}
+
+func homebrewExact100ByteUTF8PAXBottle(t *testing.T) ([]byte, archiveMember) {
+	t.Helper()
+	logicalName := "go/1.26.5/" + strings.Repeat("a", 81) + "/Þfoo.go"
+	if len([]byte(logicalName)) != 100 {
+		t.Fatalf("test path length = %d, want 100", len([]byte(logicalName)))
+	}
+	member := regularMember(logicalName, 0o644, "package Þfoo\n")
+	member.header.Format = tar.FormatPAX
+	blob := makeArchive(t, []archiveMember{
+		regularMember("go/1.26.5/.brew/go.rb", 0o644, "class Go < Formula\nend\n"),
+		member,
+	})
+	blob = patchRawTarHeader(t, blob, strings.Replace(logicalName, "Þ", "", 1), func(block []byte) {
+		clear(block[:100])
+		copy(block[:100], logicalName)
+	})
+	return blob, member
+}
+
+func patchRawTarHeader(t *testing.T, blob []byte, rawName string, mutate func([]byte)) []byte {
+	t.Helper()
+	return patchRawTarHeaderWithChecksum(t, blob, rawName, mutate, writeUnsignedTarChecksum)
+}
+
+func patchRawTarHeaderWithChecksum(t *testing.T, blob []byte, rawName string, mutate, writeChecksum func([]byte)) []byte {
+	t.Helper()
+	raw := decompressGzip(t, blob)
+	for offset := 0; offset+tarBlockSize <= len(raw); offset += tarBlockSize {
+		block := raw[offset : offset+tarBlockSize]
+		name := string(bytes.TrimRight(block[:100], "\x00"))
+		if name != rawName || !bytes.Equal(block[257:263], []byte("ustar\x00")) {
+			continue
+		}
+		mutate(block)
+		writeChecksum(block)
+		return compressGzip(t, raw)
+	}
+	t.Fatalf("raw tar header %q not found", rawName)
+	return nil
+}
+
+func writeUnsignedTarChecksum(block []byte) {
+	for i := 148; i < 156; i++ {
+		block[i] = ' '
+	}
+	var checksum int64
+	for _, b := range block {
+		checksum += int64(b)
+	}
+	copy(block[148:156], fmt.Sprintf("%06o\x00 ", checksum))
+}
+
+func writeSignedTarChecksum(block []byte) {
+	for i := 148; i < 156; i++ {
+		block[i] = ' '
+	}
+	var checksum int64
+	for _, b := range block {
+		checksum += int64(int8(b))
+	}
+	copy(block[148:156], fmt.Sprintf("%06o\x00 ", checksum))
+}
+
+func goExpectationFor(blob []byte) Expectation {
+	expected := expectationFor(blob)
+	expected.Name = "go"
+	expected.FullName = "homebrew/core/go"
+	expected.FormulaVersion = "1.26.5"
+	expected.PkgVersion = "1.26.5"
+	return expected
+}
+
 func decompressGzip(t *testing.T, blob []byte) []byte {
 	t.Helper()
 	gz, err := gzip.NewReader(bytes.NewReader(blob))
@@ -725,16 +1006,669 @@ func TestExpandedLimitIncludesTarHeadersAndMetadata(t *testing.T) {
 
 func TestInstalledReceiptRequiresPouredIdentity(t *testing.T) {
 	node := resolution.Node{Name: "hello", FullName: "homebrew/core/hello", FormulaVersion: "1.0", PkgVersion: "1.0", VersionScheme: 0, Bottle: resolution.Bottle{Tab: resolution.BottleTab{Arch: "x86_64", Compiler: "gcc-12"}}}
-	if _, err := VerifyInstalledReceipt([]byte(`{"built_as_bottle":true}`), node); err == nil {
+	if _, err := VerifyInstalledReceipt([]byte(`{"built_as_bottle":true}`), node, []resolution.Node{node}); err == nil {
 		t.Fatal("minimal receipt should not bind installed identity")
 	}
 	valid := []byte(`{"built_as_bottle":true,"poured_from_bottle":true,"arch":"x86_64","compiler":"gcc","runtime_dependencies":[],"source":{"spec":"stable","tap":"homebrew/core","versions":{"stable":"1.0","version_scheme":0}}}`)
-	if _, err := VerifyInstalledReceipt(valid, node); err != nil {
+	if _, err := VerifyInstalledReceipt(valid, node, []resolution.Node{node}); err != nil {
 		t.Fatal(err)
 	}
 	wrong := bytes.Replace(valid, []byte(`"compiler":"gcc"`), []byte(`"compiler":"clang"`), 1)
-	if _, err := VerifyInstalledReceipt(wrong, node); err == nil {
+	if _, err := VerifyInstalledReceipt(wrong, node, []resolution.Node{node}); err == nil {
 		t.Fatal("unrelated installed compiler family accepted")
+	}
+}
+
+func TestInstalledReceiptAllowsHostCompilerForAllBottleOnly(t *testing.T) {
+	node := resolution.Node{
+		Name:           "ca-certificates",
+		FullName:       "homebrew/core/ca-certificates",
+		FormulaVersion: "2026-07-16",
+		PkgVersion:     "2026-07-16",
+		Bottle: resolution.Bottle{
+			Tag: "all",
+			Tab: resolution.BottleTab{Arch: "x86_64", Compiler: "clang"},
+		},
+	}
+	data := installedReceiptData(t, node, "gcc", nil)
+	if _, err := VerifyInstalledReceipt(data, node, []resolution.Node{node}); err != nil {
+		t.Fatalf("architecture-neutral compiler normalization rejected: %v", err)
+	}
+
+	archSpecific := node
+	archSpecific.Bottle.Tag = "x86_64_linux"
+	if _, err := VerifyInstalledReceipt(data, archSpecific, []resolution.Node{archSpecific}); err == nil {
+		t.Fatal("cross-family compiler change accepted for architecture-specific bottle")
+	}
+	if _, err := VerifyInstalledReceipt(installedReceiptData(t, node, "malicious", nil), node, []resolution.Node{node}); err == nil {
+		t.Fatal("unknown compiler accepted for architecture-neutral bottle")
+	}
+	if _, err := VerifyInstalledReceipt(installedReceiptData(t, node, "gcc-.", nil), node, []resolution.Node{node}); err == nil {
+		t.Fatal("malformed compiler version accepted for architecture-neutral bottle")
+	}
+}
+
+func TestInstalledReceiptUsesRootSpecificRecursiveSignedGraph(t *testing.T) {
+	root := resolvedReceiptNode("little-cms2", "2.17", 0, "2.17")
+	root.Bottle.Tag = "x86_64_linux"
+	root.Bottle.Tab = resolution.BottleTab{
+		Arch:     "x86_64",
+		Compiler: "gcc",
+		// The historical bottle tab contains a stale transitive dependency and
+		// does not describe the current recursive signed graph.
+		Dependencies: []resolution.RuntimeDependency{
+			{FullName: "jpeg-turbo", Version: "3.0.4", PkgVersion: "3.0.4", DeclaredDirectly: true},
+			{FullName: "libtiff", Version: "4.7.0", PkgVersion: "4.7.0", DeclaredDirectly: true},
+			{FullName: "obsolete-codec", Version: "1.0", PkgVersion: "1.0"},
+		},
+	}
+	root.Dependencies = []resolution.Requirement{
+		{Name: "jpeg-turbo", Minimum: "3.0.4", Direct: true},
+		{Name: "libtiff", Minimum: "4.7.0", Direct: true},
+	}
+
+	jpeg := resolvedReceiptNode("jpeg-turbo", "3.1.0", 0, "3.1.0")
+	libtiff := resolvedReceiptNode("libtiff", "4.7.1", 0, "4.7.1")
+	libtiff.Bottle.Tab.Dependencies = []resolution.RuntimeDependency{
+		{FullName: "lz4", Version: "1.9.4", PkgVersion: "1.9.4"},
+		{FullName: "xz", Version: "5.6.4", PkgVersion: "5.6.4"},
+		{FullName: "zlib", Version: "1.3.1", PkgVersion: "1.3.1"},
+		{FullName: "zstd", Version: "1.5.6", PkgVersion: "1.5.6"},
+	}
+	libtiff.Dependencies = []resolution.Requirement{
+		{Name: "lz4", Minimum: "1.9.4", Direct: true},
+		{Name: "xz", Minimum: "5.6.4", Direct: true},
+		{Name: "zlib", Minimum: "1.3.1", Direct: true},
+		{Name: "zstd", Minimum: "1.5.6", Direct: true},
+	}
+
+	closure := []resolution.Node{
+		root,
+		jpeg,
+		libtiff,
+		resolvedReceiptNode("lz4", "1.10.0", 0, "1.10.0"),
+		resolvedReceiptNode("xz", "5.8.3", 0, "5.8.3"),
+		resolvedReceiptNode("zlib", "1.3.2", 0, "1.3.2"),
+		resolvedReceiptNode("zstd", "1.5.7", 1, "1.5.7_1"),
+		resolvedReceiptNode("other-root", "9.0", 0, "9.0"),
+	}
+	actual := []ReceiptDependency{
+		{FullName: "jpeg-turbo", Version: "3.1.0", PkgVersion: "3.1.0", DeclaredDirectly: true},
+		{FullName: "libtiff", Version: "4.7.1", PkgVersion: "4.7.1", DeclaredDirectly: true},
+		{FullName: "lz4", Version: "1.10.0", PkgVersion: "1.10.0"},
+		{FullName: "xz", Version: "5.8.3", PkgVersion: "5.8.3"},
+		{FullName: "zlib", Version: "1.3.2", PkgVersion: "1.3.2"},
+		{FullName: "zstd", Version: "1.5.7", Revision: 1, PkgVersion: "1.5.7_1"},
+	}
+	if _, err := VerifyInstalledReceipt(installedReceiptData(t, root, "gcc", actual), root, closure); err != nil {
+		t.Fatalf("current recursive signed graph rejected: %v", err)
+	}
+
+	tests := map[string]func([]ReceiptDependency, []resolution.Node) ([]ReceiptDependency, []resolution.Node){
+		"tampered formula version": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			deps[0].Version = "999"
+			return deps, nodes
+		},
+		"tampered revision": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			deps[0].Revision = 999
+			return deps, nodes
+		},
+		"tampered pkg version": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			deps[0].PkgVersion = "999"
+			return deps, nodes
+		},
+		"missing recursive dependency": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			return deps[1:], nodes
+		},
+		"cross-root dependency": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			return append(deps, ReceiptDependency{FullName: "other-root", Version: "9.0", PkgVersion: "9.0"}), nodes
+		},
+		"duplicate receipt dependency": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			return append(deps, deps[0]), nodes
+		},
+		"duplicate closure node": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			return deps, append(nodes, nodes[3])
+		},
+		"duplicate graph edge": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			nodes[0].Dependencies = append(nodes[0].Dependencies, nodes[0].Dependencies[0])
+			return deps, nodes
+		},
+		"dependency cycle": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			nodes[3].Dependencies = []resolution.Requirement{{Name: "little-cms2", Minimum: "2.17"}}
+			return deps, nodes
+		},
+		"missing graph node": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			return deps, append(nodes[:3], nodes[4:]...)
+		},
+		"inconsistent authenticated minimum": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			nodes[0].Dependencies[0].Minimum = "3.0.3"
+			return deps, nodes
+		},
+		"inconsistent authenticated revision": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			nodes[0].Dependencies[0].Revision = 1
+			return deps, nodes
+		},
+		"inconsistent authenticated rebuild": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			nodes[0].Dependencies[0].BottleRebuild = 1
+			return deps, nodes
+		},
+		"duplicate historical minimum": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			nodes[0].Bottle.Tab.Dependencies = append(nodes[0].Bottle.Tab.Dependencies, nodes[0].Bottle.Tab.Dependencies[0])
+			return deps, nodes
+		},
+		"selected version below minimum": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			nodes[3].PkgVersion = "1.8.0"
+			nodes[3].FormulaVersion = "1.8.0"
+			return deps, nodes
+		},
+		"invented bottle rebuild": func(deps []ReceiptDependency, nodes []resolution.Node) ([]ReceiptDependency, []resolution.Node) {
+			deps[0].BottleRebuild = 999
+			return deps, nodes
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			deps := append([]ReceiptDependency(nil), actual...)
+			nodes := cloneResolutionNodes(t, closure)
+			deps, nodes = mutate(deps, nodes)
+			if _, err := VerifyInstalledReceipt(installedReceiptData(t, root, "gcc", deps), root, nodes); err == nil {
+				t.Fatal("invalid generated receipt or signed graph accepted")
+			}
+		})
+	}
+}
+
+func TestInstalledReceiptIncludesSelectedHistoricalDirectFormulaRoots(t *testing.T) {
+	webp := resolvedReceiptNode("webp", "1.6.0", 0, "1.6.0")
+	webp.Bottle.Tag = "x86_64_linux"
+	webp.Bottle.Tab = resolution.BottleTab{
+		Arch:     "x86_64",
+		Compiler: "gcc",
+		Dependencies: []resolution.RuntimeDependency{
+			{FullName: "giflib", Version: "5.2.2", PkgVersion: "5.2.2", DeclaredDirectly: true},
+			{FullName: "jpeg-turbo", Version: "3.1.1", PkgVersion: "3.1.1", DeclaredDirectly: true},
+			{FullName: "libpng", Version: "1.6.50", PkgVersion: "1.6.50", DeclaredDirectly: true},
+			// The embedded historical WebP Formula still declares libtiff,
+			// while the current signed WebP graph no longer does. Deno selects
+			// libtiff independently through little-cms2.
+			{FullName: "libtiff", Version: "4.7.0", PkgVersion: "4.7.0", DeclaredDirectly: true},
+			{FullName: "obsolete-codec", Version: "1.0", PkgVersion: "1.0"},
+		},
+	}
+	webp.Dependencies = []resolution.Requirement{
+		{Name: "giflib", Minimum: "5.2.2", Direct: true},
+		{Name: "jpeg-turbo", Minimum: "3.1.1", Direct: true},
+		{Name: "libpng", Minimum: "1.6.50", Direct: true},
+	}
+
+	giflib := resolvedReceiptNode("giflib", "6.1.3", 0, "6.1.3")
+	jpeg := resolvedReceiptNode("jpeg-turbo", "3.2.0", 0, "3.2.0")
+	libpng := resolvedReceiptNode("libpng", "1.6.58", 0, "1.6.58")
+	libpng.Dependencies = []resolution.Requirement{{Name: "zlib-ng-compat", Minimum: "2.3.3_1", Revision: 1, Direct: true}}
+	zlib := resolvedReceiptNode("zlib-ng-compat", "2.3.3", 1, "2.3.3_1")
+	libtiff := resolvedReceiptNode("libtiff", "4.7.2", 0, "4.7.2")
+	libtiff.Dependencies = []resolution.Requirement{
+		{Name: "jpeg-turbo", Minimum: "3.1.1", Direct: true},
+		{Name: "xz", Minimum: "5.8.1", Direct: true},
+		{Name: "lz4", Minimum: "1.10.0", BottleRebuild: 1, Direct: true},
+		{Name: "zstd", Minimum: "1.5.7", Direct: true},
+		{Name: "zlib-ng-compat", Minimum: "2.3.3_1", Revision: 1, Direct: true},
+	}
+	lz4 := resolvedReceiptNode("lz4", "1.10.0", 0, "1.10.0")
+	lz4.BottleRebuild = 1
+	xz := resolvedReceiptNode("xz", "5.8.3", 0, "5.8.3")
+	zstd := resolvedReceiptNode("zstd", "1.5.7", 1, "1.5.7_1")
+	obsolete := resolvedReceiptNode("obsolete-codec", "1.0", 0, "1.0")
+	unrelated := resolvedReceiptNode("little-cms2", "2.19", 0, "2.19")
+	closure := []resolution.Node{webp, giflib, jpeg, libpng, zlib, libtiff, lz4, xz, zstd, obsolete, unrelated}
+
+	actual := []ReceiptDependency{
+		{FullName: "giflib", Version: "6.1.3", PkgVersion: "6.1.3", DeclaredDirectly: true},
+		{FullName: "jpeg-turbo", Version: "3.2.0", PkgVersion: "3.2.0", DeclaredDirectly: true},
+		{FullName: "libpng", Version: "1.6.58", PkgVersion: "1.6.58", DeclaredDirectly: true},
+		{FullName: "zlib-ng-compat", Version: "2.3.3", Revision: 1, PkgVersion: "2.3.3_1"},
+		{FullName: "libtiff", Version: "4.7.2", PkgVersion: "4.7.2", DeclaredDirectly: true},
+		{FullName: "lz4", Version: "1.10.0", BottleRebuild: 1, PkgVersion: "1.10.0"},
+		{FullName: "xz", Version: "5.8.3", PkgVersion: "5.8.3"},
+		{FullName: "zstd", Version: "1.5.7", Revision: 1, PkgVersion: "1.5.7_1"},
+	}
+	if _, err := VerifyInstalledReceipt(installedReceiptData(t, webp, "gcc", actual), webp, closure); err != nil {
+		t.Fatalf("selected historical direct Formula root rejected: %v", err)
+	}
+
+	missingDirect := cloneResolutionNodes(t, closure)
+	missingDirect[0].Bottle.Tab.Dependencies = append(missingDirect[0].Bottle.Tab.Dependencies,
+		resolution.RuntimeDependency{FullName: "missing-direct", Version: "1.0", PkgVersion: "1.0", DeclaredDirectly: true})
+	if _, err := VerifyInstalledReceipt(installedReceiptData(t, missingDirect[0], "gcc", actual), missingDirect[0], missingDirect); err != nil {
+		t.Fatalf("out-of-closure historical direct Formula should remain evidence-only: %v", err)
+	}
+
+	historicalCurrentCycle := cloneResolutionNodes(t, closure)
+	historicalCurrentCycle[5].Dependencies = append(historicalCurrentCycle[5].Dependencies,
+		resolution.Requirement{Name: "webp", Minimum: "1.6.0", Direct: true})
+	if _, err := VerifyInstalledReceipt(installedReceiptData(t, webp, "gcc", actual), webp, historicalCurrentCycle); err != nil {
+		t.Fatalf("historical branch back-edge to receipt root rejected: %v", err)
+	}
+
+	withUnrelated := append(append([]ReceiptDependency(nil), actual...), ReceiptDependency{FullName: "little-cms2", Version: "2.19", PkgVersion: "2.19"})
+	if _, err := VerifyInstalledReceipt(installedReceiptData(t, webp, "gcc", withUnrelated), webp, closure); err == nil {
+		t.Fatal("unrelated selected closure node was accepted")
+	}
+	withHistoricalTransitive := append(append([]ReceiptDependency(nil), actual...), ReceiptDependency{FullName: "obsolete-codec", Version: "1.0", PkgVersion: "1.0"})
+	if _, err := VerifyInstalledReceipt(installedReceiptData(t, webp, "gcc", withHistoricalTransitive), webp, closure); err == nil {
+		t.Fatal("historical transitive bottle entry was accepted as a receipt root")
+	}
+	missingHistoricalRoot := slices.DeleteFunc(append([]ReceiptDependency(nil), actual...), func(dep ReceiptDependency) bool { return dep.FullName == "libtiff" })
+	if _, err := VerifyInstalledReceipt(installedReceiptData(t, webp, "gcc", missingHistoricalRoot), webp, closure); err == nil {
+		t.Fatal("selected historical direct Formula root was allowed to disappear")
+	}
+}
+
+func TestNormalizeInstalledReceiptDependenciesUsesExactVerifiedPolicy(t *testing.T) {
+	root, closure, expected := normalizationReceiptFixture()
+	incomplete := []ReceiptDependency{expected[0]}
+	input := installedReceiptData(t, root, "gcc", incomplete)
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(input, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["name"] = json.RawMessage(`"cairo"`)
+	fields["full_name"] = json.RawMessage(`"homebrew/core/cairo"`)
+	fields["pkg_version"] = json.RawMessage(`"1.18.4"`)
+	fields["custom_homebrew_metadata"] = json.RawMessage(`{"retained":true,"number":1}`)
+	input, err := json.MarshalIndent(fields, "", "    ")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	normalized, err := NormalizeInstalledReceiptDependencies(input, root, closure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !normalized.Changed || normalized.BeforeDependencyCount != 1 || normalized.AfterDependencyCount != len(expected) {
+		t.Fatalf("normalization = %#v", normalized)
+	}
+	if _, err := VerifyInstalledReceipt(normalized.Data, root, closure); err != nil {
+		t.Fatalf("normalized receipt did not pass strict verification: %v", err)
+	}
+
+	var beforeObject, afterObject map[string]any
+	if err := json.Unmarshal(input, &beforeObject); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(normalized.Data, &afterObject); err != nil {
+		t.Fatal(err)
+	}
+	delete(beforeObject, "runtime_dependencies")
+	delete(afterObject, "runtime_dependencies")
+	if !reflect.DeepEqual(beforeObject, afterObject) {
+		t.Fatalf("non-dependency receipt fields changed:\nbefore=%#v\nafter=%#v", beforeObject, afterObject)
+	}
+
+	var receipt installReceipt
+	if err := json.Unmarshal(normalized.Data, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(receipt.RuntimeDeps, expected) {
+		t.Fatalf("normalized dependencies = %#v, want %#v", receipt.RuntimeDeps, expected)
+	}
+	second, err := NormalizeInstalledReceiptDependencies(input, root, closure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(normalized.Data, second.Data) {
+		t.Fatal("normalization output is not deterministic")
+	}
+
+	valid := installedReceiptData(t, root, "gcc", expected)
+	unchanged, err := NormalizeInstalledReceiptDependencies(valid, root, closure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Changed || unchanged.Data != nil {
+		t.Fatalf("valid receipt was rewritten: %#v", unchanged)
+	}
+}
+
+func TestNormalizeInstalledReceiptDependenciesRejectsTampering(t *testing.T) {
+	root, closure, expected := normalizationReceiptFixture()
+	validIncomplete := []ReceiptDependency{expected[0]}
+	tests := map[string]func([]byte) []byte{
+		"extra dependency": func(_ []byte) []byte {
+			return installedReceiptData(t, root, "gcc", []ReceiptDependency{
+				expected[0],
+				{FullName: "unrelated", Version: "9", PkgVersion: "9"},
+			})
+		},
+		"wrong version": func(_ []byte) []byte {
+			deps := append([]ReceiptDependency(nil), validIncomplete...)
+			deps[0].Version = "999"
+			return installedReceiptData(t, root, "gcc", deps)
+		},
+		"wrong revision": func(_ []byte) []byte {
+			deps := append([]ReceiptDependency(nil), validIncomplete...)
+			deps[0].Revision++
+			return installedReceiptData(t, root, "gcc", deps)
+		},
+		"wrong pkg version": func(_ []byte) []byte {
+			deps := append([]ReceiptDependency(nil), validIncomplete...)
+			deps[0].PkgVersion = "999"
+			return installedReceiptData(t, root, "gcc", deps)
+		},
+		"invented bottle rebuild": func(_ []byte) []byte {
+			deps := append([]ReceiptDependency(nil), validIncomplete...)
+			deps[0].BottleRebuild = expected[0].BottleRebuild + 7
+			return installedReceiptData(t, root, "gcc", deps)
+		},
+		"duplicate dependency": func(_ []byte) []byte {
+			return installedReceiptData(t, root, "gcc", append(append([]ReceiptDependency(nil), validIncomplete...), validIncomplete[0]))
+		},
+		"complete wrong set": func(_ []byte) []byte {
+			deps := append([]ReceiptDependency(nil), expected...)
+			deps[len(deps)-1].FullName = "unrelated"
+			return installedReceiptData(t, root, "gcc", deps)
+		},
+		"tampered architecture": func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"arch":"x86_64"`), []byte(`"arch":"arm64"`), 1)
+		},
+		"tampered source identity": func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"stable":"1.18.4"`), []byte(`"stable":"999"`), 1)
+		},
+		"missing runtime dependencies": func(data []byte) []byte {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			delete(fields, "runtime_dependencies")
+			out, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return out
+		},
+		"null runtime dependencies": func(data []byte) []byte {
+			return bytes.Replace(data, mustJSON(t, validIncomplete), []byte("null"), 1)
+		},
+		"object runtime dependencies": func(data []byte) []byte {
+			return bytes.Replace(data, mustJSON(t, validIncomplete), []byte(`{}`), 1)
+		},
+		"duplicate JSON key": func(data []byte) []byte {
+			return append([]byte(`{"runtime_dependencies":[] ,`), data[1:]...)
+		},
+	}
+	base := installedReceiptData(t, root, "gcc", validIncomplete)
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			input := mutate(append([]byte(nil), base...))
+			if result, err := NormalizeInstalledReceiptDependencies(input, root, closure); err == nil {
+				t.Fatalf("tampered receipt normalized: %#v", result)
+			}
+		})
+	}
+}
+
+func TestNormalizeInstalledReceiptDependenciesDoesNotRelaxPreinstallVerification(t *testing.T) {
+	root, _, expected := normalizationReceiptFixture()
+	expectation := ExpectationFromNode(root)
+	expectation.Dependencies = expected
+	incomplete := installedReceiptData(t, root, "gcc", expected[:1])
+	if _, err := validateReceipt(incomplete, expectation); err == nil {
+		t.Fatal("pre-install receipt verification accepted an incomplete dependency set")
+	}
+}
+
+func normalizationReceiptFixture() (resolution.Node, []resolution.Node, []ReceiptDependency) {
+	root := resolvedReceiptNode("cairo", "1.18.4", 0, "1.18.4")
+	root.Bottle.Tag = "x86_64_linux"
+	root.Bottle.Tab = resolution.BottleTab{
+		Arch:     "x86_64",
+		Compiler: "gcc",
+		Dependencies: []resolution.RuntimeDependency{
+			{FullName: "libpng", Version: "1.6.50", PkgVersion: "1.6.50", DeclaredDirectly: true},
+			{FullName: "obsolete-transitive", Version: "1", PkgVersion: "1"},
+		},
+	}
+	root.Dependencies = []resolution.Requirement{{Name: "pixman", Minimum: "0.46.4", Direct: true}}
+	pixman := resolvedReceiptNode("pixman", "0.46.4", 0, "0.46.4")
+	pixman.BottleRebuild = 1
+	libpng := resolvedReceiptNode("libpng", "1.6.50", 0, "1.6.50")
+	libpng.Dependencies = []resolution.Requirement{{Name: "zlib-ng-compat", Minimum: "2.2.4", Direct: true}}
+	zlib := resolvedReceiptNode("zlib-ng-compat", "2.3.3", 1, "2.3.3_1")
+	closure := []resolution.Node{root, pixman, libpng, zlib, resolvedReceiptNode("unrelated", "9", 0, "9")}
+	expected := []ReceiptDependency{
+		{FullName: "libpng", Version: "1.6.50", PkgVersion: "1.6.50", DeclaredDirectly: true},
+		{FullName: "pixman", Version: "0.46.4", BottleRebuild: 1, PkgVersion: "0.46.4", DeclaredDirectly: true},
+		{FullName: "zlib-ng-compat", Version: "2.3.3", Revision: 1, PkgVersion: "2.3.3_1"},
+	}
+	return root, closure, expected
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestInstalledReceiptValidatesNestedHistoricalDirectEdges(t *testing.T) {
+	root := resolvedReceiptNode("root", "1", 0, "1")
+	root.Bottle.Tag = "x86_64_linux"
+	root.Bottle.Tab = resolution.BottleTab{
+		Arch:         "x86_64",
+		Compiler:     "gcc",
+		Dependencies: []resolution.RuntimeDependency{{FullName: "parent", Version: "1", PkgVersion: "1", DeclaredDirectly: true}},
+	}
+	root.Dependencies = []resolution.Requirement{{Name: "parent", Minimum: "1", Direct: true}}
+
+	parent := resolvedReceiptNode("parent", "1", 0, "1")
+	parent.Bottle.Tab.Dependencies = []resolution.RuntimeDependency{
+		{FullName: "bridge", Version: "1", PkgVersion: "1", DeclaredDirectly: true},
+		// stale was direct when this bottle was built, but remains selected
+		// recursively through bridge in the current signed graph.
+		{FullName: "stale", Version: "1", PkgVersion: "1", DeclaredDirectly: true},
+	}
+	parent.Dependencies = []resolution.Requirement{{Name: "bridge", Minimum: "1", Direct: true}}
+
+	bridge := resolvedReceiptNode("bridge", "1", 0, "1")
+	bridge.Bottle.Tab.Dependencies = []resolution.RuntimeDependency{{FullName: "stale", Version: "1", PkgVersion: "1", DeclaredDirectly: true}}
+	bridge.Dependencies = []resolution.Requirement{{Name: "stale", Minimum: "1", Direct: true}}
+
+	stale := resolvedReceiptNode("stale", "1", 0, "1")
+	stale.Bottle.Tab.Dependencies = []resolution.RuntimeDependency{{FullName: "leaf", Version: "1", PkgVersion: "1", DeclaredDirectly: true}}
+	stale.Dependencies = []resolution.Requirement{{Name: "leaf", Minimum: "1", Direct: true}}
+	leaf := resolvedReceiptNode("leaf", "1", 0, "1")
+	other := resolvedReceiptNode("other-root", "1", 0, "1")
+
+	closure := []resolution.Node{root, parent, bridge, stale, leaf, other}
+	actual := []ReceiptDependency{
+		{FullName: "parent", Version: "1", PkgVersion: "1"},
+		{FullName: "bridge", Version: "1", PkgVersion: "1"},
+		{FullName: "stale", Version: "1", PkgVersion: "1"},
+		{FullName: "leaf", Version: "1", PkgVersion: "1"},
+	}
+	data := installedReceiptData(t, root, "gcc", actual)
+	if _, err := VerifyInstalledReceipt(data, root, closure); err != nil {
+		t.Fatalf("selected nested stale direct dependency rejected: %v", err)
+	}
+
+	t.Run("stale direct minimum is authenticated", func(t *testing.T) {
+		nodes := cloneResolutionNodes(t, closure)
+		nodes[1].Bottle.Tab.Dependencies[1].PkgVersion = "2"
+		nodes[1].Bottle.Tab.Dependencies[1].Version = "2"
+		if _, err := VerifyInstalledReceipt(data, root, nodes); err == nil {
+			t.Fatal("unsatisfied stale direct minimum accepted")
+		}
+	})
+
+	t.Run("historical branch may terminate at receipt root", func(t *testing.T) {
+		nodes := cloneResolutionNodes(t, closure)
+		nodes[4].Bottle.Tab.Dependencies = []resolution.RuntimeDependency{{FullName: "root", Version: "1", PkgVersion: "1", DeclaredDirectly: true}}
+		if _, err := VerifyInstalledReceipt(data, root, nodes); err != nil {
+			t.Fatalf("historical back-edge to receipt root rejected: %v", err)
+		}
+	})
+
+	t.Run("selected historical direct edge justifies another closure node", func(t *testing.T) {
+		nodes := cloneResolutionNodes(t, closure)
+		nodes[1].Bottle.Tab.Dependencies = append(nodes[1].Bottle.Tab.Dependencies,
+			resolution.RuntimeDependency{FullName: "other-root", Version: "1", PkgVersion: "1", DeclaredDirectly: true})
+		withOther := append(append([]ReceiptDependency(nil), actual...), ReceiptDependency{FullName: "other-root", Version: "1", PkgVersion: "1"})
+		if _, err := VerifyInstalledReceipt(installedReceiptData(t, root, "gcc", withOther), root, nodes); err != nil {
+			t.Fatalf("selected historical direct edge rejected: %v", err)
+		}
+	})
+
+	t.Run("out-of-closure historical direct edge remains evidence-only", func(t *testing.T) {
+		nodes := cloneResolutionNodes(t, closure)
+		nodes[1].Bottle.Tab.Dependencies = append(nodes[1].Bottle.Tab.Dependencies,
+			resolution.RuntimeDependency{FullName: "missing", Version: "1", PkgVersion: "1", DeclaredDirectly: true})
+		if _, err := VerifyInstalledReceipt(data, root, nodes); err != nil {
+			t.Fatalf("out-of-closure historical edge should not broaden receipt: %v", err)
+		}
+	})
+
+	t.Run("historical cycle among selected closure nodes is finite", func(t *testing.T) {
+		nodes := cloneResolutionNodes(t, closure)
+		nodes[4].Bottle.Tab.Dependencies = []resolution.RuntimeDependency{{FullName: "parent", Version: "1", PkgVersion: "1", DeclaredDirectly: true}}
+		if _, err := VerifyInstalledReceipt(data, root, nodes); err != nil {
+			t.Fatalf("authenticated historical cycle rejected: %v", err)
+		}
+	})
+
+	t.Run("current-only cycle is rejected", func(t *testing.T) {
+		nodes := cloneResolutionNodes(t, closure)
+		nodes[4].Dependencies = []resolution.Requirement{{Name: "parent", Minimum: "1", Direct: true}}
+		if _, err := VerifyInstalledReceipt(data, root, nodes); err == nil {
+			t.Fatal("current signed dependency cycle accepted")
+		}
+	})
+}
+
+func TestInstalledReceiptRejectsCurrentCycleAfterHistoricalMemoization(t *testing.T) {
+	root := resolvedReceiptNode("root", "1", 0, "1")
+	root.Bottle.Tag = "x86_64_linux"
+	root.Bottle.Tab = resolution.BottleTab{
+		Arch:         "x86_64",
+		Compiler:     "gcc",
+		Dependencies: []resolution.RuntimeDependency{{FullName: "a", Version: "1", PkgVersion: "1", DeclaredDirectly: true}},
+	}
+	root.Dependencies = []resolution.Requirement{{Name: "z", Minimum: "1", Direct: true}}
+	a := resolvedReceiptNode("a", "1", 0, "1")
+	a.Dependencies = []resolution.Requirement{{Name: "root", Minimum: "1", Direct: true}}
+	z := resolvedReceiptNode("z", "1", 0, "1")
+	z.Dependencies = []resolution.Requirement{{Name: "a", Minimum: "1", Direct: true}}
+	actual := []ReceiptDependency{
+		{FullName: "a", Version: "1", PkgVersion: "1"},
+		{FullName: "z", Version: "1", PkgVersion: "1"},
+	}
+	if _, err := VerifyInstalledReceipt(installedReceiptData(t, root, "gcc", actual), root, []resolution.Node{root, a, z}); err == nil {
+		t.Fatal("current cycle hidden by historical traversal memoization was accepted")
+	}
+}
+
+func TestInstalledReceiptAllowsUnspecifiedCurrentMinimums(t *testing.T) {
+	root := resolvedReceiptNode("root", "1", 0, "1")
+	root.Bottle.Tag = "x86_64_linux"
+	root.Bottle.Tab = resolution.BottleTab{
+		Arch:         "x86_64",
+		Compiler:     "gcc",
+		Dependencies: []resolution.RuntimeDependency{{FullName: "child", Version: "2", PkgVersion: "2", DeclaredDirectly: true}},
+	}
+	root.Dependencies = []resolution.Requirement{{Name: "child"}}
+	child := resolvedReceiptNode("child", "2", 0, "2")
+	actual := []ReceiptDependency{{FullName: "child", Version: "2", PkgVersion: "2"}}
+	if _, err := VerifyInstalledReceipt(installedReceiptData(t, root, "gcc", actual), root, []resolution.Node{root, child}); err != nil {
+		t.Fatalf("unspecified current minimum did not inherit authenticated bottle minimum: %v", err)
+	}
+
+	unbounded := root
+	unbounded.Bottle.Tab.Dependencies = nil
+	if _, err := VerifyInstalledReceipt(installedReceiptData(t, unbounded, "gcc", actual), unbounded, []resolution.Node{unbounded, child}); err != nil {
+		t.Fatalf("unbounded current dependency was rejected: %v", err)
+	}
+
+	partial := root
+	partial.Dependencies = []resolution.Requirement{{Name: "child", Revision: 7}}
+	if _, err := VerifyInstalledReceipt(installedReceiptData(t, partial, "gcc", actual), partial, []resolution.Node{partial, child}); err == nil {
+		t.Fatal("revision without a minimum version was accepted")
+	}
+}
+
+func TestInstalledReceiptRejectsCurrentCycleAfterHistoricalPrefix(t *testing.T) {
+	root := resolvedReceiptNode("root", "1", 0, "1")
+	root.Bottle.Tag = "x86_64_linux"
+	root.Bottle.Tab = resolution.BottleTab{
+		Arch:     "x86_64",
+		Compiler: "gcc",
+		Dependencies: []resolution.RuntimeDependency{
+			{FullName: "historical-root", Version: "1", PkgVersion: "1", DeclaredDirectly: true},
+		},
+	}
+	historicalRoot := resolvedReceiptNode("historical-root", "1", 0, "1")
+	historicalRoot.Dependencies = []resolution.Requirement{{Name: "cycle-a", Minimum: "1", Direct: true}}
+	cycleA := resolvedReceiptNode("cycle-a", "1", 0, "1")
+	cycleA.Dependencies = []resolution.Requirement{{Name: "cycle-b", Minimum: "1", Direct: true}}
+	cycleB := resolvedReceiptNode("cycle-b", "1", 0, "1")
+	cycleB.Dependencies = []resolution.Requirement{{Name: "cycle-a", Minimum: "1", Direct: true}}
+	closure := []resolution.Node{root, historicalRoot, cycleA, cycleB}
+	actual := []ReceiptDependency{
+		{FullName: "historical-root", Version: "1", PkgVersion: "1"},
+		{FullName: "cycle-a", Version: "1", PkgVersion: "1"},
+		{FullName: "cycle-b", Version: "1", PkgVersion: "1"},
+	}
+	if _, err := VerifyInstalledReceipt(installedReceiptData(t, root, "gcc", actual), root, closure); err == nil {
+		t.Fatal("current-only cycle hidden behind historical prefix was accepted")
+	}
+}
+
+func cloneResolutionNodes(t *testing.T, nodes []resolution.Node) []resolution.Node {
+	t.Helper()
+	data, err := json.Marshal(nodes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cloned []resolution.Node
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		t.Fatal(err)
+	}
+	return cloned
+}
+
+func installedReceiptData(t *testing.T, node resolution.Node, compiler string, deps []ReceiptDependency) []byte {
+	t.Helper()
+	built, poured := true, true
+	versionScheme := node.VersionScheme
+	data, err := json.Marshal(installReceipt{
+		BuiltAsBottle:    &built,
+		PouredFromBottle: &poured,
+		Arch:             node.Bottle.Tab.Arch,
+		Compiler:         compiler,
+		RuntimeDeps:      deps,
+		Source: receiptSource{
+			Spec: "stable",
+			Tap:  "homebrew/core",
+			Versions: receiptVersions{
+				Stable:        node.FormulaVersion,
+				VersionScheme: &versionScheme,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func resolvedReceiptNode(name, version string, revision int, pkgVersion string) resolution.Node {
+	return resolution.Node{
+		Name:            name,
+		FullName:        "homebrew/core/" + name,
+		FormulaVersion:  version,
+		FormulaRevision: revision,
+		PkgVersion:      pkgVersion,
 	}
 }
 

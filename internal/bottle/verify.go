@@ -117,6 +117,21 @@ func (r *countingTailReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+func (r *countingTailReader) last(n int) ([]byte, bool) {
+	if n <= 0 || n > len(r.tail) || int64(n) > r.count {
+		return nil, false
+	}
+	out := make([]byte, n)
+	start := r.pos - n
+	if start < 0 {
+		start += len(r.tail)
+	}
+	for i := range out {
+		out[i] = r.tail[(start+i)%len(r.tail)]
+	}
+	return out, true
+}
+
 func (r *countingTailReader) tailAllZero() bool {
 	if !r.full {
 		return false
@@ -240,6 +255,7 @@ func Verify(r io.Reader, expected Expectation, opts Options) (result *Result, re
 		Inventory:        inventory,
 		Formula:          formulaEvidence,
 		Receipt:          receiptEvidence,
+		FormulaSource:    bytes.Clone(formula.formula),
 	}, nil
 }
 
@@ -362,7 +378,11 @@ func scanArchive(r io.Reader, expected Expectation, limits Limits) ([]InventoryE
 		if len(ordered) >= limits.MaxFiles {
 			return nil, 0, nil, nil, verificationError(CodeArchiveLimit, hdr.Name, "archive exceeds %d entries", limits.MaxFiles)
 		}
-		entry, err := validateHeader(hdr, expected, limits)
+		rawHeader, ok := tarBytes.last(tarBlockSize)
+		if !ok {
+			return nil, 0, nil, nil, verificationError(CodeInvalidTar, hdr.Name, "missing physical tar header")
+		}
+		entry, err := validateHeader(hdr, rawHeader, expected, limits)
 		if err != nil {
 			return nil, 0, nil, nil, err
 		}
@@ -478,13 +498,115 @@ func scanArchive(r io.Reader, expected Expectation, limits Limits) ([]InventoryE
 	return inventory, expanded, formula, receipt, nil
 }
 
-func validateHeader(hdr *tar.Header, expected Expectation, limits Limits) (InventoryEntry, error) {
+func supportedTarFormat(hdr *tar.Header, rawHeader []byte) bool {
+	switch hdr.Format {
+	case tar.FormatUSTAR, tar.FormatPAX, tar.FormatGNU:
+		return true
+	case tar.FormatUnknown:
+		return validPAXUTF8PhysicalName(hdr, rawHeader)
+	default:
+		return false
+	}
+}
+
+// validPAXUTF8PhysicalName recognizes the narrow libarchive/Homebrew encoding
+// where a valid PAX path is also copied verbatim into the physical USTAR name
+// field. archive/tar parses the entry but reports FormatUnknown because USTAR
+// forbids non-ASCII header bytes. Require the raw header to be otherwise strict
+// USTAR so FormatUnknown cannot mask malformed numeric or metadata fields.
+func validPAXUTF8PhysicalName(hdr *tar.Header, rawHeader []byte) bool {
+	if hdr == nil || len(rawHeader) != tarBlockSize {
+		return false
+	}
+	paxPath, ok := hdr.PAXRecords["path"]
+	if !ok || paxPath == "" || paxPath != hdr.Name || !utf8.ValidString(paxPath) {
+		return false
+	}
+	if !bytes.Equal(rawHeader[257:263], []byte("ustar\x00")) || !bytes.Equal(rawHeader[263:265], []byte("00")) {
+		return false
+	}
+	// archive/tar accepts legacy signed checksums. This exception requires the
+	// canonical unsigned checksum so high-bit UTF-8 bytes cannot select the
+	// more permissive interpretation.
+	if !canonicalUnsignedTarChecksum(rawHeader) || rawHeader[156] != hdr.Typeflag {
+		return false
+	}
+	// archive/tar joins a physical USTAR prefix before PAX replaces hdr.Name.
+	// Require the unused prefix field to be empty so no hidden alternate path
+	// survives in the physical header.
+	for _, b := range rawHeader[345:500] {
+		if b != 0 {
+			return false
+		}
+	}
+	for _, field := range [][2]int{
+		{100, 108}, {108, 116}, {116, 124}, {124, 136},
+		{136, 148}, {329, 337}, {337, 345},
+	} {
+		if rawHeader[field[1]-1] != 0 {
+			return false
+		}
+	}
+
+	nameField := rawHeader[:100]
+	nul := bytes.IndexByte(nameField, 0)
+	rawName := nameField
+	if nul >= 0 {
+		for _, b := range nameField[nul:] {
+			if b != 0 {
+				return false
+			}
+		}
+		rawName = nameField[:nul]
+	}
+	if !bytes.Equal(rawName, []byte(paxPath)) {
+		return false
+	}
+	hasNonASCII := false
+	for i, b := range rawHeader {
+		if b < utf8.RuneSelf {
+			continue
+		}
+		if i >= len(rawName) {
+			return false
+		}
+		hasNonASCII = true
+	}
+	return hasNonASCII
+}
+
+func canonicalUnsignedTarChecksum(rawHeader []byte) bool {
+	if len(rawHeader) != tarBlockSize {
+		return false
+	}
+	field := rawHeader[148:156]
+	if field[6] != 0 || field[7] != ' ' {
+		return false
+	}
+	var recorded int64
+	for _, b := range field[:6] {
+		if b < '0' || b > '7' {
+			return false
+		}
+		recorded = recorded*8 + int64(b-'0')
+	}
+
+	var computed int64
+	for i, b := range rawHeader {
+		if i >= 148 && i < 156 {
+			computed += int64(' ')
+		} else {
+			computed += int64(b)
+		}
+	}
+	return recorded == computed
+}
+
+func validateHeader(hdr *tar.Header, rawHeader []byte, expected Expectation, limits Limits) (InventoryEntry, error) {
 	if hdr == nil {
 		return InventoryEntry{}, verificationError(CodeInvalidTar, "", "nil tar header")
 	}
-	switch hdr.Format {
-	case tar.FormatUSTAR, tar.FormatPAX, tar.FormatGNU:
-	default:
+	if !supportedTarFormat(hdr, rawHeader) {
 		return InventoryEntry{}, verificationError(CodeInvalidTar, hdr.Name, "unsupported tar format %v", hdr.Format)
 	}
 	if hdr.Uid < 0 || hdr.Gid < 0 {

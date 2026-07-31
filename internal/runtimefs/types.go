@@ -123,6 +123,7 @@ const (
 	PruneReceipt         PruneReason = "receipt_metadata_exported"
 	PrunePackageSBOM     PruneReason = "package_manager_sbom_exported"
 	PruneTooling         PruneReason = "materializer_tooling"
+	PruneOptionalTooling PruneReason = "optional_dependency_tooling"
 	PruneRuntimeBase     PruneReason = "runtime_base_provided"
 )
 

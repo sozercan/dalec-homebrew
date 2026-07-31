@@ -38,6 +38,7 @@ type normalizedPolicy struct {
 	allowlist     normalizedAllowlist
 	digest        string
 	nodes         map[string]resolution.Node
+	requested     map[string]struct{}
 	writable      map[string]struct{}
 }
 
@@ -65,6 +66,10 @@ func normalizeOptions(record *resolution.Record, opts Options) (*normalizedPolic
 			return nil, runtimeError(CodeInvalidRecord, node.PkgVersion, "unsafe PkgVersion for %q: %v", node.Name, err)
 		}
 		nodes[node.Name] = node
+	}
+	requested := make(map[string]struct{}, len(record.Requested))
+	for _, root := range record.Requested {
+		requested[root.Canonical] = struct{}{}
 	}
 
 	allowlist := normalizedAllowlist{
@@ -126,6 +131,7 @@ func normalizeOptions(record *resolution.Record, opts Options) (*normalizedPolic
 		allowlist:     allowlist,
 		digest:        policyDigest,
 		nodes:         nodes,
+		requested:     requested,
 		writable:      writable,
 	}, nil
 }

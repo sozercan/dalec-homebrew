@@ -53,6 +53,10 @@ RUN printf '%s\n' \
        else \
          useradd --uid "${LINUXBREW_UID}" --gid "${LINUXBREW_GID}" --home-dir /home/linuxbrew --create-home --shell /bin/bash linuxbrew; \
        fi \
+    && usermod -G linuxbrew linuxbrew \
+    && test "$(id -u linuxbrew)" = "${LINUXBREW_UID}" \
+    && test "$(id -g linuxbrew)" = "${LINUXBREW_GID}" \
+    && test "$(id -Gn linuxbrew)" = linuxbrew \
     && install -d -o root -g root -m 0755 /home/linuxbrew/.linuxbrew/lib /usr/share/dalec-homebrew /usr/lib/ssl \
     && ln -s /etc/ssl/certs/ca-certificates.crt /usr/lib/ssl/cert.pem \
     && ln -s /etc/ssl/certs /usr/lib/ssl/certs \
@@ -66,6 +70,8 @@ RUN printf '%s\n' \
     && dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' | LC_ALL=C sort > /usr/share/dalec-homebrew/runtime-base-packages.tsv \
     && find /home/linuxbrew -xdev -exec chown root:root {} + \
     && find /home/linuxbrew -xdev -type d -exec chmod 0755 {} + \
+    && test "$(stat -c '%u:%g:%a' /home/linuxbrew)" = '0:0:755' \
+    && test "$(stat -c '%u:%g:%a' /home/linuxbrew/.linuxbrew)" = '0:0:755' \
     && rm -rf /var/lib/apt/lists/* /var/cache/* /var/log/* /tmp/* /var/tmp/* /usr/share/man/* /usr/share/info/* \
     && find /usr/share/doc -type f ! -name copyright -delete \
     && find /usr/share/doc -depth -type d -empty -delete
@@ -91,25 +97,37 @@ RUN (sed -i -E "s#https?://(archive.ubuntu.com|security.ubuntu.com|ports.ubuntu.
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       binutils curl file git install-info unzip xz-utils zstd \
     && rm -rf /var/lib/apt/lists/* \
-    && install -d -o root -g root -m 0755 /usr/local/libexec \
+    && install -d -o root -g root -m 0755 /usr/local/libexec /etc/homebrew \
+    && printf 'HOMEBREW_SYSTEM_ENV_TAKES_PRIORITY=1\nHOMEBREW_BASH_COMMAND=\n' > /etc/homebrew/brew.env \
+    && chown root:root /etc/homebrew/brew.env \
+    && chmod 0444 /etc/homebrew/brew.env \
     && curl --fail --location --proto '=https' --tlsv1.2 \
       "https://github.com/Homebrew/brew/archive/${HOMEBREW_COMMIT}.tar.gz" -o /tmp/brew.tar.gz \
     && echo "${HOMEBREW_ARCHIVE_SHA256}  /tmp/brew.tar.gz" | sha256sum -c - \
     && install -d -o root -g root -m 0755 /home/linuxbrew/.linuxbrew/Homebrew \
     && tar -xzf /tmp/brew.tar.gz --strip-components=1 -C /home/linuxbrew/.linuxbrew/Homebrew \
     && rm /tmp/brew.tar.gz \
+    && mv /home/linuxbrew/.linuxbrew/Homebrew/bin/brew /home/linuxbrew/.linuxbrew/Homebrew/bin/brew.real \
+    && printf '%s\n' '#!/bin/bash -p' 'exec /bin/bash -p -c '"'"'source /home/linuxbrew/.linuxbrew/Homebrew/bin/brew.real'"'"' /home/linuxbrew/.linuxbrew/.dalec-homebrew/brew "$@"' \
+      > /home/linuxbrew/.linuxbrew/Homebrew/bin/brew \
+    && chmod 0555 /home/linuxbrew/.linuxbrew/Homebrew/bin/brew /home/linuxbrew/.linuxbrew/Homebrew/bin/brew.real \
+    && install -d -o root -g root -m 0555 /home/linuxbrew/.linuxbrew/.dalec-homebrew \
+    && ln -s ../Homebrew/bin/brew.real /home/linuxbrew/.linuxbrew/.dalec-homebrew/brew \
+    && chown -h root:root /home/linuxbrew/.linuxbrew/.dalec-homebrew/brew \
     && chown linuxbrew:linuxbrew /home/linuxbrew/.linuxbrew \
     && install -d -o linuxbrew -g linuxbrew -m 0755 \
       /home/linuxbrew/.linuxbrew/bin /home/linuxbrew/.linuxbrew/sbin /home/linuxbrew/.linuxbrew/lib \
-      /home/linuxbrew/.linuxbrew/Cellar /home/linuxbrew/.linuxbrew/opt \
+      /home/linuxbrew/.linuxbrew/include /home/linuxbrew/.linuxbrew/share \
+      /home/linuxbrew/.linuxbrew/Cellar /home/linuxbrew/.linuxbrew/Caskroom \
+      /home/linuxbrew/.linuxbrew/Frameworks /home/linuxbrew/.linuxbrew/opt \
       /home/linuxbrew/.linuxbrew/etc /home/linuxbrew/.linuxbrew/var \
       /home/linuxbrew/.cache/Homebrew \
     && install -d -o root -g root -m 0555 \
-      /home/linuxbrew/.linuxbrew/Homebrew/Library/Taps/homebrew/homebrew-core/Formula \
+      /home/linuxbrew/.linuxbrew/Homebrew/Library/Taps/homebrew/homebrew-core \
     && ln -s ../Homebrew/bin/brew /home/linuxbrew/.linuxbrew/bin/brew \
     && chown -h linuxbrew:linuxbrew /home/linuxbrew/.linuxbrew/bin/brew \
     && chown -R linuxbrew:linuxbrew /home/linuxbrew/.linuxbrew/Homebrew/Library/Homebrew/vendor \
-    && su -s /bin/bash -c 'HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 /home/linuxbrew/.linuxbrew/bin/brew vendor-install ruby' linuxbrew \
+    && su -s /bin/bash -c 'HOMEBREW_PREFIX=/home/linuxbrew/.linuxbrew HOMEBREW_REPOSITORY=/home/linuxbrew/.linuxbrew/Homebrew HOMEBREW_CELLAR=/home/linuxbrew/.linuxbrew/Cellar HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 /home/linuxbrew/.linuxbrew/Homebrew/bin/brew vendor-install ruby' linuxbrew \
     && repo=/home/linuxbrew/.linuxbrew/Homebrew \
     && ruby_root="${repo}/Library/Homebrew/vendor/portable-ruby/${HOMEBREW_RUBY_VERSION}" \
     && test -x "${ruby_root}/bin/ruby" \
@@ -133,6 +151,19 @@ RUN (sed -i -E "s#https?://(archive.ubuntu.com|security.ubuntu.com|ports.ubuntu.
     && find /usr/share/doc -depth -type d -empty -delete \
     && chown -R root:root /home/linuxbrew/.linuxbrew/Homebrew \
     && chmod -R a-w /home/linuxbrew/.linuxbrew/Homebrew \
+    && chown root:root /home/linuxbrew/.linuxbrew \
+    && chmod 0755 /home/linuxbrew/.linuxbrew \
+    && test "$(stat -c '%u:%g:%a' /home/linuxbrew/.linuxbrew)" = '0:0:755' \
+    && test ! -e /home/linuxbrew/.linuxbrew/Homebrew/Library/Taps/homebrew/homebrew-core/Formula \
+    && test -x /home/linuxbrew/.linuxbrew/Homebrew/bin/brew \
+    && test -x /home/linuxbrew/.linuxbrew/Homebrew/bin/brew.real \
+    && test "$(readlink /home/linuxbrew/.linuxbrew/.dalec-homebrew/brew)" = '../Homebrew/bin/brew.real' \
+    && if su -s /bin/sh -c 'mv /home/linuxbrew/.linuxbrew /home/linuxbrew/.linuxbrew.swap' linuxbrew >/dev/null 2>&1; then \
+         echo 'linuxbrew can replace the protected Homebrew prefix' >&2; exit 1; \
+       fi \
+    && if su -s /bin/sh -c 'mv /home/linuxbrew/.linuxbrew/Homebrew /home/linuxbrew/.linuxbrew/Homebrew.swap' linuxbrew >/dev/null 2>&1; then \
+         echo 'linuxbrew can replace the protected Homebrew repository' >&2; exit 1; \
+       fi \
     && printf '[safe]\n\tdirectory = /home/linuxbrew/.linuxbrew/Homebrew\n' > /home/linuxbrew/.gitconfig \
     && chown root:root /home/linuxbrew/.gitconfig \
     && chmod 0444 /home/linuxbrew/.gitconfig
