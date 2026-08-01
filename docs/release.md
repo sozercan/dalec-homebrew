@@ -86,6 +86,8 @@ Release CI must reject:
 
 Release runs are serialized repository-wide. New releases must advance the v-prefixed SemVer sequence, and every earlier protected release tag must retain its signed GitHub release so the metadata floor chain cannot be reordered or silently truncated.
 
+Predecessor verification is fail-closed and bounded to 64 protected releases and 1 GiB of aggregate legacy or signed-record downloads per run. Repositories approaching either limit must migrate the signed continuity proof under review before publishing another release rather than silently skipping history.
+
 The workflow separates construction from promotion:
 
 1. Reuse normal CI against the tagged commit, validate the release inputs with [`../scripts/release-inputs.sh`](../scripts/release-inputs.sh), and load the monotonic metadata rollback floor from the latest signed release evidence.

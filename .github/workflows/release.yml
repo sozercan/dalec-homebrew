@@ -27,6 +27,8 @@ env:
   TRIVY_IMAGE: docker.io/aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e
   MAX_RELEASE_ASSET_BYTES: 268435456
   MAX_RELEASE_TOTAL_BYTES: 1073741824
+  MAX_PROTECTED_RELEASES: 64
+  MAX_PROTECTED_DOWNLOAD_BYTES: 1073741824
 
 jobs:
   prepare:
@@ -119,7 +121,7 @@ jobs:
     name: Load signed metadata rollback floor
     needs: prepare
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 60
     permissions:
       contents: write
     outputs:
@@ -309,6 +311,11 @@ jobs:
           fallback_release_id=$(jq -r '.fallback_release_id // empty' "$RUNNER_TEMP/floor-selection.json")
           fallback_predecessor=$(jq -r '.fallback_predecessor // empty' "$RUNNER_TEMP/floor-selection.json")
           same_release=$(jq -r .same_release "$RUNNER_TEMP/floor-selection.json")
+          protected_release_count=$(jq -er '.protected_releases | length' "$RUNNER_TEMP/floor-selection.json")
+          (( protected_release_count <= MAX_PROTECTED_RELEASES )) || {
+            echo "protected release history exceeds the verification limit of $MAX_PROTECTED_RELEASES" >&2
+            exit 1
+          }
           if [[ -z "$source_release" ]]; then
             echo "same_release=false" >> "$GITHUB_OUTPUT"
             jq -n '{
@@ -418,8 +425,7 @@ jobs:
           assets_path, sums_path, bundle_path = map(Path, sys.argv[1:4])
           max_asset_bytes = int(sys.argv[4])
           max_total_bytes = int(sys.argv[5])
-          pages = json.loads(assets_path.read_text(encoding="utf-8"))
-          assets = [asset for page in pages for asset in page]
+          assets = json.loads(assets_path.read_text(encoding="utf-8"))
           if not 0 < len(assets) <= 200:
               raise SystemExit("release asset count is invalid or unbounded")
 
@@ -503,21 +509,23 @@ jobs:
           PYASSETS
 
           verify_protected_release() {
-            local release_tag=$1 release_id=$2 expected_predecessor=$3 bundle assets_file asset_id name signed_sha actual_sha
+            local release_tag=$1 release_id=$2 expected_predecessor=$3 bundle assets_pages_file assets_file asset_id name signed_sha actual_sha release_download_bytes
             [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || {
               echo "protected release $release_tag has an invalid API id" >&2
               return 1
             }
             bundle="$RUNNER_TEMP/protected-release-$release_id"
+            assets_pages_file="$RUNNER_TEMP/protected-release-$release_id-assets-pages.json"
             assets_file="$RUNNER_TEMP/protected-release-$release_id-assets.json"
             mkdir -p "$bundle"
             gh api --paginate --slurp \
               "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
-              > "$assets_file"
+              > "$assets_pages_file"
+            jq -c '[.[][]]' "$assets_pages_file" > "$assets_file"
             jq -e \
               --argjson max_asset "$MAX_RELEASE_ASSET_BYTES" \
               --argjson max_total "$MAX_RELEASE_TOTAL_BYTES" '
-                [.[][] | {id, name, size}]
+                [.[] | {id, name, size}]
                 | length > 0 and length <= 200
                 and all(.[]; (.id | type == "number" and . > 0))
                 and all(.[]; (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")))
@@ -525,12 +533,34 @@ jobs:
                 and ([.[].size] | add <= $max_total)
                 and ([.[].name] | length == (unique | length))
               ' "$assets_file" >/dev/null
+            release_download_bytes=$(jq -er '
+              [
+                .[]
+                | select(
+                    .digest == null or
+                    .name == "SHA256SUMS" or
+                    .name == "SHA256SUMS.bundle" or
+                    .name == "components.json" or
+                    .name == "components.json.bundle" or
+                    .name == "digests.json" or
+                    .name == "metadata-snapshot.json" or
+                    .name == "metadata-snapshot.json.bundle" or
+                    .name == "provenance.json")
+                | .size
+              ]
+              | add // 0
+            ' "$assets_file")
+            (( protected_download_bytes + release_download_bytes <= MAX_PROTECTED_DOWNLOAD_BYTES )) || {
+              echo "protected release verification exceeds the aggregate download budget" >&2
+              return 1
+            }
+            protected_download_bytes=$((protected_download_bytes + release_download_bytes))
             while read -r asset; do
               asset_id=$(jq -er .id <<<"$asset")
               name=$(jq -er .name <<<"$asset")
               [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$ ]]
               download_release_asset "$asset_id" "$bundle/$name"
-            done < <(jq -c '.[][] | select(.digest == null) | {id, name}' "$assets_file")
+            done < <(jq -c '.[] | select(.digest == null) | {id, name}' "$assets_file")
             for name in \
               SHA256SUMS SHA256SUMS.bundle \
               components.json components.json.bundle \
@@ -538,7 +568,7 @@ jobs:
               metadata-snapshot.json metadata-snapshot.json.bundle \
               provenance.json; do
               asset_id=$(jq -er --arg name "$name" '
-                [.[][] | select(.name == $name)]
+                [.[] | select(.name == $name)]
                 | if length == 1 then .[0].id else error("missing or duplicate release asset") end
               ' "$assets_file")
               [[ -f "$bundle/$name" ]] || download_release_asset "$asset_id" "$bundle/$name"
@@ -587,6 +617,7 @@ jobs:
             }
           }
 
+          protected_download_bytes=0
           while read -r protected; do
             protected_tag=$(jq -er .tag <<<"$protected")
             protected_id=$(jq -er .id <<<"$protected")
@@ -1679,6 +1710,8 @@ jobs:
                   syft_image: env.SYFT_IMAGE,
                   trivy_version: env.TRIVY_VERSION,
                   trivy_image: env.TRIVY_IMAGE,
+                  max_protected_releases: env.MAX_PROTECTED_RELEASES,
+                  max_protected_download_bytes: env.MAX_PROTECTED_DOWNLOAD_BYTES,
                   workflow_ref: $workflow_ref,
                   workflow_sha: $workflow_sha
                 },
