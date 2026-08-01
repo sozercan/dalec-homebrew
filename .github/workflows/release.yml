@@ -797,10 +797,17 @@ jobs:
           docker buildx version | grep -F " $BUILDX_VERSION "
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-        with:
-          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
-          cache-binary: false
+        run: |
+          set -euo pipefail
+          builder="${GITHUB_JOB//_/-}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx create \
+            --name "$builder" \
+            --driver docker-container \
+            --driver-opt "image=$BUILDKIT_IMAGE" \
+            --buildkitd-flags '--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host' \
+            --use
+          docker buildx inspect --builder "$builder" --bootstrap
+          echo "name=$builder" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -1124,10 +1131,17 @@ jobs:
 
       - name: Set up Docker Buildx
         id: buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-        with:
-          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
-          cache-binary: false
+        run: |
+          set -euo pipefail
+          builder="${GITHUB_JOB//_/-}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx create \
+            --name "$builder" \
+            --driver docker-container \
+            --driver-opt "image=$BUILDKIT_IMAGE" \
+            --buildkitd-flags '--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host' \
+            --use
+          docker buildx inspect --builder "$builder" --bootstrap
+          echo "name=$builder" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -1372,10 +1386,17 @@ jobs:
           docker buildx version | grep -F " $BUILDX_VERSION "
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-        with:
-          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
-          cache-binary: false
+        run: |
+          set -euo pipefail
+          builder="${GITHUB_JOB//_/-}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx create \
+            --name "$builder" \
+            --driver docker-container \
+            --driver-opt "image=$BUILDKIT_IMAGE" \
+            --buildkitd-flags '--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host' \
+            --use
+          docker buildx inspect --builder "$builder" --bootstrap
+          echo "name=$builder" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -1827,10 +1848,17 @@ jobs:
           docker buildx version | grep -F " $BUILDX_VERSION "
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-        with:
-          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
-          cache-binary: false
+        run: |
+          set -euo pipefail
+          builder="${GITHUB_JOB//_/-}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx create \
+            --name "$builder" \
+            --driver docker-container \
+            --driver-opt "image=$BUILDKIT_IMAGE" \
+            --buildkitd-flags '--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host' \
+            --use
+          docker buildx inspect --builder "$builder" --bootstrap
+          echo "name=$builder" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -2331,7 +2359,6 @@ jobs:
           gh release edit "$RELEASE_TAG" \
             --draft=false \
             --latest=false \
-            --verify-tag \
             --repo "$GITHUB_REPOSITORY"
 
       - name: Release summary
