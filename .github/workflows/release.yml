@@ -1290,6 +1290,16 @@ jobs:
             --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
             --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
             dist/release/SHA256SUMS
+          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+            .source.tag == $tag and .source.git_sha == $sha
+          ' dist/release/digests.json >/dev/null
+          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+            .release.tag == $tag and .release.sha == $sha
+          ' dist/release/metadata-snapshot.json >/dev/null
+          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+            .invocation.parameters.tag == $tag and
+            any(.materials[]; (.uri | endswith("@refs/tags/" + $tag)) and .digest.sha1 == $sha)
+          ' dist/release/provenance.json >/dev/null
 
           verify_attestation_predicate() {
             local type=$1 subject=$2 predicate=$3 output
@@ -1402,6 +1412,25 @@ jobs:
             --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
             "$existing/metadata-snapshot.json"
           (cd "$existing" && sha256sum -c SHA256SUMS)
+          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+            .source.tag == $tag and .source.git_sha == $sha
+          ' "$existing/digests.json" >/dev/null || {
+            echo "signed digests.json does not match $RELEASE_TAG at $RELEASE_SHA" >&2
+            exit 1
+          }
+          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+            .release.tag == $tag and .release.sha == $sha
+          ' "$existing/metadata-snapshot.json" >/dev/null || {
+            echo "signed metadata-snapshot.json does not match $RELEASE_TAG at $RELEASE_SHA" >&2
+            exit 1
+          }
+          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+            .invocation.parameters.tag == $tag and
+            any(.materials[]; (.uri | endswith("@refs/tags/" + $tag)) and .digest.sha1 == $sha)
+          ' "$existing/provenance.json" >/dev/null || {
+            echo "signed provenance.json does not bind $RELEASE_TAG at $RELEASE_SHA" >&2
+            exit 1
+          }
           {
             awk '{ path=$2; sub(/^\*/, "", path); sub(/^\.\//, "", path); print path }' "$existing/SHA256SUMS"
             printf '%s\n' SHA256SUMS SHA256SUMS.bundle components.json.bundle metadata-snapshot.json.bundle
