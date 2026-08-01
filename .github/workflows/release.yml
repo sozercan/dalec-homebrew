@@ -28,7 +28,8 @@ env:
   MAX_RELEASE_ASSET_BYTES: 268435456
   MAX_RELEASE_TOTAL_BYTES: 1073741824
   MAX_PROTECTED_RELEASES: 64
-  MAX_PROTECTED_DOWNLOAD_BYTES: 1073741824
+  MAX_PROTECTED_DOWNLOAD_BYTES: 2147483648
+  MAX_RELEASE_DISCOVERY_PAGES: 10
 
 jobs:
   prepare:
@@ -177,10 +178,31 @@ jobs:
                   raise SystemExit(f"rollback floor regressed from {inherited} to {current}")
               print("equal" if current_value == inherited_value else "newer")
           PYRFC3339
-          releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
-          tag_refs=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v?per_page=100")
-          printf '%s\n' "$releases" > "$RUNNER_TEMP/releases.json"
-          printf '%s\n' "$tag_refs" > "$RUNNER_TEMP/tag-refs.json"
+          fetch_bounded_pages() {
+            local endpoint=$1 output=$2 pages_file page response count
+            pages_file=$(mktemp "$RUNNER_TEMP/api-pages.XXXXXX")
+            : > "$pages_file"
+            for page in $(seq 1 "$((MAX_RELEASE_DISCOVERY_PAGES + 1))"); do
+              response=$(gh api --method GET "$endpoint" -F per_page=100 -F page="$page")
+              count=$(jq -er 'if type == "array" then length else error("expected an array page") end' <<<"$response")
+              if (( page > MAX_RELEASE_DISCOVERY_PAGES )); then
+                (( count == 0 )) || {
+                  echo "GitHub API discovery exceeds $MAX_RELEASE_DISCOVERY_PAGES pages for $endpoint" >&2
+                  return 1
+                }
+                break
+              fi
+              printf '%s\n' "$response" >> "$pages_file"
+              (( count < 100 )) && break
+            done
+            jq -s . "$pages_file" > "$output"
+          }
+          fetch_bounded_pages \
+            "repos/$GITHUB_REPOSITORY/releases" \
+            "$RUNNER_TEMP/releases.json"
+          fetch_bounded_pages \
+            "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+            "$RUNNER_TEMP/tag-refs.json"
           python3 - "$RELEASE_TAG" "$RUNNER_TEMP/releases.json" "$RUNNER_TEMP/tag-refs.json" > "$RUNNER_TEMP/floor-selection.json" <<'PYSELECT'
           import functools
           import json
@@ -349,7 +371,7 @@ jobs:
             any(.protected_releases[]; .tag == $source)
           ' "$RUNNER_TEMP/floor-selection.json")
           verified_release_count=$protected_release_count
-          if [[ -n "$source_release" && "$source_in_protected" != true ]]; then
+          if [[ -n "$source_release" && "$source_release" != "$RELEASE_TAG" && "$source_in_protected" != true ]]; then
             verified_release_count=$((verified_release_count + 1))
           fi
           (( verified_release_count <= MAX_PROTECTED_RELEASES )) || {
@@ -1919,6 +1941,7 @@ jobs:
                   trivy_image: env.TRIVY_IMAGE,
                   max_protected_releases: env.MAX_PROTECTED_RELEASES,
                   max_protected_download_bytes: env.MAX_PROTECTED_DOWNLOAD_BYTES,
+                  max_release_discovery_pages: env.MAX_RELEASE_DISCOVERY_PAGES,
                   workflow_ref: $workflow_ref,
                   workflow_sha: $workflow_sha
                 },
@@ -2287,8 +2310,29 @@ jobs:
           CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
         run: |
           set -euo pipefail
-          releases=$(gh api --paginate --slurp \
-            "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          fetch_bounded_pages() {
+            local endpoint=$1 output=$2 pages_file page response count
+            pages_file=$(mktemp "$RUNNER_TEMP/api-pages.XXXXXX")
+            : > "$pages_file"
+            for page in $(seq 1 "$((MAX_RELEASE_DISCOVERY_PAGES + 1))"); do
+              response=$(gh api --method GET "$endpoint" -F per_page=100 -F page="$page")
+              count=$(jq -er 'if type == "array" then length else error("expected an array page") end' <<<"$response")
+              if (( page > MAX_RELEASE_DISCOVERY_PAGES )); then
+                (( count == 0 )) || {
+                  echo "GitHub API discovery exceeds $MAX_RELEASE_DISCOVERY_PAGES pages for $endpoint" >&2
+                  return 1
+                }
+                break
+              fi
+              printf '%s\n' "$response" >> "$pages_file"
+              (( count < 100 )) && break
+            done
+            jq -s . "$pages_file" > "$output"
+          }
+          fetch_bounded_pages \
+            "repos/$GITHUB_REPOSITORY/releases" \
+            "$RUNNER_TEMP/existing-release-pages.json"
+          releases=$(cat "$RUNNER_TEMP/existing-release-pages.json")
           release_json=$(jq -c --arg tag "$RELEASE_TAG" '
             [.[][] | select(.tag_name == $tag)]
             | if length == 0 then empty
@@ -2485,8 +2529,29 @@ jobs:
             --slurpfile releases dist/rollback-floor/verified-release-assets.json '
               [.tags[].tag] == [$releases[0].releases[].tag]
             ' dist/rollback-floor/verified-release-tags.json >/dev/null
-          current_releases=$(gh api --paginate --slurp \
-            "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          fetch_bounded_pages() {
+            local endpoint=$1 output=$2 pages_file page response count
+            pages_file=$(mktemp "$RUNNER_TEMP/api-pages.XXXXXX")
+            : > "$pages_file"
+            for page in $(seq 1 "$((MAX_RELEASE_DISCOVERY_PAGES + 1))"); do
+              response=$(gh api --method GET "$endpoint" -F per_page=100 -F page="$page")
+              count=$(jq -er 'if type == "array" then length else error("expected an array page") end' <<<"$response")
+              if (( page > MAX_RELEASE_DISCOVERY_PAGES )); then
+                (( count == 0 )) || {
+                  echo "GitHub API discovery exceeds $MAX_RELEASE_DISCOVERY_PAGES pages for $endpoint" >&2
+                  return 1
+                }
+                break
+              fi
+              printf '%s\n' "$response" >> "$pages_file"
+              (( count < 100 )) && break
+            done
+            jq -s . "$pages_file" > "$output"
+          }
+          fetch_bounded_pages \
+            "repos/$GITHUB_REPOSITORY/releases" \
+            "$RUNNER_TEMP/current-release-pages.json"
+          current_releases=$(cat "$RUNNER_TEMP/current-release-pages.json")
           while read -r verified_release; do
             verified_release_tag=$(jq -er .tag <<<"$verified_release")
             verified_release_id=$(jq -er .release_id <<<"$verified_release")
