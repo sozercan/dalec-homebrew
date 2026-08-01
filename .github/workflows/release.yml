@@ -923,6 +923,25 @@ jobs:
             }
           fi
           source_signed_sha=$(jq -er '.source.git_sha' "$prior/digests.json")
+          jq -e --arg tag "$source_release" --arg sha "$source_signed_sha" '
+            .source.tag == $tag and .source.git_sha == $sha
+          ' "$prior/digests.json" >/dev/null || {
+            echo "signed digests.json does not bind source release $source_release" >&2
+            exit 1
+          }
+          jq -e --arg tag "$source_release" --arg sha "$source_signed_sha" '
+            .release.tag == $tag and .release.sha == $sha
+          ' "$prior/metadata-snapshot.json" >/dev/null || {
+            echo "signed metadata-snapshot.json does not bind source release $source_release" >&2
+            exit 1
+          }
+          jq -e --arg tag "$source_release" --arg sha "$source_signed_sha" '
+            .invocation.parameters.tag == $tag and
+            any(.materials[]; (.uri | endswith("@refs/tags/" + $tag)) and .digest.sha1 == $sha)
+          ' "$prior/provenance.json" >/dev/null || {
+            echo "signed provenance.json does not bind source release $source_release" >&2
+            exit 1
+          }
           source_actual_sha=$(resolve_tag_commit "$source_release")
           [[ "$source_actual_sha" == "$source_signed_sha" ]] || {
             echo "source tag $source_release points to $source_actual_sha, not signed commit $source_signed_sha" >&2
@@ -2454,6 +2473,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXISTING_RELEASE: ${{ steps.existing_release.outputs.exists }}
+          EXISTING_DRAFT: ${{ steps.existing_release.outputs.draft }}
         run: |
           set -euo pipefail
           comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$RELEASE_SHA...main" --jq .status)
@@ -2505,7 +2525,7 @@ jobs:
           done < <(jq -r '.tags[] | [.tag, .sha] | @tsv' \
             dist/rollback-floor/verified-release-tags.json)
           jq -e \
-            --argjson max_releases "$MAX_PROTECTED_RELEASES" \
+            --argjson max_releases "$((MAX_PROTECTED_RELEASES + 1))" \
             --argjson max_asset "$MAX_RELEASE_ASSET_BYTES" \
             --argjson max_total "$MAX_RELEASE_TOTAL_BYTES" '
             .schema_version == "dalec-homebrew-verified-release-assets/v1"
@@ -2551,7 +2571,98 @@ jobs:
           fetch_bounded_pages \
             "repos/$GITHUB_REPOSITORY/releases" \
             "$RUNNER_TEMP/current-release-pages.json"
+          fetch_bounded_pages \
+            "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+            "$RUNNER_TEMP/current-tag-ref-pages.json"
           current_releases=$(cat "$RUNNER_TEMP/current-release-pages.json")
+          allow_newer=false
+          if [[ "$EXISTING_RELEASE" == true && "$EXISTING_DRAFT" != true ]]; then
+            allow_newer=true
+          fi
+          python3 - \
+            "$RELEASE_TAG" \
+            "$allow_newer" \
+            dist/rollback-floor/verified-release-tags.json \
+            "$RUNNER_TEMP/current-release-pages.json" \
+            "$RUNNER_TEMP/current-tag-ref-pages.json" <<'PYCONTINUITY'
+          import functools
+          import json
+          import re
+          import sys
+
+          target_tag, allow_newer, verified_path, releases_path, refs_path = sys.argv[1:]
+          semver_re = re.compile(
+              r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+              r"(?:-([0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?$"
+          )
+
+          def parse(value):
+              match = semver_re.fullmatch(value)
+              if match is None:
+                  return None
+              prerelease = match.group(4)
+              identifiers = [] if prerelease is None else prerelease.split(".")
+              if any(value.isdigit() and len(value) > 1 and value.startswith("0") for value in identifiers):
+                  return None
+              return (tuple(map(int, match.group(1, 2, 3))), identifiers)
+
+          def compare(left, right):
+              left_core, left_pre = left
+              right_core, right_pre = right
+              if left_core != right_core:
+                  return -1 if left_core < right_core else 1
+              if not left_pre or not right_pre:
+                  if not left_pre and not right_pre:
+                      return 0
+                  return 1 if not left_pre else -1
+              for lval, rval in zip(left_pre, right_pre):
+                  if lval == rval:
+                      continue
+                  lnum, rnum = lval.isdigit(), rval.isdigit()
+                  if lnum and rnum:
+                      return -1 if int(lval) < int(rval) else 1
+                  if lnum != rnum:
+                      return -1 if lnum else 1
+                  return -1 if lval < rval else 1
+              return (len(left_pre) > len(right_pre)) - (len(left_pre) < len(right_pre))
+
+          target_version = parse(target_tag)
+          if target_version is None:
+              raise SystemExit(f"unsupported release tag {target_tag!r}")
+          with open(verified_path, encoding="utf-8") as f:
+              verified = json.load(f)
+          with open(releases_path, encoding="utf-8") as f:
+              release_pages = json.load(f)
+          with open(refs_path, encoding="utf-8") as f:
+              ref_pages = json.load(f)
+          expected = {item["tag"] for item in verified["tags"] if item["tag"] != target_tag}
+          tags = {
+              ref["ref"].removeprefix("refs/tags/")
+              for page in ref_pages
+              for ref in page
+              if ref.get("ref", "").startswith("refs/tags/")
+              and parse(ref["ref"].removeprefix("refs/tags/")) is not None
+          }
+          published = {
+              release["tag_name"]
+              for page in release_pages
+              for release in page
+              if not release.get("draft") and parse(release.get("tag_name", "")) is not None
+          }
+          orphaned = sorted(published - tags)
+          if orphaned:
+              raise SystemExit("published releases lost protected tags: " + ", ".join(orphaned))
+          lower_tags = {tag for tag in tags if compare(parse(tag), target_version) < 0}
+          lower_releases = {tag for tag in published if compare(parse(tag), target_version) < 0}
+          if lower_tags != expected or lower_releases != expected:
+              raise SystemExit(
+                  "protected release chain changed during the run: "
+                  f"expected={sorted(expected)}, tags={sorted(lower_tags)}, releases={sorted(lower_releases)}"
+              )
+          newer = sorted(tag for tag in tags if compare(parse(tag), target_version) > 0)
+          if newer and allow_newer != "true":
+              raise SystemExit("newer release tags appeared during the run: " + ", ".join(newer))
+          PYCONTINUITY
           while read -r verified_release; do
             verified_release_tag=$(jq -er .tag <<<"$verified_release")
             verified_release_id=$(jq -er .release_id <<<"$verified_release")
@@ -2637,6 +2748,18 @@ jobs:
           for component in runtime-base materializer frontend; do
             require_expected_or_missing_tag "$component"
           done
+
+          while IFS=$'\t' read -r verified_tag verified_sha; do
+            actual=$(resolve_tag_commit "$verified_tag") || {
+              echo "could not re-resolve verified predecessor tag $verified_tag" >&2
+              exit 1
+            }
+            [[ "$actual" == "$verified_sha" ]] || {
+              echo "verified predecessor tag $verified_tag moved from $verified_sha to $actual" >&2
+              exit 1
+            }
+          done < <(jq -r '.tags[] | [.tag, .sha] | @tsv' \
+            dist/rollback-floor/verified-release-tags.json)
 
           if [[ "$EXISTING_RELEASE" == true ]]; then
             require_release_tag
