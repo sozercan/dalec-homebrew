@@ -1360,7 +1360,8 @@ jobs:
           error_file=$(mktemp "$RUNNER_TEMP/release-lookup.XXXXXX")
           if release_json=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" 2>"$error_file"); then
             :
-          elif jq -e '.status == "404"' <<<"$release_json" >/dev/null 2>&1; then
+          elif jq -e '.status == "404"' <<<"$release_json" >/dev/null 2>&1 \
+            || grep -Fq '(HTTP 404)' "$error_file"; then
             rm -f "$error_file"
             echo "exists=false" >> "$GITHUB_OUTPUT"
             exit 0
