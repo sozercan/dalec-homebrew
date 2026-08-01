@@ -417,15 +417,16 @@ jobs:
         run: |
           set -euo pipefail
           component_ref() {
-            local component=$1
-            jq -er --arg component "$component" '
-              .components[$component].repository + "@" + .components[$component].index
+            local component=$1 platform=${2:-}
+            jq -er --arg component "$component" --arg platform "$platform" '
+              .components[$component].repository + "@" +
+              (if $platform == "" then .components[$component].index else .components[$component].platforms[$platform] end)
             ' dist/release/digests.json
           }
 
           runtime_base_ref=$(component_ref runtime-base)
           materializer_ref=$(component_ref materializer)
-          frontend_ref=$(component_ref frontend)
+          frontend_ref=$(component_ref frontend "$PLATFORM")
           source_date_epoch=$(jq -er .source.source_date_epoch dist/release/digests.json)
 
           specs=(live-test live-python live-glibc live-redis live-graphviz)
@@ -632,6 +633,22 @@ jobs:
             arm64="dist/release/runtime-evidence/runtime-evidence-linux-arm64-${spec}.tar.gz"
             for archive in "$amd64" "$arm64"; do
               test -s "$archive"
+            done
+            for platform in linux/amd64 linux/arm64; do
+              platform_slug=${platform//\//-}
+              archive="dist/release/runtime-evidence/runtime-evidence-${platform_slug}-${spec}.tar.gz"
+              frontend_ref=$(jq -er --arg platform "$platform" '.components.frontend.repository + "@" + .components.frontend.platforms[$platform]' dist/release/digests.json)
+              runtime_base_ref=$(jq -er --arg platform "$platform" '.components["runtime-base"].repository + "@" + .components["runtime-base"].platforms[$platform]' dist/release/digests.json)
+              materializer_ref=$(jq -er --arg platform "$platform" '.components.materializer.repository + "@" + .components.materializer.platforms[$platform]' dist/release/digests.json)
+              tar -xOf "$archive" ./resolution.json \
+                | jq -e \
+                    --arg frontend "$frontend_ref" \
+                    --arg runtime_base "$runtime_base_ref" \
+                    --arg materializer "$materializer_ref" '
+                      .components.frontend_ref == $frontend and
+                      .components.runtime_base_ref == $runtime_base and
+                      .components.materializer_ref == $materializer
+                    ' >/dev/null
             done
             metadata_filter='
               def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
@@ -961,6 +978,61 @@ jobs:
             | $repository + "@" + .
           ' dist/release/digests.json | sort -u)
 
+      - name: Validate existing GitHub release before promotion
+        id: existing_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CERTIFICATE_IDENTITY_REGEXP: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/heads/main$
+          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          error_file=$(mktemp "$RUNNER_TEMP/release-lookup.XXXXXX")
+          if release_json=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" 2>"$error_file"); then
+            :
+          elif jq -e '.status == "404"' <<<"$release_json" >/dev/null 2>&1; then
+            rm -f "$error_file"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            cat "$error_file" >&2
+            rm -f "$error_file"
+            echo "could not safely determine whether GitHub release $RELEASE_TAG exists" >&2
+            exit 1
+          fi
+          rm -f "$error_file"
+
+          existing="$RUNNER_TEMP/existing-release"
+          mkdir -p "$existing"
+          gh release download "$RELEASE_TAG" \
+            --dir "$existing" \
+            --repo "$GITHUB_REPOSITORY"
+          cosign verify-blob \
+            --bundle "$existing/SHA256SUMS.bundle" \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            "$existing/SHA256SUMS"
+          cosign verify-blob \
+            --bundle "$existing/components.json.bundle" \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            "$existing/components.json"
+          (cd "$existing" && sha256sum -c SHA256SUMS)
+          jq -S 'del(.source.build_invocation, .source.build_run_attempt)' \
+            dist/release/digests.json > "$RUNNER_TEMP/current-digests.json"
+          jq -S 'del(.source.build_invocation, .source.build_run_attempt)' \
+            "$existing/digests.json" > "$RUNNER_TEMP/existing-digests.json"
+          cmp "$RUNNER_TEMP/current-digests.json" "$RUNNER_TEMP/existing-digests.json" || {
+            echo "existing $RELEASE_TAG asset differs: digests.json" >&2
+            exit 1
+          }
+          for name in inputs.json components.digest; do
+            cmp "dist/release/$name" "$existing/$name" || {
+              echo "existing $RELEASE_TAG asset differs: $name" >&2
+              exit 1
+            }
+          done
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+
       - name: Add release tags without rebuilding
         run: |
           set -euo pipefail
@@ -1062,8 +1134,7 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CERTIFICATE_IDENTITY_REGEXP: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/heads/main$
-          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+          EXISTING_RELEASE: ${{ steps.existing_release.outputs.exists }}
         run: |
           set -euo pipefail
           resolve_release_tag() {
@@ -1097,37 +1168,7 @@ jobs:
           [[ "$STABLE" == true ]] || release_args+=(--prerelease)
 
           mapfile -t assets < <(find dist/release -maxdepth 1 -type f | sort)
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            existing="$RUNNER_TEMP/existing-release"
-            mkdir -p "$existing"
-            gh release download "$RELEASE_TAG" \
-              --dir "$existing" \
-              --repo "$GITHUB_REPOSITORY"
-            cosign verify-blob \
-              --bundle "$existing/SHA256SUMS.bundle" \
-              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
-              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-              "$existing/SHA256SUMS"
-            cosign verify-blob \
-              --bundle "$existing/components.json.bundle" \
-              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
-              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-              "$existing/components.json"
-            (cd "$existing" && sha256sum -c SHA256SUMS)
-            jq -S 'del(.source.build_invocation, .source.build_run_attempt)' \
-              dist/release/digests.json > "$RUNNER_TEMP/current-digests.json"
-            jq -S 'del(.source.build_invocation, .source.build_run_attempt)' \
-              "$existing/digests.json" > "$RUNNER_TEMP/existing-digests.json"
-            cmp "$RUNNER_TEMP/current-digests.json" "$RUNNER_TEMP/existing-digests.json" || {
-              echo "existing $RELEASE_TAG asset differs: digests.json" >&2
-              exit 1
-            }
-            for name in inputs.json components.digest; do
-              cmp "dist/release/$name" "$existing/$name" || {
-                echo "existing $RELEASE_TAG asset differs: $name" >&2
-                exit 1
-              }
-            done
+          if [[ "$EXISTING_RELEASE" == true ]]; then
             require_release_tag
             echo "$RELEASE_TAG already exists with the same immutable tuple; release assets were not modified"
           else
