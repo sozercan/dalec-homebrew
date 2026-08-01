@@ -215,15 +215,39 @@ jobs:
               and parse(ref["ref"].removeprefix("refs/tags/")) is not None
           }
 
+          prior_tags = [tag for tag in tags if compare(parse(tag), target_version) < 0]
+          missing = sorted(tag for tag in prior_tags if tag not in published_releases)
+          if missing:
+              raise SystemExit(
+                  "release continuity is broken; protected tag(s) lack signed releases: "
+                  + ", ".join(missing)
+              )
+          ordered_prior = sorted(
+              prior_tags,
+              key=functools.cmp_to_key(lambda left, right: compare(parse(left), parse(right))),
+          )
+
+          def chain_entries(release_tags):
+              return [
+                  {
+                      "tag": tag,
+                      "id": published_releases[tag].get("id"),
+                      "predecessor": release_tags[index - 1] if index > 0 else None,
+                  }
+                  for index, tag in enumerate(release_tags)
+              ]
+
           target_release = all_releases.get(target_tag)
           if target_release is not None and not target_release.get("draft"):
               selection = {
                   "source_release": target_tag,
                   "source_release_id": target_release.get("id"),
                   "source_draft": False,
+                  "source_predecessor": ordered_prior[-1] if ordered_prior else None,
                   "fallback_release": None,
                   "fallback_release_id": None,
-                  "protected_releases": [],
+                  "fallback_predecessor": None,
+                  "protected_releases": chain_entries(ordered_prior),
                   "same_release": True,
               }
           else:
@@ -232,32 +256,22 @@ jobs:
                   raise SystemExit(
                       f"cannot publish {target_tag} after newer release(s): {', '.join(sorted(newer))}"
                   )
-              prior_tags = [tag for tag in tags if compare(parse(tag), target_version) < 0]
-              missing = sorted(tag for tag in prior_tags if tag not in published_releases)
-              if missing:
-                  raise SystemExit(
-                      "release continuity is broken; protected tag(s) lack signed releases: "
-                      + ", ".join(missing)
-                  )
-              ordered_prior = sorted(
-                  prior_tags,
-                  key=functools.cmp_to_key(lambda left, right: compare(parse(left), parse(right))),
-              )
               if target_release is not None:
                   selection = {
                       "source_release": target_tag,
                       "source_release_id": target_release.get("id"),
                       "source_draft": True,
+                      "source_predecessor": ordered_prior[-1] if ordered_prior else None,
                       "fallback_release": ordered_prior[-1] if ordered_prior else None,
                       "fallback_release_id": (
                           published_releases[ordered_prior[-1]].get("id")
                           if ordered_prior
                           else None
                       ),
-                      "protected_releases": [
-                          {"tag": tag, "id": published_releases[tag].get("id")}
-                          for tag in ordered_prior
-                      ],
+                      "fallback_predecessor": (
+                          ordered_prior[-2] if len(ordered_prior) > 1 else None
+                      ),
+                      "protected_releases": chain_entries(ordered_prior),
                       "same_release": True,
                   }
               else:
@@ -268,12 +282,13 @@ jobs:
                           published_releases[predecessor].get("id") if predecessor else None
                       ),
                       "source_draft": False,
+                      "source_predecessor": (
+                          ordered_prior[-2] if len(ordered_prior) > 1 else None
+                      ),
                       "fallback_release": None,
                       "fallback_release_id": None,
-                      "protected_releases": [
-                          {"tag": tag, "id": published_releases[tag].get("id")}
-                          for tag in ordered_prior[:-1]
-                      ],
+                      "fallback_predecessor": None,
+                      "protected_releases": chain_entries(ordered_prior[:-1]),
                       "same_release": False,
                   }
 
@@ -282,8 +297,10 @@ jobs:
           source_release=$(jq -r .source_release "$RUNNER_TEMP/floor-selection.json")
           source_release_id=$(jq -r '.source_release_id // empty' "$RUNNER_TEMP/floor-selection.json")
           source_draft=$(jq -r .source_draft "$RUNNER_TEMP/floor-selection.json")
+          source_predecessor=$(jq -r '.source_predecessor // empty' "$RUNNER_TEMP/floor-selection.json")
           fallback_release=$(jq -r '.fallback_release // empty' "$RUNNER_TEMP/floor-selection.json")
           fallback_release_id=$(jq -r '.fallback_release_id // empty' "$RUNNER_TEMP/floor-selection.json")
+          fallback_predecessor=$(jq -r '.fallback_predecessor // empty' "$RUNNER_TEMP/floor-selection.json")
           same_release=$(jq -r .same_release "$RUNNER_TEMP/floor-selection.json")
           if [[ -z "$source_release" ]]; then
             echo "same_release=false" >> "$GITHUB_OUTPUT"
@@ -460,7 +477,7 @@ jobs:
           PYASSETS
 
           verify_protected_release() {
-            local release_tag=$1 release_id=$2 bundle assets_file asset_id name
+            local release_tag=$1 release_id=$2 expected_predecessor=$3 bundle assets_file asset_id name
             [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || {
               echo "protected release $release_tag has an invalid API id" >&2
               return 1
@@ -519,6 +536,7 @@ jobs:
               "$assets_file" "$bundle/SHA256SUMS" "$bundle" \
               "$MAX_RELEASE_ASSET_BYTES" "$MAX_RELEASE_TOTAL_BYTES"
             jq -e --arg tag "$release_tag" \
+              --arg predecessor "$expected_predecessor" \
               --slurpfile metadata "$bundle/metadata-snapshot.json" \
               --slurpfile provenance "$bundle/provenance.json" '
                 select(.schema_version == "dalec-homebrew-release-digests/v1")
@@ -527,6 +545,10 @@ jobs:
                 | select($sha | type == "string" and test("^[0-9a-f]{40}$"))
                 | select($metadata[0].schema_version == "dalec-homebrew-release-metadata/v1")
                 | select($metadata[0].release.tag == $tag and $metadata[0].release.sha == $sha)
+                | select(
+                    if $predecessor == "" then $metadata[0].inherited_floor == null
+                    else $metadata[0].inherited_floor.source_release == $predecessor
+                    end)
                 | select($provenance[0].invocation.parameters.tag == $tag)
                 | select(any($provenance[0].materials[];
                     (.uri | endswith("@refs/tags/" + $tag)) and .digest.sha1 == $sha))
@@ -536,8 +558,9 @@ jobs:
           while read -r protected; do
             protected_tag=$(jq -er .tag <<<"$protected")
             protected_id=$(jq -er .id <<<"$protected")
+            protected_predecessor=$(jq -r '.predecessor // empty' <<<"$protected")
             echo "verifying protected predecessor $protected_tag"
-            verify_protected_release "$protected_tag" "$protected_id"
+            verify_protected_release "$protected_tag" "$protected_id" "$protected_predecessor"
           done < <(jq -c '.protected_releases[]' "$RUNNER_TEMP/floor-selection.json")
 
           if [[ "$source_draft" == true ]]; then
@@ -561,6 +584,7 @@ jobs:
                 source_release=$fallback_release
                 source_release_id=$fallback_release_id
                 source_draft=false
+                source_predecessor=$fallback_predecessor
                 same_release=false
                 if [[ -z "$source_release" ]]; then
                   echo "same_release=false" >> "$GITHUB_OUTPUT"
@@ -669,11 +693,17 @@ jobs:
               exit 1
             }
           fi
-          not_before=$(jq -er --arg source_release "$source_release" '
+          not_before=$(jq -er \
+            --arg source_release "$source_release" \
+            --arg source_predecessor "$source_predecessor" '
             def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
             select(.schema_version == "dalec-homebrew-release-metadata/v1")
             | select(.release.tag == $source_release)
             | select(.release.sha | type == "string" and test("^[0-9a-f]{40}$"))
+            | select(
+                if $source_predecessor == "" then .inherited_floor == null
+                else .inherited_floor.source_release == $source_predecessor
+                end)
             | select(.rollback_floor == .accepted_snapshot.generated_at)
             | select([.accepted_snapshot.digest, .accepted_snapshot.formula_digest, .accepted_snapshot.migration_digest, .accepted_snapshot.formula_envelope_digest, .accepted_snapshot.migration_envelope_digest] | all(sha256))
             | select([.accepted_snapshot.formula_freshness_source, .accepted_snapshot.migration_freshness_source] | all(. == "signed-payload" or . == "http-last-modified"))
