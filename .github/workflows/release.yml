@@ -191,11 +191,14 @@ jobs:
           with open(refs_path, encoding="utf-8") as f:
               ref_pages = json.load(f)
 
-          releases = {
+          all_releases = {
               release["tag_name"]: release
               for page in release_pages
               for release in page
-              if not release.get("draft") and parse(release.get("tag_name", "")) is not None
+              if parse(release.get("tag_name", "")) is not None
+          }
+          published_releases = {
+              tag: release for tag, release in all_releases.items() if not release.get("draft")
           }
           tags = {
               ref["ref"].removeprefix("refs/tags/")
@@ -205,8 +208,13 @@ jobs:
               and parse(ref["ref"].removeprefix("refs/tags/")) is not None
           }
 
-          if target_tag in releases:
-              selection = {"source_release": target_tag, "same_release": True}
+          target_release = all_releases.get(target_tag)
+          if target_release is not None and not target_release.get("draft"):
+              selection = {
+                  "source_release": target_tag,
+                  "source_release_id": target_release.get("id"),
+                  "same_release": True,
+              }
           else:
               newer = [tag for tag in tags if compare(parse(tag), target_version) > 0]
               if newer:
@@ -214,22 +222,38 @@ jobs:
                       f"cannot publish {target_tag} after newer release(s): {', '.join(sorted(newer))}"
                   )
               prior_tags = [tag for tag in tags if compare(parse(tag), target_version) < 0]
-              missing = sorted(tag for tag in prior_tags if tag not in releases)
+              missing = sorted(tag for tag in prior_tags if tag not in published_releases)
               if missing:
                   raise SystemExit(
                       "release continuity is broken; protected tag(s) lack signed releases: "
                       + ", ".join(missing)
                   )
-              predecessor = max(
-                  prior_tags,
-                  key=functools.cmp_to_key(lambda left, right: compare(parse(left), parse(right))),
-                  default="",
-              )
-              selection = {"source_release": predecessor, "same_release": False}
+              if target_release is not None:
+                  selection = {
+                      "source_release": target_tag,
+                      "source_release_id": target_release.get("id"),
+                      "same_release": True,
+                  }
+              else:
+                  predecessor = max(
+                      prior_tags,
+                      key=functools.cmp_to_key(
+                          lambda left, right: compare(parse(left), parse(right))
+                      ),
+                      default="",
+                  )
+                  selection = {
+                      "source_release": predecessor,
+                      "source_release_id": (
+                          published_releases[predecessor].get("id") if predecessor else None
+                      ),
+                      "same_release": False,
+                  }
 
           json.dump(selection, sys.stdout, separators=(",", ":"))
           PYSELECT
           source_release=$(jq -r .source_release "$RUNNER_TEMP/floor-selection.json")
+          source_release_id=$(jq -r '.source_release_id // empty' "$RUNNER_TEMP/floor-selection.json")
           same_release=$(jq -r .same_release "$RUNNER_TEMP/floor-selection.json")
           echo "same_release=$same_release" >> "$GITHUB_OUTPUT"
           if [[ -z "$source_release" ]]; then
@@ -246,9 +270,33 @@ jobs:
 
           prior="$RUNNER_TEMP/prior-release"
           mkdir -p "$prior"
-          gh release download "$source_release" \
-            --dir "$prior" \
-            --repo "$GITHUB_REPOSITORY"
+          [[ "$source_release_id" =~ ^[1-9][0-9]*$ ]] || {
+            echo "release $source_release has an invalid API id" >&2
+            exit 1
+          }
+          assets=$(gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases/$source_release_id/assets?per_page=100")
+          jq -e '
+            [.[][] | {id, name}]
+            | length > 0 and length <= 200
+            and all(.[]; (.id | type == "number" and . > 0))
+            and all(.[]; (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")))
+            and ([.[].name] | length == (unique | length))
+          ' <<<"$assets" >/dev/null || {
+            echo "release $source_release has invalid or unbounded assets" >&2
+            exit 1
+          }
+          while read -r asset; do
+            asset_id=$(jq -er .id <<<"$asset")
+            asset_name=$(jq -er .name <<<"$asset")
+            curl --fail --location --silent --show-error \
+              --retry 3 \
+              --retry-all-errors \
+              -H 'Accept: application/octet-stream' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              --output "$prior/$asset_name"
+          done < <(jq -c '.[][] | {id, name}' <<<"$assets")
           cosign verify-blob \
             --bundle "$prior/SHA256SUMS.bundle" \
             --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
@@ -265,10 +313,33 @@ jobs:
             --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
             "$prior/metadata-snapshot.json"
           (cd "$prior" && sha256sum -c SHA256SUMS)
-          grep -Eq '(^|[[:space:]])(\./)?metadata-snapshot\.json$' "$prior/SHA256SUMS" || {
-            echo "$source_release does not contain signed metadata snapshot evidence" >&2
-            exit 1
-          }
+          for name in digests.json metadata-snapshot.json provenance.json; do
+            grep -Eq "(^|[[:space:]])(\\./)?${name//./\\.}$" "$prior/SHA256SUMS" || {
+              echo "$source_release does not contain signed $name evidence" >&2
+              exit 1
+            }
+          done
+          if [[ "$same_release" == true ]]; then
+            jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+              .source.tag == $tag and .source.git_sha == $sha
+            ' "$prior/digests.json" >/dev/null || {
+              echo "signed digests.json does not match $RELEASE_TAG at $RELEASE_SHA" >&2
+              exit 1
+            }
+            jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+              .release.tag == $tag and .release.sha == $sha
+            ' "$prior/metadata-snapshot.json" >/dev/null || {
+              echo "signed metadata-snapshot.json does not match $RELEASE_TAG at $RELEASE_SHA" >&2
+              exit 1
+            }
+            jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+              .invocation.parameters.tag == $tag and
+              any(.materials[]; (.uri | endswith("@refs/tags/" + $tag)) and .digest.sha1 == $sha)
+            ' "$prior/provenance.json" >/dev/null || {
+              echo "signed provenance.json does not bind $RELEASE_TAG at $RELEASE_SHA" >&2
+              exit 1
+            }
+          fi
           not_before=$(jq -er --arg source_release "$source_release" '
             def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
             select(.schema_version == "dalec-homebrew-release-metadata/v1")
@@ -1367,35 +1438,58 @@ jobs:
           CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
         run: |
           set -euo pipefail
-          error_file=$(mktemp "$RUNNER_TEMP/release-lookup.XXXXXX")
-          if release_json=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" 2>"$error_file"); then
-            :
-          elif jq -e '.status == "404"' <<<"$release_json" >/dev/null 2>&1 \
-            || grep -Fq '(HTTP 404)' "$error_file"; then
-            rm -f "$error_file"
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+          releases=$(gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          release_json=$(jq -c --arg tag "$RELEASE_TAG" '
+            [.[][] | select(.tag_name == $tag)]
+            | if length == 0 then empty
+              elif length == 1 then .[0]
+              else error("multiple releases use the requested tag")
+              end
+          ' <<<"$releases")
+          if [[ -z "$release_json" ]]; then
+            {
+              echo "exists=false"
+              echo "draft=false"
+            } >> "$GITHUB_OUTPUT"
             exit 0
-          else
-            cat "$error_file" >&2
-            rm -f "$error_file"
-            echo "could not safely determine whether GitHub release $RELEASE_TAG exists" >&2
-            exit 1
           fi
-          rm -f "$error_file"
           expected_prerelease=false
           [[ "$STABLE" == true ]] || expected_prerelease=true
           jq -e --argjson expected_prerelease "$expected_prerelease" '
-            .draft == false and .prerelease == $expected_prerelease
+            (.draft | type == "boolean") and .prerelease == $expected_prerelease
           ' <<<"$release_json" >/dev/null || {
-            echo "existing $RELEASE_TAG is draft or has the wrong prerelease classification" >&2
+            echo "existing $RELEASE_TAG has invalid state or the wrong prerelease classification" >&2
             exit 1
           }
+          release_draft=$(jq -r .draft <<<"$release_json")
+          release_id=$(jq -er '.id | select(type == "number" and . > 0)' <<<"$release_json")
 
           existing="$RUNNER_TEMP/existing-release"
           mkdir -p "$existing"
-          gh release download "$RELEASE_TAG" \
-            --dir "$existing" \
-            --repo "$GITHUB_REPOSITORY"
+          assets=$(gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100")
+          jq -e '
+            [.[][] | {id, name}]
+            | length > 0 and length <= 200
+            and all(.[]; (.id | type == "number" and . > 0))
+            and all(.[]; (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")))
+            and ([.[].name] | length == (unique | length))
+          ' <<<"$assets" >/dev/null || {
+            echo "release $RELEASE_TAG has invalid or unbounded assets" >&2
+            exit 1
+          }
+          while read -r asset; do
+            asset_id=$(jq -er .id <<<"$asset")
+            asset_name=$(jq -er .name <<<"$asset")
+            curl --fail --location --silent --show-error \
+              --retry 3 \
+              --retry-all-errors \
+              -H 'Accept: application/octet-stream' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              --output "$existing/$asset_name"
+          done < <(jq -c '.[][] | {id, name}' <<<"$assets")
           cosign verify-blob \
             --bundle "$existing/SHA256SUMS.bundle" \
             --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
@@ -1454,11 +1548,15 @@ jobs:
               exit 1
             }
           done
-          echo "exists=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "exists=true"
+            echo "draft=$release_draft"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Add release tags without rebuilding
         env:
           GH_TOKEN: ${{ github.token }}
+          EXISTING_RELEASE: ${{ steps.existing_release.outputs.exists }}
         run: |
           set -euo pipefail
           comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$RELEASE_SHA...main" --jq .status)
@@ -1542,6 +1640,71 @@ jobs:
             require_expected_or_missing_tag "$component"
           done
 
+          if [[ "$EXISTING_RELEASE" == true ]]; then
+            require_release_tag
+            echo "$RELEASE_TAG already has verified signed release assets"
+          else
+            require_release_tag
+            expected_prerelease=false
+            [[ "$STABLE" == true ]] || expected_prerelease=true
+            draft_release=$(gh api --method POST \
+              "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$RELEASE_TAG" \
+              -f target_commitish="$RELEASE_SHA" \
+              -f name="$RELEASE_TAG" \
+              -F draft=true \
+              -F prerelease="$expected_prerelease" \
+              -F generate_release_notes=true \
+              -f make_latest=false)
+            draft_release_id=$(jq -er '
+              select(.draft == true)
+              | .id
+              | select(type == "number" and . > 0)
+            ' <<<"$draft_release")
+            mapfile -t assets < <(find dist/release -maxdepth 1 -type f | sort)
+            (
+              set -euo pipefail
+              cleanup_draft=true
+              trap '
+                if [[ "$cleanup_draft" == true ]]; then
+                  gh api --method DELETE \
+                    "repos/$GITHUB_REPOSITORY/releases/$draft_release_id" >/dev/null \
+                    || echo "could not delete incomplete draft release $draft_release_id" >&2
+                fi
+              ' EXIT
+
+              jq -e --arg tag "$RELEASE_TAG" --argjson prerelease "$expected_prerelease" '
+                .tag_name == $tag and .draft == true and .prerelease == $prerelease
+                and (.upload_url | type == "string" and startswith("https://uploads.github.com/"))
+              ' <<<"$draft_release" >/dev/null
+              (( ${#assets[@]} > 0 && ${#assets[@]} <= 200 ))
+              expected_assets=$(mktemp "$RUNNER_TEMP/draft-assets-expected.XXXXXX")
+              actual_assets=$(mktemp "$RUNNER_TEMP/draft-assets-actual.XXXXXX")
+              printf '%s\n' "${assets[@]##*/}" | sort -u > "$expected_assets"
+              [[ $(wc -l < "$expected_assets") -eq ${#assets[@]} ]]
+
+              upload_url=$(jq -er .upload_url <<<"$draft_release")
+              upload_endpoint=${upload_url%%\{*}
+              for asset in "${assets[@]}"; do
+                asset_name=${asset##*/}
+                [[ "$asset_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$ ]]
+                curl --fail --location --silent --show-error \
+                  -H 'Accept: application/vnd.github+json' \
+                  -H "Authorization: Bearer $GH_TOKEN" \
+                  -H 'Content-Type: application/octet-stream' \
+                  --data-binary "@$asset" \
+                  "$upload_endpoint?name=$asset_name" >/dev/null
+              done
+
+              uploaded_assets=$(gh api --paginate --slurp \
+                "repos/$GITHUB_REPOSITORY/releases/$draft_release_id/assets?per_page=100")
+              jq -r '.[][] | .name' <<<"$uploaded_assets" | sort -u > "$actual_assets"
+              diff -u "$expected_assets" "$actual_assets"
+              cleanup_draft=false
+              trap - EXIT
+            )
+          fi
+
           promote() {
             local component=$1 repository digest existing status published
             require_release_tag
@@ -1583,6 +1746,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EXISTING_RELEASE: ${{ steps.existing_release.outputs.exists }}
+          EXISTING_DRAFT: ${{ steps.existing_release.outputs.draft }}
         run: |
           set -euo pipefail
           resolve_release_tag() {
@@ -1612,19 +1776,15 @@ jobs:
           }
 
           require_release_tag
-          release_args=(--verify-tag --generate-notes --title "$RELEASE_TAG" --latest=false)
-          [[ "$STABLE" == true ]] || release_args+=(--prerelease)
-
-          mapfile -t assets < <(find dist/release -maxdepth 1 -type f | sort)
-          if [[ "$EXISTING_RELEASE" == true ]]; then
-            require_release_tag
-            echo "$RELEASE_TAG already exists with the same immutable tuple; release assets were not modified"
-          else
-            require_release_tag
-            gh release create "$RELEASE_TAG" "${assets[@]}" \
-              "${release_args[@]}" \
-              --repo "$GITHUB_REPOSITORY"
+          if [[ "$EXISTING_RELEASE" == true && "$EXISTING_DRAFT" != true ]]; then
+            echo "$RELEASE_TAG is already published with the same immutable tuple"
+            exit 0
           fi
+          gh release edit "$RELEASE_TAG" \
+            --draft=false \
+            --latest=false \
+            --verify-tag \
+            --repo "$GITHUB_REPOSITORY"
 
       - name: Release summary
         run: |
