@@ -121,7 +121,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
-      contents: read
+      contents: write
     outputs:
       same_release: ${{ steps.floor.outputs.same_release }}
     env:
@@ -220,6 +220,9 @@ jobs:
               selection = {
                   "source_release": target_tag,
                   "source_release_id": target_release.get("id"),
+                  "source_draft": False,
+                  "fallback_release": None,
+                  "fallback_release_id": None,
                   "protected_releases": [],
                   "same_release": True,
               }
@@ -244,6 +247,13 @@ jobs:
                   selection = {
                       "source_release": target_tag,
                       "source_release_id": target_release.get("id"),
+                      "source_draft": True,
+                      "fallback_release": ordered_prior[-1] if ordered_prior else None,
+                      "fallback_release_id": (
+                          published_releases[ordered_prior[-1]].get("id")
+                          if ordered_prior
+                          else None
+                      ),
                       "protected_releases": [
                           {"tag": tag, "id": published_releases[tag].get("id")}
                           for tag in ordered_prior
@@ -257,6 +267,9 @@ jobs:
                       "source_release_id": (
                           published_releases[predecessor].get("id") if predecessor else None
                       ),
+                      "source_draft": False,
+                      "fallback_release": None,
+                      "fallback_release_id": None,
                       "protected_releases": [
                           {"tag": tag, "id": published_releases[tag].get("id")}
                           for tag in ordered_prior[:-1]
@@ -268,9 +281,12 @@ jobs:
           PYSELECT
           source_release=$(jq -r .source_release "$RUNNER_TEMP/floor-selection.json")
           source_release_id=$(jq -r '.source_release_id // empty' "$RUNNER_TEMP/floor-selection.json")
+          source_draft=$(jq -r .source_draft "$RUNNER_TEMP/floor-selection.json")
+          fallback_release=$(jq -r '.fallback_release // empty' "$RUNNER_TEMP/floor-selection.json")
+          fallback_release_id=$(jq -r '.fallback_release_id // empty' "$RUNNER_TEMP/floor-selection.json")
           same_release=$(jq -r .same_release "$RUNNER_TEMP/floor-selection.json")
-          echo "same_release=$same_release" >> "$GITHUB_OUTPUT"
           if [[ -z "$source_release" ]]; then
+            echo "same_release=false" >> "$GITHUB_OUTPUT"
             jq -n '{
               schema_version: "dalec-homebrew-rollback-floor-input/v1",
               source_release: null,
@@ -292,6 +308,62 @@ jobs:
               "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
               --output "$output"
           }
+
+          check_draft_inventory() (
+            set -euo pipefail
+            local release_id=$1 state_file=$2 bundle assets_file name asset_id count
+            bundle="$RUNNER_TEMP/draft-inventory-$release_id"
+            assets_file="$RUNNER_TEMP/draft-inventory-$release_id-assets.json"
+            mkdir -p "$bundle"
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
+              > "$assets_file"
+            jq -e \
+              --argjson max_asset "$MAX_RELEASE_ASSET_BYTES" \
+              --argjson max_total "$MAX_RELEASE_TOTAL_BYTES" '
+                [.[][] | {id, name, size, state}]
+                | length <= 200
+                and all(.[]; (.id | type == "number" and . > 0))
+                and all(.[]; (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")))
+                and all(.[]; (.size | type == "number" and . >= 0 and . <= $max_asset))
+                and ([.[].size] | add <= $max_total)
+                and ([.[].name] | length == (unique | length))
+              ' "$assets_file" >/dev/null
+            if jq -e 'any(.[][]; .state != "uploaded" or .size == 0)' "$assets_file" >/dev/null; then
+              printf 'incomplete\n' > "$state_file"
+              exit 0
+            fi
+            for name in SHA256SUMS SHA256SUMS.bundle; do
+              count=$(jq -r --arg name "$name" '[.[][] | select(.name == $name)] | length' "$assets_file")
+              if (( count == 0 )); then
+                printf 'incomplete\n' > "$state_file"
+                exit 0
+              fi
+              (( count == 1 ))
+              asset_id=$(jq -er --arg name "$name" '.[][] | select(.name == $name) | .id' "$assets_file")
+              download_release_asset "$asset_id" "$bundle/$name"
+            done
+            cosign verify-blob \
+              --bundle "$bundle/SHA256SUMS.bundle" \
+              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$bundle/SHA256SUMS"
+            {
+              awk '{ path=$2; sub(/^\*/, "", path); sub(/^\.\//, "", path); print path }' "$bundle/SHA256SUMS"
+              printf '%s\n' SHA256SUMS SHA256SUMS.bundle components.json.bundle metadata-snapshot.json.bundle
+            } | sort -u > "$bundle/expected.txt"
+            jq -r '.[][] | .name' "$assets_file" | sort -u > "$bundle/actual.txt"
+            comm -13 "$bundle/expected.txt" "$bundle/actual.txt" > "$bundle/extra.txt"
+            if [[ -s "$bundle/extra.txt" ]]; then
+              exit 1
+            fi
+            comm -23 "$bundle/expected.txt" "$bundle/actual.txt" > "$bundle/missing.txt"
+            if [[ -s "$bundle/missing.txt" ]]; then
+              printf 'incomplete\n' > "$state_file"
+              exit 0
+            fi
+            printf 'complete\n' > "$state_file"
+          )
 
           cat > "$RUNNER_TEMP/verify-release-assets.py" <<'PYASSETS'
           import hashlib
@@ -468,6 +540,50 @@ jobs:
             verify_protected_release "$protected_tag" "$protected_id"
           done < <(jq -c '.protected_releases[]' "$RUNNER_TEMP/floor-selection.json")
 
+          if [[ "$source_draft" == true ]]; then
+            draft_state_file="$RUNNER_TEMP/draft-inventory-state"
+            set +e
+            check_draft_inventory "$source_release_id" "$draft_state_file"
+            draft_status=$?
+            set -e
+            if (( draft_status != 0 )); then
+              echo "draft release $source_release has invalid or unverifiable assets" >&2
+              exit "$draft_status"
+            fi
+            draft_state=$(cat "$draft_state_file")
+            case "$draft_state" in
+              complete)
+                ;;
+              incomplete)
+                echo "discarding incomplete draft release $source_release" >&2
+                gh api --method DELETE \
+                  "repos/$GITHUB_REPOSITORY/releases/$source_release_id" >/dev/null
+                source_release=$fallback_release
+                source_release_id=$fallback_release_id
+                source_draft=false
+                same_release=false
+                if [[ -z "$source_release" ]]; then
+                  echo "same_release=false" >> "$GITHUB_OUTPUT"
+                  jq -n '{
+                    schema_version: "dalec-homebrew-rollback-floor-input/v1",
+                    source_release: null,
+                    same_release: false,
+                    not_before: null,
+                    inherited_floor: null,
+                    floor_snapshot: null
+                  }' > dist/rollback-floor/rollback-floor-input.json
+                  exit 0
+                fi
+                ;;
+              *)
+                echo "draft release $source_release produced an invalid inventory state" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          echo "same_release=$same_release" >> "$GITHUB_OUTPUT"
+
           prior="$RUNNER_TEMP/prior-release"
           mkdir -p "$prior"
           [[ "$source_release_id" =~ ^[1-9][0-9]*$ ]] || {
@@ -517,6 +633,15 @@ jobs:
             --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
             "$prior/metadata-snapshot.json"
           (cd "$prior" && sha256sum -c SHA256SUMS)
+          {
+            awk '{ path=$2; sub(/^\*/, "", path); sub(/^\.\//, "", path); print path }' "$prior/SHA256SUMS"
+            printf '%s\n' SHA256SUMS SHA256SUMS.bundle components.json.bundle metadata-snapshot.json.bundle
+          } | sort -u > "$RUNNER_TEMP/source-release-assets-expected.txt"
+          jq -r '.[][] | .name' <<<"$assets" \
+            | sort -u > "$RUNNER_TEMP/source-release-assets-actual.txt"
+          diff -u \
+            "$RUNNER_TEMP/source-release-assets-expected.txt" \
+            "$RUNNER_TEMP/source-release-assets-actual.txt"
           for name in digests.json metadata-snapshot.json provenance.json; do
             grep -Eq "(^|[[:space:]])(\\./)?${name//./\\.}$" "$prior/SHA256SUMS" || {
               echo "$source_release does not contain signed $name evidence" >&2
@@ -740,11 +865,20 @@ jobs:
           }
 
           build_target() {
-            local target=$1
+            local target=$1 metadata
+            metadata="$RUNNER_TEMP/build-${target}.json"
             REGISTRY="$REGISTRY" VERSION="$VERSION" docker buildx bake "$target" \
+              --metadata-file "$metadata" \
               --push \
               --provenance=false \
-              --sbom=false
+              --sbom=false >&2
+            jq -er --arg target "$target" '
+              .[$target] as $result
+              | $result["containerimage.digest"] as $digest
+              | select($digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+              | select($result["containerimage.descriptor"].digest == $digest)
+              | $digest
+            ' "$metadata"
           }
 
           target_tag() {
@@ -754,12 +888,23 @@ jobs:
           }
 
           create_index() {
-            local repository=$1 tag=$2 amd64=$3 arm64=$4
+            local repository=$1 tag=$2 amd64=$3 arm64=$4 metadata digest published
+            metadata="$RUNNER_TEMP/index-${tag}.json"
             docker buildx imagetools create \
               --tag "$repository:$tag" \
+              --metadata-file "$metadata" \
               "$repository@$amd64" \
               "$repository@$arm64" >&2
-            inspect_digest "$repository:$tag"
+            digest=$(jq -er '
+              .["containerimage.descriptor"].digest
+              | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))
+            ' "$metadata")
+            published=$(inspect_digest "$repository:$tag")
+            [[ "$published" == "$digest" ]] || {
+              echo "created index $repository:$tag resolved to $published, not exporter digest $digest" >&2
+              return 1
+            }
+            printf '%s\n' "$digest"
           }
 
           platform_digest() {
@@ -776,10 +921,13 @@ jobs:
           for target in \
             runtime-base-amd64 runtime-base-arm64 \
             materializer-amd64 materializer-arm64; do
-            build_target "$target"
+            digest=$(build_target "$target")
             tag=$(target_tag "$target")
-            arch=${target##*-}
-            digest=$(image_digest_for_platform "$tag" "linux/$arch")
+            published=$(inspect_digest "$tag")
+            [[ "$published" == "$digest" ]] || {
+              echo "$target tag $tag resolved to $published, not exporter digest $digest" >&2
+              exit 1
+            }
             printf '%s=%s\n' "$target" "$digest"
             printf -v "${target//-/_}" '%s' "$digest"
           done
@@ -816,11 +964,23 @@ jobs:
           REGISTRY="$REGISTRY" \
           VERSION="$VERSION" \
             docker buildx bake frontend \
+              --metadata-file "$RUNNER_TEMP/build-frontend.json" \
               --push \
               --provenance=false \
-              --sbom=false
+              --sbom=false >&2
 
-          frontend_index=$(inspect_digest "$frontend_repo:$VERSION")
+          frontend_index=$(jq -er '
+            .frontend as $result
+            | $result["containerimage.digest"] as $digest
+            | select($digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+            | select($result["containerimage.descriptor"].digest == $digest)
+            | $digest
+          ' "$RUNNER_TEMP/build-frontend.json")
+          published=$(inspect_digest "$frontend_repo:$VERSION")
+          [[ "$published" == "$frontend_index" ]] || {
+            echo "frontend tag $frontend_repo:$VERSION resolved to $published, not exporter digest $frontend_index" >&2
+            exit 1
+          }
           frontend_amd64=$(platform_digest "$frontend_repo@$frontend_index" linux/amd64)
           frontend_arm64=$(platform_digest "$frontend_repo@$frontend_index" linux/arm64)
 
