@@ -145,6 +145,20 @@ fi
 [[ $status -eq 64 ]] || fail "mutable reference exited with $status instead of 64"
 assert_contains "$mutable_output" "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF must be a digest-pinned OCI reference"
 
+malformed_output="$TEST_ROOT/malformed.out"
+if run_live_test "$malformed_output" \
+  DALEC_HOMEBREW_LIVE_BUILDER=test-builder \
+  DALEC_HOMEBREW_LIVE_PLATFORM=linux/amd64 \
+  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
+  "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
+  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=ghcr.io/example/front|end@$DIGEST_C"; then
+  fail "a malformed component reference was accepted"
+else
+  status=$?
+fi
+[[ $status -eq 64 ]] || fail "malformed reference exited with $status instead of 64"
+assert_contains "$malformed_output" "DALEC_HOMEBREW_LIVE_FRONTEND_REF must be a digest-pinned OCI reference"
+
 published_output="$TEST_ROOT/published.out"
 CAPTURED_SPEC="$TEST_ROOT/published-spec.yaml"
 export CAPTURED_SPEC

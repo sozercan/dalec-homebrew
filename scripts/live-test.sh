@@ -20,7 +20,7 @@ FRONTEND_REF=${DALEC_HOMEBREW_LIVE_FRONTEND_REF:-}
 require_digest_ref() {
   local name=$1
   local value=$2
-  if [[ ! "$value" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+  if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$ ]]; then
     echo "$name must be a digest-pinned OCI reference using sha256" >&2
     exit 64
   fi
@@ -172,7 +172,10 @@ else
   echo "==> Using published component tuple for $PLATFORM"
 fi
 
-sed "1s|.*|# syntax=$FRONTEND_REF|" "$SPEC" > "$WORK/spec.yaml"
+{
+  printf '# syntax=%s\n' "$FRONTEND_REF"
+  tail -n +2 "$SPEC"
+} > "$WORK/spec.yaml"
 
 echo "==> Building final runtime image $FINAL_IMAGE"
 build_final_image() {
