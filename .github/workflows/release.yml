@@ -145,7 +145,36 @@ jobs:
           set -euo pipefail
           mkdir -p dist/rollback-floor
           verified_tags_tsv="$RUNNER_TEMP/verified-release-tags.tsv"
+          verified_floors_tsv="$RUNNER_TEMP/verified-release-floors.tsv"
           : > "$verified_tags_tsv"
+          : > "$verified_floors_tsv"
+          cat > "$RUNNER_TEMP/rfc3339-compare.py" <<'PYRFC3339'
+          from datetime import datetime, timezone
+          import re
+          import sys
+
+          pattern = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z$")
+          epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+          def parse(value):
+              match = pattern.fullmatch(value)
+              if match is None:
+                  raise SystemExit(f"timestamp is not canonical RFC3339 UTC: {value!r}")
+              instant = datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+              delta = instant - epoch
+              nanoseconds = int((match.group(2) or "").ljust(9, "0"))
+              return (delta.days * 86400 + delta.seconds, nanoseconds)
+
+          current, inherited = sys.argv[1:]
+          current_value = parse(current)
+          if not inherited:
+              print("genesis")
+          else:
+              inherited_value = parse(inherited)
+              if current_value < inherited_value:
+                  raise SystemExit(f"rollback floor regressed from {inherited} to {current}")
+              print("equal" if current_value == inherited_value else "newer")
+          PYRFC3339
           releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
           tag_refs=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v?per_page=100")
           printf '%s\n' "$releases" > "$RUNNER_TEMP/releases.json"
@@ -314,8 +343,15 @@ jobs:
           fallback_predecessor=$(jq -r '.fallback_predecessor // empty' "$RUNNER_TEMP/floor-selection.json")
           same_release=$(jq -r .same_release "$RUNNER_TEMP/floor-selection.json")
           protected_release_count=$(jq -er '.protected_releases | length' "$RUNNER_TEMP/floor-selection.json")
-          (( protected_release_count <= MAX_PROTECTED_RELEASES )) || {
-            echo "protected release history exceeds the verification limit of $MAX_PROTECTED_RELEASES" >&2
+          source_in_protected=$(jq -r --arg source "$source_release" '
+            any(.protected_releases[]; .tag == $source)
+          ' "$RUNNER_TEMP/floor-selection.json")
+          verified_release_count=$protected_release_count
+          if [[ -n "$source_release" && "$source_in_protected" != true ]]; then
+            verified_release_count=$((verified_release_count + 1))
+          fi
+          (( verified_release_count <= MAX_PROTECTED_RELEASES )) || {
+            echo "release history exceeds the verification limit of $MAX_PROTECTED_RELEASES" >&2
             exit 1
           }
           if [[ -z "$source_release" ]]; then
@@ -363,6 +399,13 @@ jobs:
             done
             [[ "$object_type" == commit && "$actual" =~ ^[0-9a-f]{40}$ ]] || return 1
             printf '%s\n' "$actual"
+          }
+
+          floor_for_tag() {
+            local tag=$1 floors
+            floors=$(awk -F '\t' -v tag="$tag" '$1 == tag { print $2 }' "$verified_floors_tsv") || return 1
+            [[ -n "$floors" && "$floors" != *$'\n'* ]] || return 1
+            printf '%s\n' "$floors"
           }
 
           check_draft_inventory() (
@@ -515,7 +558,7 @@ jobs:
           PYASSETS
 
           verify_protected_release() {
-            local release_tag=$1 release_id=$2 expected_predecessor=$3 bundle assets_pages_file assets_file asset_id name signed_sha actual_sha release_download_bytes
+            local release_tag=$1 release_id=$2 expected_predecessor=$3 bundle assets_pages_file assets_file asset_id name signed_sha actual_sha release_download_bytes current_floor inherited_floor expected_floor
             [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || {
               echo "protected release $release_tag has an invalid API id" >&2
               return 1
@@ -621,7 +664,34 @@ jobs:
               echo "protected tag $release_tag points to $actual_sha, not signed commit $signed_sha" >&2
               return 1
             }
+            current_floor=$(jq -er '
+              select(.schema_version == "dalec-homebrew-release-metadata/v1")
+              | select(.rollback_floor == .accepted_snapshot.generated_at)
+              | .rollback_floor
+              | select(type == "string" and length > 0)
+            ' "$bundle/metadata-snapshot.json")
+            inherited_floor=""
+            if [[ -n "$expected_predecessor" ]]; then
+              expected_floor=$(floor_for_tag "$expected_predecessor")
+              inherited_floor=$(jq -er --arg predecessor "$expected_predecessor" '
+                select(.inherited_floor.source_release == $predecessor)
+                | .inherited_floor.not_before
+                | select(type == "string" and length > 0)
+              ' "$bundle/metadata-snapshot.json")
+              [[ "$inherited_floor" == "$expected_floor" ]] || {
+                echo "protected release $release_tag inherited floor $inherited_floor, expected $expected_floor" >&2
+                return 1
+              }
+            else
+              jq -e '.inherited_floor == null' "$bundle/metadata-snapshot.json" >/dev/null || {
+                echo "genesis release $release_tag unexpectedly inherits a prior floor" >&2
+                return 1
+              }
+            fi
+            python3 "$RUNNER_TEMP/rfc3339-compare.py" \
+              "$current_floor" "$inherited_floor" >/dev/null
             printf '%s\t%s\n' "$release_tag" "$signed_sha" >> "$verified_tags_tsv"
+            printf '%s\t%s\n' "$release_tag" "$current_floor" >> "$verified_floors_tsv"
           }
 
           protected_download_bytes=0
@@ -704,6 +774,12 @@ jobs:
             echo "release $source_release has invalid or unbounded assets" >&2
             exit 1
           }
+          source_download_bytes=$(jq -er '[.[][] | .size] | add // 0' <<<"$assets")
+          (( protected_download_bytes + source_download_bytes <= MAX_PROTECTED_DOWNLOAD_BYTES )) || {
+            echo "source release verification exceeds the aggregate download budget" >&2
+            exit 1
+          }
+          protected_download_bytes=$((protected_download_bytes + source_download_bytes))
           while read -r asset; do
             asset_id=$(jq -er .id <<<"$asset")
             asset_name=$(jq -er .name <<<"$asset")
@@ -801,16 +877,23 @@ jobs:
               separators=(",", ":"),
           )
           PYTAGS
+          source_predecessor_floor=""
+          if [[ -n "$source_predecessor" ]]; then
+            source_predecessor_floor=$(floor_for_tag "$source_predecessor")
+          fi
           not_before=$(jq -er \
             --arg source_release "$source_release" \
-            --arg source_predecessor "$source_predecessor" '
+            --arg source_predecessor "$source_predecessor" \
+            --arg source_predecessor_floor "$source_predecessor_floor" '
             def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
             select(.schema_version == "dalec-homebrew-release-metadata/v1")
             | select(.release.tag == $source_release)
             | select(.release.sha | type == "string" and test("^[0-9a-f]{40}$"))
             | select(
                 if $source_predecessor == "" then .inherited_floor == null
-                else .inherited_floor.source_release == $source_predecessor
+                else
+                  .inherited_floor.source_release == $source_predecessor and
+                  .inherited_floor.not_before == $source_predecessor_floor
                 end)
             | select(.rollback_floor == .accepted_snapshot.generated_at)
             | select([.accepted_snapshot.digest, .accepted_snapshot.formula_digest, .accepted_snapshot.migration_digest, .accepted_snapshot.formula_envelope_digest, .accepted_snapshot.migration_envelope_digest] | all(sha256))
@@ -820,16 +903,9 @@ jobs:
             | .rollback_floor
             | select(type == "string" and length > 0)
           ' "$prior/metadata-snapshot.json")
-          python3 - "$not_before" <<'PYTIME'
-          from datetime import datetime
-          import sys
-
-          value = sys.argv[1]
-          try:
-              datetime.fromisoformat(value.replace("Z", "+00:00"))
-          except ValueError as exc:
-              raise SystemExit(f"invalid signed rollback floor {value!r}: {exc}")
-          PYTIME
+          python3 "$RUNNER_TEMP/rfc3339-compare.py" \
+            "$not_before" "$source_predecessor_floor" >/dev/null
+          printf '%s\t%s\n' "$source_release" "$not_before" >> "$verified_floors_tsv"
           jq -n \
             --arg source_release "$source_release" \
             --arg same_release "$same_release" \
@@ -1577,6 +1653,33 @@ jobs:
       - name: Verify integration metadata snapshots match across platforms
         run: |
           set -euo pipefail
+          cat > "$RUNNER_TEMP/rfc3339-compare.py" <<'PYRFC3339'
+          from datetime import datetime, timezone
+          import re
+          import sys
+
+          pattern = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z$")
+          epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+          def parse(value):
+              match = pattern.fullmatch(value)
+              if match is None:
+                  raise SystemExit(f"timestamp is not canonical RFC3339 UTC: {value!r}")
+              instant = datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+              delta = instant - epoch
+              nanoseconds = int((match.group(2) or "").ljust(9, "0"))
+              return (delta.days * 86400 + delta.seconds, nanoseconds)
+
+          current, inherited = sys.argv[1:]
+          current_value = parse(current)
+          if not inherited:
+              print("genesis")
+          else:
+              inherited_value = parse(inherited)
+              if current_value < inherited_value:
+                  raise SystemExit(f"rollback floor regressed from {inherited} to {current}")
+              print("equal" if current_value == inherited_value else "newer")
+          PYRFC3339
           for spec in live-test live-python live-glibc live-redis live-graphviz; do
             amd64="dist/release/runtime-evidence/runtime-evidence-linux-amd64-${spec}.tar.gz"
             arm64="dist/release/runtime-evidence/runtime-evidence-linux-arm64-${spec}.tar.gz"
@@ -1636,22 +1739,8 @@ jobs:
           done
           previous_not_before=$(jq -r '.not_before // empty' dist/release/rollback-floor-input.json)
           accepted_not_before=$(jq -er '.metadata.generated_at' "$reference")
-          relation=$(python3 - "$previous_not_before" "$accepted_not_before" <<'PYTIME'
-          from datetime import datetime
-          import sys
-
-          previous, accepted = sys.argv[1:]
-          parse = lambda value: datetime.fromisoformat(value.replace("Z", "+00:00"))
-          accepted_time = parse(accepted)
-          if not previous:
-              print("genesis")
-          else:
-              previous_time = parse(previous)
-              if accepted_time < previous_time:
-                  raise SystemExit(f"accepted metadata snapshot {accepted} predates rollback floor {previous}")
-              print("equal" if accepted_time == previous_time else "newer")
-          PYTIME
-          )
+          relation=$(python3 "$RUNNER_TEMP/rfc3339-compare.py" \
+            "$accepted_not_before" "$previous_not_before")
           same_release=$(jq -r '.same_release' dist/release/rollback-floor-input.json)
           if [[ "$same_release" == true ]]; then
             jq -e --slurpfile accepted "$reference" \
