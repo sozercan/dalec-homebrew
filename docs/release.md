@@ -94,7 +94,7 @@ The workflow separates construction from promotion:
 6. Generate `components.json`, sign every child and index with keyless Cosign, attach SLSA provenance and SPDX attestations, and sign the release records and checksums.
 7. Reverify the tag, signatures, attestations, and release bundle immediately before adding the immutable version tag to the tested index digests and creating the GitHub release. The workflow never publishes `latest`, rebuilds during promotion, or overwrites a version with different digests.
 
-The GitHub `release` environment gates signing. Configure it with required reviewers, require CODEOWNER review for release-critical paths, and configure a tag ruleset that restricts creation and blocks updates or deletion of `v*.*.*` release tags. GHCR and GitHub Release writes use the scoped `GITHUB_TOKEN`; keyless Cosign uses GitHub Actions OIDC, so no private signing-key secret is required.
+The GitHub `release` environment gates signing. Configure it with required reviewers, protect release-critical paths through branch rules, and configure a tag ruleset that restricts creation and blocks updates or deletion of `v*.*.*` release tags. GHCR and GitHub Release writes use the scoped `GITHUB_TOKEN`; keyless Cosign uses GitHub Actions OIDC, so no private signing-key secret is required.
 
 Release assets include:
 
