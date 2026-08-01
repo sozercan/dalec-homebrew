@@ -21,9 +21,10 @@ These options are not general overrides. Runtime-base, materializer, and Homebre
 
 The frontend cannot bind its own final digest before it is published. `DALEC_HOMEBREW_FRONTEND_REF` therefore normally comes from BuildKit's digest-pinned gateway `source` option and must match it when explicitly supplied. Mutable tags are rejected. The platform child digests returned by BuildKit are recorded in every resolution record.
 
-See [`../release/components.example.json`](../release/components.example.json) for the canonical manifest shape. The checked-in file contains placeholders and is illustrative. Validate a populated manifest with:
+See [`../release/components.example.json`](../release/components.example.json) for the canonical manifest shape. The checked-in file contains placeholders and is illustrative. Release automation generates a canonical manifest with `cmd/release-manifest`, then validates it with:
 
 ```console
+go run ./cmd/release-manifest --help
 go run ./cmd/release-verify path/to/components.json
 ```
 
@@ -78,6 +79,33 @@ Release CI must reject:
 - changed Chisel, release-definition, snapshot, or Ubuntu pins without review
 - unsigned or mixed component tuples
 - exporter settings that differ between test and promotion
+
+## Automated component release
+
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) publishes an existing v-prefixed SemVer tag, including supported pre-releases. The workflow is manual-only so write and signing privileges come from the trusted `main` branch workflow rather than from the tagged commit. Start it from `main` and provide a tag whose commit is reachable from `main`.
+
+The workflow separates construction from promotion:
+
+1. Reuse normal CI against the tagged commit and validate the release inputs with [`../scripts/release-inputs.sh`](../scripts/release-inputs.sh).
+2. Build the `amd64` and `arm64` runtime-base and materializer children with pinned Dockerfile frontend, Buildx, BuildKit, and QEMU inputs. BuildKit attestations are disabled during construction so the image-manifest digests remain unambiguous.
+3. Smoke-test the exact children, assemble the runtime-base and materializer indexes, and build the frontend against those digest-pinned indexes.
+4. Run every focused live spec on native `amd64` and `arm64` workers, retain each runtime evidence archive, and require the two platforms to use the same authenticated Homebrew metadata snapshot.
+5. Generate SPDX SBOMs and reject fixed critical vulnerabilities for every platform child.
+6. Generate `components.json`, sign every child and index with keyless Cosign, attach SLSA provenance and SPDX attestations, and sign the release records and checksums.
+7. Reverify the tag, signatures, attestations, and release bundle immediately before adding the immutable version tag to the tested index digests and creating the GitHub release. The workflow never publishes `latest`, rebuilds during promotion, or overwrites a version with different digests.
+
+The GitHub `release` environment gates signing. Configure it with required reviewers, require CODEOWNER review for release-critical paths, and configure a tag ruleset that restricts creation and blocks updates or deletion of `v*.*.*` release tags. GHCR and GitHub Release writes use the scoped `GITHUB_TOKEN`; keyless Cosign uses GitHub Actions OIDC, so no private signing-key secret is required.
+
+Release assets include:
+
+- `components.json`, `components.digest`, and the component Sigstore bundle
+- `digests.json` and `inputs.json`
+- per-platform SPDX SBOMs and vulnerability reports
+- runtime evidence archives from the `amd64` and `arm64` integration images
+- the SLSA provenance predicate
+- `SHA256SUMS` and its Sigstore bundle
+
+The automated workflow releases the reusable component tuple. The images built from example Dalec specs are integration fixtures, not promoted product runtimes. A downstream product release remains responsible for retaining the signed Homebrew envelopes, mirroring selected bottle layers, publishing its final runtime index, and attaching product-specific VEX and promotion evidence.
 
 ## Rollback
 

@@ -1,0 +1,1152 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed semver tag to publish
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.repository }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  REGISTRY_NAMESPACE: ghcr.io/${{ github.repository_owner }}
+  BUILDX_VERSION: v0.36.0
+  BUILDKIT_IMAGE: docker.io/moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2
+  BINFMT_IMAGE: docker.io/tonistiigi/binfmt:latest@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+  SYFT_VERSION: v1.42.3
+  TRIVY_VERSION: v0.70.0
+
+jobs:
+  prepare:
+    name: Validate release ref
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+      stable: ${{ steps.release.outputs.stable }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag and main reachability
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "release dispatches must use the trusted main branch workflow" >&2
+            exit 1
+          fi
+
+          tag=$INPUT_TAG
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "release tag is not supported semver: $tag" >&2
+            exit 1
+          fi
+
+          if (( ${#tag} > 128 )); then
+            echo "release tag exceeds the OCI tag limit: $tag" >&2
+            exit 1
+          fi
+
+          if [[ "$tag" == *-* ]]; then
+            prerelease=${tag#*-}
+            IFS=. read -r -a identifiers <<<"$prerelease"
+            for identifier in "${identifiers[@]}"; do
+              if [[ "$identifier" =~ ^[0-9]+$ && "$identifier" != 0 && "$identifier" == 0* ]]; then
+                echo "numeric prerelease identifier has a leading zero: $identifier" >&2
+                exit 1
+              fi
+            done
+          fi
+
+          git show-ref --verify --quiet "refs/tags/$tag" || {
+            echo "release tag does not exist: $tag" >&2
+            exit 1
+          }
+          tag_sha=$(git rev-parse "$tag^{commit}")
+          head_sha=$(git rev-parse HEAD)
+          if [[ "$tag_sha" != "$head_sha" ]]; then
+            echo "checked-out HEAD $head_sha does not match $tag ($tag_sha)" >&2
+            exit 1
+          fi
+
+          comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$tag_sha...main" --jq .status)
+          if [[ "$comparison" != ahead && "$comparison" != identical ]]; then
+            echo "$tag is not reachable from origin/main (comparison: $comparison)" >&2
+            exit 1
+          fi
+
+          stable=true
+          [[ "$tag" == *-* ]] && stable=false
+          {
+            echo "tag=$tag"
+            echo "sha=$tag_sha"
+            echo "stable=$stable"
+          } >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: Validate tagged source
+    needs: prepare
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
+
+  build:
+    name: Build immutable component tuple
+    needs: [prepare, ci]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+      BUILD_TAG: build-${{ needs.prepare.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          image: ${{ env.BINFMT_IMAGE }}
+          platforms: arm64
+          cache-image: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
+          cache-binary: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Capture and validate release inputs
+        run: |
+          mkdir -p dist/release
+          ./scripts/release-inputs.sh > dist/release/inputs.json
+          jq . dist/release/inputs.json
+
+      - name: Build children and assemble component indexes
+        env:
+          REGISTRY: ${{ env.REGISTRY_NAMESPACE }}
+          VERSION: ${{ env.BUILD_TAG }}
+        run: |
+          set -euo pipefail
+
+          runtime_base_repo="$REGISTRY/dalec-homebrew-runtime-base"
+          materializer_repo="$REGISTRY/dalec-homebrew-materializer"
+          frontend_repo="$REGISTRY/dalec-homebrew"
+
+          inspect_digest() {
+            local ref=$1 descriptor digest
+            for attempt in $(seq 1 12); do
+              if descriptor=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' 2>/dev/null) \
+                && digest=$(jq -er 'select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<<"$descriptor"); then
+                printf '%s\n' "$digest"
+                return 0
+              fi
+              sleep $((attempt * 2))
+            done
+            echo "could not resolve registry digest for $ref" >&2
+            return 1
+          }
+
+          image_digest_for_platform() {
+            local ref=$1 platform=$2 manifest media_type os arch descriptor
+            os=${platform%/*}
+            arch=${platform#*/}
+            manifest=$(docker buildx imagetools inspect "$ref" --raw)
+            media_type=$(jq -er '.mediaType' <<<"$manifest")
+            case "$media_type" in
+              application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json)
+                descriptor=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}')
+                jq -er 'select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<<"$descriptor"
+                ;;
+              application/vnd.oci.image.index.v1+json|application/vnd.docker.distribution.manifest.list.v2+json)
+                jq -er --arg os "$os" --arg arch "$arch" '
+                  [.manifests[] | select(.platform.os == $os and .platform.architecture == $arch)]
+                  | if length == 1 then .[0].digest else error("expected exactly one platform image") end
+                ' <<<"$manifest"
+                ;;
+              *)
+                echo "unsupported media type for $ref: $media_type" >&2
+                return 1
+                ;;
+            esac
+          }
+
+          build_target() {
+            local target=$1
+            REGISTRY="$REGISTRY" VERSION="$VERSION" docker buildx bake "$target" \
+              --push \
+              --provenance=false \
+              --sbom=false
+          }
+
+          target_tag() {
+            local target=$1
+            REGISTRY="$REGISTRY" VERSION="$VERSION" docker buildx bake --print "$target" \
+              | jq -er --arg target "$target" '.target[$target].tags | if length == 1 then .[0] else error("expected exactly one tag") end'
+          }
+
+          create_index() {
+            local repository=$1 tag=$2 amd64=$3 arm64=$4
+            docker buildx imagetools create \
+              --tag "$repository:$tag" \
+              "$repository@$amd64" \
+              "$repository@$arm64" >&2
+            inspect_digest "$repository:$tag"
+          }
+
+          platform_digest() {
+            local ref=$1 platform=$2 os arch
+            os=${platform%/*}
+            arch=${platform#*/}
+            docker buildx imagetools inspect --raw "$ref" \
+              | jq -er --arg os "$os" --arg arch "$arch" '
+                  [.manifests[] | select(.platform.os == $os and .platform.architecture == $arch)]
+                  | if length == 1 then .[0].digest else error("expected exactly one platform child") end
+                '
+          }
+
+          for target in \
+            runtime-base-amd64 runtime-base-arm64 \
+            materializer-amd64 materializer-arm64; do
+            build_target "$target"
+            tag=$(target_tag "$target")
+            arch=${target##*-}
+            digest=$(image_digest_for_platform "$tag" "linux/$arch")
+            printf '%s=%s\n' "$target" "$digest"
+            printf -v "${target//-/_}" '%s' "$digest"
+          done
+
+          for platform in linux/amd64 linux/arm64; do
+            arch=${platform#*/}
+            runtime_base_var="runtime_base_${arch}"
+            materializer_var="materializer_${arch}"
+            docker run --rm --platform "$platform" \
+              --entrypoint /bin/bash \
+              "$runtime_base_repo@${!runtime_base_var}" \
+              -euc 'test "$(id -u):$(id -g)" = 1000:1000; test ! -e /usr/bin/apt; test -r /usr/share/dalec-homebrew/runtime-base-packages.tsv'
+            docker run --rm --platform "$platform" \
+              --entrypoint /bin/bash \
+              "$materializer_repo@${!materializer_var}" \
+              -euc 'test -x /usr/local/bin/dalec-homebrew-materializer; test -x /home/linuxbrew/.linuxbrew/Homebrew/bin/brew; test -r /usr/share/dalec-homebrew/runtime-base-packages.tsv'
+          done
+
+          runtime_base_index=$(create_index \
+            "$runtime_base_repo" "$VERSION" \
+            "$runtime_base_amd64" "$runtime_base_arm64")
+          materializer_index=$(create_index \
+            "$materializer_repo" "$VERSION" \
+            "$materializer_amd64" "$materializer_arm64")
+
+          [[ $(platform_digest "$runtime_base_repo@$runtime_base_index" linux/amd64) == "$runtime_base_amd64" ]]
+          [[ $(platform_digest "$runtime_base_repo@$runtime_base_index" linux/arm64) == "$runtime_base_arm64" ]]
+          [[ $(platform_digest "$materializer_repo@$materializer_index" linux/amd64) == "$materializer_amd64" ]]
+          [[ $(platform_digest "$materializer_repo@$materializer_index" linux/arm64) == "$materializer_arm64" ]]
+
+          RUNTIME_BASE_REF="$runtime_base_repo@$runtime_base_index" \
+          MATERIALIZER_REF="$materializer_repo@$materializer_index" \
+          FRONTEND_REF='' \
+          REGISTRY="$REGISTRY" \
+          VERSION="$VERSION" \
+            docker buildx bake frontend \
+              --push \
+              --provenance=false \
+              --sbom=false
+
+          frontend_index=$(inspect_digest "$frontend_repo:$VERSION")
+          frontend_amd64=$(platform_digest "$frontend_repo@$frontend_index" linux/amd64)
+          frontend_arm64=$(platform_digest "$frontend_repo@$frontend_index" linux/arm64)
+
+          jq -n \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg git_sha "$RELEASE_SHA" \
+            --arg source_date_epoch "$(jq -er .source_date_epoch dist/release/inputs.json)" \
+            --arg build_invocation "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
+            --arg build_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg frontend_repo "$frontend_repo" \
+            --arg frontend_index "$frontend_index" \
+            --arg frontend_amd64 "$frontend_amd64" \
+            --arg frontend_arm64 "$frontend_arm64" \
+            --arg runtime_base_repo "$runtime_base_repo" \
+            --arg runtime_base_index "$runtime_base_index" \
+            --arg runtime_base_amd64 "$runtime_base_amd64" \
+            --arg runtime_base_arm64 "$runtime_base_arm64" \
+            --arg materializer_repo "$materializer_repo" \
+            --arg materializer_index "$materializer_index" \
+            --arg materializer_amd64 "$materializer_amd64" \
+            --arg materializer_arm64 "$materializer_arm64" \
+            '{
+              schema_version: "dalec-homebrew-release-digests/v1",
+              source: {
+                tag: $release_tag,
+                git_sha: $git_sha,
+                source_date_epoch: $source_date_epoch,
+                build_invocation: $build_invocation,
+                build_run_attempt: $build_run_attempt
+              },
+              components: {
+                frontend: {
+                  repository: $frontend_repo,
+                  index: $frontend_index,
+                  platforms: {
+                    "linux/amd64": $frontend_amd64,
+                    "linux/arm64": $frontend_arm64
+                  }
+                },
+                "runtime-base": {
+                  repository: $runtime_base_repo,
+                  index: $runtime_base_index,
+                  platforms: {
+                    "linux/amd64": $runtime_base_amd64,
+                    "linux/arm64": $runtime_base_arm64
+                  }
+                },
+                materializer: {
+                  repository: $materializer_repo,
+                  index: $materializer_index,
+                  platforms: {
+                    "linux/amd64": $materializer_amd64,
+                    "linux/arm64": $materializer_arm64
+                  }
+                }
+              }
+            }' > dist/release/digests.json
+
+          jq . dist/release/digests.json
+
+      - name: Upload immutable build tuple
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-build
+          path: dist/release
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  integration:
+    name: Integration test (${{ matrix.platform }})
+    needs: [prepare, build]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            slug: linux-amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            slug: linux-arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      - name: Download immutable build tuple
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-build
+          path: dist/release
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
+          cache-binary: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and test a runtime from the released tuple
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          PLATFORM_SLUG: ${{ matrix.slug }}
+          BUILDER: ${{ steps.buildx.outputs.name }}
+        run: |
+          set -euo pipefail
+          component_ref() {
+            local component=$1
+            jq -er --arg component "$component" '
+              .components[$component].repository + "@" + .components[$component].index
+            ' dist/release/digests.json
+          }
+
+          runtime_base_ref=$(component_ref runtime-base)
+          materializer_ref=$(component_ref materializer)
+          frontend_ref=$(component_ref frontend)
+          source_date_epoch=$(jq -er .source.source_date_epoch dist/release/digests.json)
+
+          specs=(live-test live-python live-glibc live-redis live-graphviz)
+          mkdir -p runtime-evidence
+          for spec in "${specs[@]}"; do
+            final_image="dalec-homebrew-live:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${PLATFORM_SLUG}-${spec}"
+            DALEC_HOMEBREW_LIVE_BUILDER="$BUILDER" \
+            DALEC_HOMEBREW_LIVE_PLATFORM="$PLATFORM" \
+            DALEC_HOMEBREW_LIVE_SPEC="examples/${spec}.yaml" \
+            DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF="$runtime_base_ref" \
+            DALEC_HOMEBREW_LIVE_MATERIALIZER_REF="$materializer_ref" \
+            DALEC_HOMEBREW_LIVE_FRONTEND_REF="$frontend_ref" \
+            DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH="$source_date_epoch" \
+            DALEC_HOMEBREW_LIVE_IMAGE="$final_image" \
+            DALEC_HOMEBREW_LIVE_OUTPUT=load \
+            DALEC_HOMEBREW_LIVE_PROGRESS=plain \
+              ./scripts/live-test.sh
+
+            evidence_root="runtime-evidence/${spec}"
+            mkdir -p "$evidence_root"
+            container=$(docker create --platform "$PLATFORM" "$final_image")
+            docker cp "$container:/usr/share/dalec-homebrew/." "$evidence_root/"
+            docker rm -v "$container" >/dev/null
+            tar -C "$evidence_root" -czf "runtime-evidence-${PLATFORM_SLUG}-${spec}.tar.gz" .
+          done
+
+      - name: Upload runtime evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-evidence-${{ matrix.slug }}
+          path: runtime-evidence-${{ matrix.slug }}-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  evidence:
+    name: Evidence (${{ matrix.component }}, ${{ matrix.platform }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: frontend
+            platform: linux/amd64
+            slug: frontend-linux-amd64
+          - component: frontend
+            platform: linux/arm64
+            slug: frontend-linux-arm64
+          - component: runtime-base
+            platform: linux/amd64
+            slug: runtime-base-linux-amd64
+          - component: runtime-base
+            platform: linux/arm64
+            slug: runtime-base-linux-arm64
+          - component: materializer
+            platform: linux/amd64
+            slug: materializer-linux-amd64
+          - component: materializer
+            platform: linux/arm64
+            slug: materializer-linux-arm64
+    steps:
+      - name: Download immutable build tuple
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-build
+          path: dist/release
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve immutable subject
+        id: subject
+        env:
+          COMPONENT: ${{ matrix.component }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          repository=$(jq -er --arg component "$COMPONENT" '.components[$component].repository' dist/release/digests.json)
+          digest=$(jq -er --arg component "$COMPONENT" --arg platform "$PLATFORM" '.components[$component].platforms[$platform]' dist/release/digests.json)
+          echo "ref=$repository@$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: ${{ env.SYFT_VERSION }}
+
+      - name: Generate SPDX SBOM
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+          SUBJECT: ${{ steps.subject.outputs.ref }}
+          PLATFORM: ${{ matrix.platform }}
+          SLUG: ${{ matrix.slug }}
+        run: |
+          mkdir -p evidence
+          "$SYFT" scan --platform "$PLATFORM" "$SUBJECT" \
+            -o "spdx-json=evidence/sbom-${SLUG}.spdx.json"
+
+      - name: Scan for fixed critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: ${{ matrix.platform }}
+        with:
+          image-ref: ${{ steps.subject.outputs.ref }}
+          format: json
+          output: evidence/vulnerability-${{ matrix.slug }}.json
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          version: ${{ env.TRIVY_VERSION }}
+          cache: false
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: evidence-${{ matrix.slug }}
+          path: evidence
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true
+
+  sign:
+    name: Sign and attest immutable tuple
+    needs: [prepare, build, integration, evidence]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      packages: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
+          cache-binary: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.2
+
+      - name: Download immutable build tuple
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-build
+          path: dist/release
+
+      - name: Download platform evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: evidence-*
+          path: dist/release/evidence
+          merge-multiple: true
+
+      - name: Download runtime evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: runtime-evidence-*
+          path: dist/release/runtime-evidence
+          merge-multiple: true
+
+      - name: Verify integration metadata snapshots match across platforms
+        run: |
+          set -euo pipefail
+          for spec in live-test live-python live-glibc live-redis live-graphviz; do
+            amd64="dist/release/runtime-evidence/runtime-evidence-linux-amd64-${spec}.tar.gz"
+            arm64="dist/release/runtime-evidence/runtime-evidence-linux-arm64-${spec}.tar.gz"
+            for archive in "$amd64" "$arm64"; do
+              test -s "$archive"
+            done
+            metadata_filter='
+              def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
+              if .schema_version != "dalec-homebrew-resolution/v1" then
+                error("unexpected resolution schema")
+              elif (.metadata | type) != "object" then
+                error("resolution metadata is missing")
+              elif ([.metadata.digest, .metadata.formula_digest, .metadata.migration_digest, .metadata.formula_envelope_digest, .metadata.migration_envelope_digest] | all(sha256)) | not then
+                error("resolution metadata digests are missing or invalid")
+              else
+                {metadata: {digest: .metadata.digest, formula_digest: .metadata.formula_digest, migration_digest: .metadata.migration_digest, formula_envelope_digest: .metadata.formula_envelope_digest, migration_envelope_digest: .metadata.migration_envelope_digest}}
+              end
+            '
+            tar -xOf "$amd64" ./resolution.json \
+              | jq -S -e "$metadata_filter" \
+              > "$RUNNER_TEMP/${spec}-amd64-metadata.json"
+            tar -xOf "$arm64" ./resolution.json \
+              | jq -S -e "$metadata_filter" \
+              > "$RUNNER_TEMP/${spec}-arm64-metadata.json"
+            diff -u \
+              "$RUNNER_TEMP/${spec}-amd64-metadata.json" \
+              "$RUNNER_TEMP/${spec}-arm64-metadata.json"
+          done
+
+      - name: Generate and verify component manifest
+        run: |
+          set -euo pipefail
+          ref() {
+            local component=$1 kind=$2 platform=${3:-}
+            if [[ "$kind" == index ]]; then
+              jq -er --arg component "$component" '.components[$component].repository + "@" + .components[$component].index' dist/release/digests.json
+            else
+              jq -er --arg component "$component" --arg platform "$platform" '.components[$component].repository + "@" + .components[$component].platforms[$platform]' dist/release/digests.json
+            fi
+          }
+
+          go run ./cmd/release-manifest \
+            --frontend-index "$(ref frontend index)" \
+            --frontend-amd64 "$(ref frontend child linux/amd64)" \
+            --frontend-arm64 "$(ref frontend child linux/arm64)" \
+            --runtime-base-index "$(ref runtime-base index)" \
+            --runtime-base-amd64 "$(ref runtime-base child linux/amd64)" \
+            --runtime-base-arm64 "$(ref runtime-base child linux/arm64)" \
+            --materializer-index "$(ref materializer index)" \
+            --materializer-amd64 "$(ref materializer child linux/amd64)" \
+            --materializer-arm64 "$(ref materializer child linux/arm64)" \
+            --homebrew-commit "$(jq -er .homebrew_commit dist/release/inputs.json)" \
+            --portable-ruby-version "$(jq -er .portable_ruby_version dist/release/inputs.json)" \
+            --verification-keys-digest "$(jq -er .verification_keys_digest dist/release/inputs.json)" \
+            --dalec-module "$(jq -er .dalec_module dist/release/inputs.json)" \
+            --buildkit-module "$(jq -er .buildkit_module dist/release/inputs.json)" \
+            --output dist/release/components.json
+
+          go run ./cmd/release-verify dist/release/components.json \
+            | tee dist/release/components.digest
+
+      - name: Generate SLSA provenance predicate
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          workflow_git_ref=${WORKFLOW_REF##*@}
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg sha "$RELEASE_SHA" \
+            --arg tag "$RELEASE_TAG" \
+            --arg workflow_ref "$workflow_git_ref" \
+            --arg workflow_sha "$WORKFLOW_SHA" \
+            --arg invocation "$(jq -er .source.build_invocation dist/release/digests.json)" \
+            --arg source_date_epoch "$(jq -er .source_date_epoch dist/release/inputs.json)" \
+            '{
+              builder: {id: "https://github.com/actions/runner"},
+              buildType: "https://github.com/" + $repository + "/.github/workflows/release.yml@v1",
+              invocation: {
+                configSource: {
+                  uri: "git+https://github.com/" + $repository + "@" + $workflow_ref,
+                  digest: {sha1: $workflow_sha},
+                  entryPoint: ".github/workflows/release.yml"
+                },
+                parameters: {
+                  tag: $tag,
+                  source_date_epoch: $source_date_epoch,
+                  buildx_version: env.BUILDX_VERSION,
+                  buildkit_image: env.BUILDKIT_IMAGE,
+                  binfmt_image: env.BINFMT_IMAGE,
+                  syft_version: env.SYFT_VERSION,
+                  trivy_version: env.TRIVY_VERSION,
+                  workflow_ref: $workflow_ref,
+                  workflow_sha: $workflow_sha
+                },
+                environment: {}
+              },
+              metadata: {
+                buildInvocationId: $invocation,
+                completeness: {parameters: true, environment: false, materials: false},
+                reproducible: false
+              },
+              materials: [{
+                uri: "git+https://github.com/" + $repository + "@refs/tags/" + $tag,
+                digest: {sha1: $sha}
+              }]
+            }' > dist/release/provenance.json
+
+      - name: Sign images and attach provenance and SBOM attestations
+        env:
+          CERTIFICATE_IDENTITY_REGEXP: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/heads/main$
+          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+
+          mapfile -t subjects < <(jq -r '
+            .components[]
+            | .repository as $repository
+            | ($repository + "@" + .index),
+              (.platforms[] | $repository + "@" + .)
+          ' dist/release/digests.json | sort -u)
+
+          for subject in "${subjects[@]}"; do
+            cosign sign --yes "$subject"
+            cosign attest --yes \
+              --type slsaprovenance02 \
+              --predicate dist/release/provenance.json \
+              "$subject"
+            cosign verify \
+              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$subject" >/dev/null
+            cosign verify-attestation \
+              --type slsaprovenance02 \
+              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$subject" >/dev/null
+          done
+
+          while IFS=$'\t' read -r component platform subject; do
+            slug="${component}-${platform//\//-}"
+            predicate="dist/release/evidence/sbom-${slug}.spdx.json"
+            vulnerability="dist/release/evidence/vulnerability-${slug}.json"
+            test -s "$predicate"
+            test -s "$vulnerability"
+            cosign attest --yes \
+              --type spdxjson \
+              --predicate "$predicate" \
+              "$subject"
+            cosign verify-attestation \
+              --type spdxjson \
+              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$subject" >/dev/null
+          done < <(jq -r '
+            .components
+            | to_entries[]
+            | .key as $component
+            | .value.repository as $repository
+            | .value.platforms
+            | to_entries[]
+            | [$component, .key, ($repository + "@" + .value)]
+            | @tsv
+          ' dist/release/digests.json)
+
+      - name: Flatten release evidence
+        run: |
+          find dist/release/evidence -maxdepth 1 -type f -exec mv {} dist/release/ \;
+          find dist/release/runtime-evidence -maxdepth 1 -type f -exec mv {} dist/release/ \;
+          rmdir dist/release/evidence dist/release/runtime-evidence
+
+      - name: Sign release records
+        env:
+          CERTIFICATE_IDENTITY_REGEXP: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/heads/main$
+          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          checksums="$RUNNER_TEMP/SHA256SUMS"
+          (
+            cd dist/release
+            find . -type f ! -name '*.bundle' ! -name SHA256SUMS -print0 \
+              | sort -z \
+              | xargs -0 sha256sum > "$checksums"
+          )
+          mv "$checksums" dist/release/SHA256SUMS
+          cosign sign-blob --yes \
+            --bundle dist/release/components.json.bundle \
+            dist/release/components.json
+          cosign sign-blob --yes \
+            --bundle dist/release/SHA256SUMS.bundle \
+            dist/release/SHA256SUMS
+          cosign verify-blob \
+            --bundle dist/release/components.json.bundle \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            dist/release/components.json
+          cosign verify-blob \
+            --bundle dist/release/SHA256SUMS.bundle \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            dist/release/SHA256SUMS
+
+      - name: Upload signed release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-bundle
+          path: dist/release
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  promote:
+    name: Promote tested digests
+    needs: [prepare, sign]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+      STABLE: ${{ needs.prepare.outputs.stable }}
+    steps:
+      - name: Check out immutable release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Revalidate release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG"); then
+            echo "refs/tags/$RELEASE_TAG was deleted during the release" >&2
+            exit 1
+          fi
+          object_type=$(jq -er '.object.type' <<<"$object")
+          actual=$(jq -er '.object.sha' <<<"$object")
+          for _ in $(seq 1 8); do
+            [[ "$object_type" == tag ]] || break
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$actual")
+            object_type=$(jq -er '.object.type' <<<"$object")
+            actual=$(jq -er '.object.sha' <<<"$object")
+          done
+          if [[ "$object_type" != commit ]]; then
+            echo "refs/tags/$RELEASE_TAG does not peel to a commit" >&2
+            exit 1
+          fi
+          if [[ "$actual" != "$RELEASE_SHA" ]]; then
+            echo "$RELEASE_TAG moved from $RELEASE_SHA to $actual during the release" >&2
+            exit 1
+          fi
+
+      - name: Download signed release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-bundle
+          path: dist/release
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
+          cache-binary: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.2
+
+      - name: Verify signed bundle checksums
+        run: (cd dist/release && sha256sum -c SHA256SUMS)
+
+      - name: Reverify release signatures and attestations
+        env:
+          CERTIFICATE_IDENTITY_REGEXP: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/heads/main$
+          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          cosign verify-blob \
+            --bundle dist/release/components.json.bundle \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            dist/release/components.json
+          cosign verify-blob \
+            --bundle dist/release/SHA256SUMS.bundle \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            dist/release/SHA256SUMS
+
+          mapfile -t subjects < <(jq -r '
+            .components[]
+            | .repository as $repository
+            | ($repository + "@" + .index),
+              (.platforms[] | $repository + "@" + .)
+          ' dist/release/digests.json | sort -u)
+          for subject in "${subjects[@]}"; do
+            cosign verify \
+              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$subject" >/dev/null
+            cosign verify-attestation \
+              --type slsaprovenance02 \
+              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$subject" >/dev/null
+          done
+
+          while IFS= read -r subject; do
+            cosign verify-attestation \
+              --type spdxjson \
+              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$subject" >/dev/null
+          done < <(jq -r '
+            .components[]
+            | .repository as $repository
+            | .platforms[]
+            | $repository + "@" + .
+          ' dist/release/digests.json | sort -u)
+
+      - name: Add release tags without rebuilding
+        run: |
+          set -euo pipefail
+          read_registry_digest() {
+            local ref=$1 descriptor digest attempt error_file errors_file all_missing
+            errors_file=$(mktemp "$RUNNER_TEMP/registry-inspect.XXXXXX")
+            all_missing=true
+            for attempt in $(seq 1 5); do
+              error_file=$(mktemp "$RUNNER_TEMP/registry-inspect-attempt.XXXXXX")
+              if descriptor=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' 2>"$error_file"); then
+                if digest=$(jq -er 'select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<<"$descriptor" 2>>"$errors_file"); then
+                  rm -f "$error_file" "$errors_file"
+                  printf '%s\n' "$digest"
+                  return 0
+                fi
+                all_missing=false
+                printf 'malformed manifest descriptor for %s:\n%s\n' "$ref" "$descriptor" >> "$errors_file"
+              else
+                {
+                  printf 'attempt %s for %s:\n' "$attempt" "$ref"
+                  cat "$error_file"
+                } >> "$errors_file"
+                if ! grep -Eiq '(404 Not Found|status code 404|manifest unknown|MANIFEST_UNKNOWN|: not found([[:space:]]|$))' "$error_file"; then
+                  all_missing=false
+                fi
+              fi
+              rm -f "$error_file"
+              sleep $((attempt * 2))
+            done
+
+            if [[ "$all_missing" == true ]]; then
+              rm -f "$errors_file"
+              return 3
+            fi
+            cat "$errors_file" >&2
+            rm -f "$errors_file"
+            return 1
+          }
+
+          require_expected_or_missing_tag() {
+            local component=$1 repository digest existing status
+            repository=$(jq -er --arg component "$component" '.components[$component].repository' dist/release/digests.json)
+            digest=$(jq -er --arg component "$component" '.components[$component].index' dist/release/digests.json)
+            if existing=$(read_registry_digest "$repository:$RELEASE_TAG"); then
+              if [[ "$existing" != "$digest" ]]; then
+                echo "immutable release tag $repository:$RELEASE_TAG already points to $existing, not $digest" >&2
+                exit 1
+              fi
+              return 0
+            else
+              status=$?
+            fi
+            if (( status != 3 )); then
+              echo "could not safely inspect immutable release tag $repository:$RELEASE_TAG" >&2
+              exit "$status"
+            fi
+          }
+
+          for component in runtime-base materializer frontend; do
+            require_expected_or_missing_tag "$component"
+          done
+
+          promote() {
+            local component=$1 repository digest existing status published
+            repository=$(jq -er --arg component "$component" '.components[$component].repository' dist/release/digests.json)
+            digest=$(jq -er --arg component "$component" '.components[$component].index' dist/release/digests.json)
+
+            if existing=$(read_registry_digest "$repository:$RELEASE_TAG"); then
+              [[ "$existing" == "$digest" ]] || {
+                echo "immutable release tag $repository:$RELEASE_TAG changed after preflight" >&2
+                exit 1
+              }
+              return 0
+            else
+              status=$?
+            fi
+            if (( status != 3 )); then
+              echo "could not safely re-inspect immutable release tag $repository:$RELEASE_TAG" >&2
+              exit "$status"
+            fi
+
+            docker buildx imagetools create \
+              --tag "$repository:$RELEASE_TAG" \
+              "$repository@$digest"
+            if ! published=$(read_registry_digest "$repository:$RELEASE_TAG"); then
+              echo "could not verify promoted release tag $repository:$RELEASE_TAG" >&2
+              exit 1
+            fi
+            [[ "$published" == "$digest" ]] || {
+              echo "promoted release tag $repository:$RELEASE_TAG resolved to $published, not $digest" >&2
+              exit 1
+            }
+          }
+
+          promote runtime-base
+          promote materializer
+          promote frontend
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CERTIFICATE_IDENTITY_REGEXP: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/heads/main$
+          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          resolve_release_tag() {
+            local object object_type actual
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")
+            object_type=$(jq -er '.object.type' <<<"$object")
+            actual=$(jq -er '.object.sha' <<<"$object")
+            for _ in $(seq 1 8); do
+              [[ "$object_type" == tag ]] || break
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$actual")
+              object_type=$(jq -er '.object.type' <<<"$object")
+              actual=$(jq -er '.object.sha' <<<"$object")
+            done
+            [[ "$object_type" == commit ]] || return 1
+            printf '%s\n' "$actual"
+          }
+          require_release_tag() {
+            local actual
+            actual=$(resolve_release_tag) || {
+              echo "refs/tags/$RELEASE_TAG no longer resolves to a commit" >&2
+              exit 1
+            }
+            [[ "$actual" == "$RELEASE_SHA" ]] || {
+              echo "refs/tags/$RELEASE_TAG moved from $RELEASE_SHA to $actual" >&2
+              exit 1
+            }
+          }
+
+          require_release_tag
+          release_args=(--verify-tag --generate-notes --title "$RELEASE_TAG" --latest=false)
+          [[ "$STABLE" == true ]] || release_args+=(--prerelease)
+
+          mapfile -t assets < <(find dist/release -maxdepth 1 -type f | sort)
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            existing="$RUNNER_TEMP/existing-release"
+            mkdir -p "$existing"
+            gh release download "$RELEASE_TAG" \
+              --dir "$existing" \
+              --repo "$GITHUB_REPOSITORY"
+            cosign verify-blob \
+              --bundle "$existing/SHA256SUMS.bundle" \
+              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$existing/SHA256SUMS"
+            cosign verify-blob \
+              --bundle "$existing/components.json.bundle" \
+              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$existing/components.json"
+            (cd "$existing" && sha256sum -c SHA256SUMS)
+            jq -S 'del(.source.build_invocation, .source.build_run_attempt)' \
+              dist/release/digests.json > "$RUNNER_TEMP/current-digests.json"
+            jq -S 'del(.source.build_invocation, .source.build_run_attempt)' \
+              "$existing/digests.json" > "$RUNNER_TEMP/existing-digests.json"
+            cmp "$RUNNER_TEMP/current-digests.json" "$RUNNER_TEMP/existing-digests.json" || {
+              echo "existing $RELEASE_TAG asset differs: digests.json" >&2
+              exit 1
+            }
+            for name in inputs.json components.digest; do
+              cmp "dist/release/$name" "$existing/$name" || {
+                echo "existing $RELEASE_TAG asset differs: $name" >&2
+                exit 1
+              }
+            done
+            require_release_tag
+            echo "$RELEASE_TAG already exists with the same immutable tuple; release assets were not modified"
+          else
+            require_release_tag
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              "${release_args[@]}" \
+              --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Release summary
+        run: |
+          {
+            echo "### Released $RELEASE_TAG"
+            echo
+            jq -r '
+              .components
+              | to_entries[]
+              | "- `" + .value.repository + "@" + .value.index + "`"
+            ' dist/release/digests.json
+            echo
+            echo "The release assets include the signed component manifest, input tuple, digests, SBOMs, vulnerability reports, provenance predicate, and checksums."
+          } >> "$GITHUB_STEP_SUMMARY"

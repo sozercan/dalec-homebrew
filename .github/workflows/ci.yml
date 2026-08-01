@@ -1,6 +1,12 @@
 name: ci
 
 on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref or SHA to validate
+        required: false
+        type: string
   pull_request:
   push:
     branches: [main]
@@ -8,38 +14,54 @@ on:
 permissions:
   contents: read
 
+env:
+  BUILDX_VERSION: v0.36.0
+  BUILDKIT_IMAGE: docker.io/moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2
+  ACTIONLINT_IMAGE: docker.io/rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+
 jobs:
   go:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.25.9
+          go-version-file: go.mod
           cache: true
       - run: go mod download
       - run: go mod tidy
       - run: git diff --exit-code -- go.mod go.sum
       - run: ./scripts/check.sh
       - run: make build
+      - run: ./scripts/release-inputs.sh > /tmp/release-inputs.json
+      - run: jq -e '.schema_version == "dalec-homebrew-release-inputs/v1"' /tmp/release-inputs.json
       - run: git diff --check
 
   dockerfile:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
-      - uses: docker/setup-buildx-action@v3
-      - run: docker buildx bake --print
+      - name: Lint GitHub Actions workflows
+        run: docker run --rm -v "$PWD:/repo:ro" -w /repo "$ACTIONLINT_IMAGE"
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
+          cache-binary: false
+      - run: docker buildx bake --print release-children frontend
       - name: Build gateway frontend image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           target: frontend
           platforms: linux/amd64
           push: false
+          provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max

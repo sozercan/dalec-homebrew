@@ -1,0 +1,17 @@
+# Release-critical trust and reproducibility inputs.
+/.github/CODEOWNERS @sozercan
+/.github/workflows/ci.yml @sozercan
+/.github/workflows/release.yml @sozercan
+/Dockerfile @sozercan
+/docker-bake.hcl @sozercan
+/go.mod @sozercan
+/go.sum @sozercan
+/chisel/ @sozercan
+/internal/homebrew/metadata/homebrew-1.pub @sozercan
+/policy/ @sozercan
+/release/ @sozercan
+/scripts/check.sh @sozercan
+/scripts/live-test.sh @sozercan
+/scripts/live-test-test.sh @sozercan
+/scripts/release-inputs.sh @sozercan
+/cmd/release-manifest/ @sozercan

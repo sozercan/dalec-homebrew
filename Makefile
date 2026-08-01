@@ -18,5 +18,6 @@ build:
 	go build -trimpath -o bin/dalec-homebrew-materializer ./cmd/materializer
 	go build -trimpath -o bin/dalec-homebrew-record-verify ./cmd/record-verify
 	go build -trimpath -o bin/dalec-homebrew-release-verify ./cmd/release-verify
+	go build -trimpath -o bin/dalec-homebrew-release-manifest ./cmd/release-manifest
 	go build -trimpath -o bin/dalec-homebrew-test-runner ./cmd/test-runner
 	go build -trimpath -o bin/dalec-homebrew-resolve ./cmd/resolve

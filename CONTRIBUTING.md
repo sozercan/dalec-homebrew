@@ -13,8 +13,9 @@ For component and integration work:
 
 - Docker Buildx or `buildctl` backed by BuildKit 0.31.2 or newer
 - `jq`
-- A writable OCI registry reachable from the selected BuildKit daemon
-- Outbound access to GitHub and the pinned Ubuntu snapshot while building components
+- For component rebuild mode, a writable OCI registry reachable from the selected BuildKit daemon
+- For published-tuple mode, pull access from the selected BuildKit daemon to each digest-pinned component reference
+- Outbound access to GitHub and the pinned Ubuntu snapshot while rebuilding components
 
 Additional reporting and VM validation tools are listed in their sections below.
 
@@ -37,7 +38,7 @@ Use focused commands while iterating, then run the complete suite before opening
 | --- | --- |
 | `make test` | All Go tests |
 | `make vet` | `go vet ./...` |
-| `make build` | Host builds for the six primary commands |
+| `make build` | Host builds for the primary command binaries, including `dalec-homebrew-release-manifest` |
 | `make check` | Shell syntax checks, tests, vet, selected race tests, and Linux cross-builds for every command on `amd64` and `arm64` |
 
 The full validation entrypoint is also available directly:
@@ -50,14 +51,16 @@ Cross-compiled binaries are written to `/tmp`; validation should not modify the 
 
 ## Run the live BuildKit test
 
-The live helper performs one complete, single-platform build:
+The live helper performs one complete, single-platform build. By default it:
 
-1. build and push a runtime-base component,
-2. build and push a materializer component,
-3. build and push a frontend bound to those component digests,
-4. replace the example's syntax line with the frontend digest,
-5. build and test the final runtime image, and
-6. load or push the result and print the immutable component references.
+1. builds and pushes a runtime-base component,
+2. builds and pushes a materializer component,
+3. builds and pushes a frontend bound to those component digests,
+4. replaces the example's syntax line with the frontend digest,
+5. builds and tests the final runtime image, and
+6. loads or pushes the result and prints the immutable component references.
+
+To test an already published release tuple, supply all three digest-pinned component reference variables listed below. In that mode the helper skips the component builds and forwards the tuple to the final build so the release-bound frontend verifies it.
 
 ```console
 DALEC_HOMEBREW_LIVE_BUILDER=dalec-homebrew-live-builder \
@@ -67,9 +70,9 @@ DALEC_HOMEBREW_LIVE_IMAGE=dalec-homebrew-live:arm64 \
 ./scripts/live-test.sh
 ```
 
-The repository does not provision the builder or registry. The registry must be reachable from the BuildKit daemon, not only from the host. An HTTP registry is fine for local development when it is configured as insecure in that daemon.
+The repository does not provision the builder or registry. In component rebuild mode, the writable registry must be reachable from the BuildKit daemon, not only from the host. An HTTP registry is fine for local development when it is configured as insecure in that daemon. Published-tuple mode does not push components, but the daemon must be able to pull all three digest references.
 
-The helper uses temporary mutable tags for publication but consumes every component by digest. It disables provenance and does not sign, scan, promote, or clean up registry artifacts.
+In component rebuild mode, the helper uses temporary mutable tags for publication but consumes every component by digest. It disables provenance and does not sign, scan, promote, or clean up registry artifacts.
 
 Optional variables:
 
@@ -79,9 +82,14 @@ Optional variables:
 | `DALEC_HOMEBREW_LIVE_IMAGE` | `dalec-homebrew-live:dev` | Final local or registry tag |
 | `DALEC_HOMEBREW_LIVE_OUTPUT` | `load` | `load` the final image or `push` it |
 | `DALEC_HOMEBREW_LIVE_PROGRESS` | `plain` | Buildx progress output |
-| `DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH` | `1781049600` | Reproducible component timestamp |
-| `DALEC_HOMEBREW_LIVE_RUN_ID` | timestamp and architecture | Temporary component tag suffix |
-| `DALEC_HOMEBREW_LIVE_UBUNTU_BASE` | pinned platform child | Runtime base override for local testing |
+| `DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH` | `1781049600` | Reproducible component timestamp (rebuild mode) |
+| `DALEC_HOMEBREW_LIVE_RUN_ID` | timestamp and architecture | Temporary component tag suffix (rebuild mode) |
+| `DALEC_HOMEBREW_LIVE_UBUNTU_BASE` | pinned platform child | Runtime base override for local rebuilding |
+| `DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF` | unset | Published runtime-base index reference (`image@sha256:...`) |
+| `DALEC_HOMEBREW_LIVE_MATERIALIZER_REF` | unset | Published materializer index reference (`image@sha256:...`) |
+| `DALEC_HOMEBREW_LIVE_FRONTEND_REF` | unset | Published frontend index reference (`image@sha256:...`) |
+
+The three published component references must be supplied together and must use `@sha256:` digests.
 
 When `DALEC_HOMEBREW_LIVE_OUTPUT=push`, the helper prints `DALEC_HOMEBREW_LIVE_FINAL_REF` with the immutable final manifest digest.
 
@@ -144,9 +152,10 @@ The standalone resolver is a diagnostic tool. It authenticates Homebrew metadata
 go run ./cmd/record-verify path/to/release-bound-resolution.json
 ```
 
-Validate and digest a populated component manifest with:
+Generate a canonical component manifest from immutable index and child references with `cmd/release-manifest` (run it with `--help` for the complete flag list), then validate and digest the result:
 
 ```console
+go run ./cmd/release-manifest --help
 go run ./cmd/release-verify path/to/components.json
 ```
 
@@ -157,7 +166,8 @@ go run ./cmd/release-verify path/to/components.json
 [`docker-bake.hcl`](docker-bake.hcl) exposes platform-specific runtime-base and materializer targets plus the multi-platform frontend target:
 
 ```console
-docker buildx bake --print
+./scripts/release-inputs.sh | jq .
+docker buildx bake --print release-children frontend
 docker buildx bake runtime-base-amd64 materializer-amd64
 ```
 

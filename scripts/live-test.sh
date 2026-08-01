@@ -12,20 +12,64 @@ FINAL_IMAGE=${DALEC_HOMEBREW_LIVE_IMAGE:-dalec-homebrew-live:dev}
 FINAL_OUTPUT=${DALEC_HOMEBREW_LIVE_OUTPUT:-load}
 PROGRESS=${DALEC_HOMEBREW_LIVE_PROGRESS:-plain}
 SOURCE_DATE_EPOCH=${DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH:-1781049600}
+BASE_REF=${DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF:-}
+MATERIALIZER_REF=${DALEC_HOMEBREW_LIVE_MATERIALIZER_REF:-}
+FRONTEND_REF=${DALEC_HOMEBREW_LIVE_FRONTEND_REF:-}
 
-if [[ -z "$BUILDER" || -z "$REGISTRY" || -z "$PLATFORM" ]]; then
+require_digest_ref() {
+  local name=$1
+  local value=$2
+  if [[ ! "$value" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+    echo "$name must be a digest-pinned OCI reference using sha256" >&2
+    exit 64
+  fi
+}
+
+COMPONENT_REF_COUNT=0
+for ref in "$BASE_REF" "$MATERIALIZER_REF" "$FRONTEND_REF"; do
+  if [[ -n "$ref" ]]; then
+    COMPONENT_REF_COUNT=$((COMPONENT_REF_COUNT + 1))
+  fi
+done
+
+if (( COMPONENT_REF_COUNT != 0 && COMPONENT_REF_COUNT != 3 )); then
+  echo "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF, DALEC_HOMEBREW_LIVE_MATERIALIZER_REF, and DALEC_HOMEBREW_LIVE_FRONTEND_REF must be set together" >&2
+  exit 64
+fi
+
+USE_PUBLISHED_COMPONENTS=0
+if (( COMPONENT_REF_COUNT == 3 )); then
+  USE_PUBLISHED_COMPONENTS=1
+  require_digest_ref DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF "$BASE_REF"
+  require_digest_ref DALEC_HOMEBREW_LIVE_MATERIALIZER_REF "$MATERIALIZER_REF"
+  require_digest_ref DALEC_HOMEBREW_LIVE_FRONTEND_REF "$FRONTEND_REF"
+fi
+
+if [[ -z "$BUILDER" || -z "$PLATFORM" || ( "$USE_PUBLISHED_COMPONENTS" -eq 0 && -z "$REGISTRY" ) ]]; then
   cat >&2 <<'USAGE'
-usage: DALEC_HOMEBREW_LIVE_BUILDER=<buildx-builder> \
-       DALEC_HOMEBREW_LIVE_REGISTRY=<registry-host> \
-       DALEC_HOMEBREW_LIVE_PLATFORM=linux/<amd64|arm64> \
-       [DALEC_HOMEBREW_LIVE_SPEC=examples/live-test.yaml] \
-       [DALEC_HOMEBREW_LIVE_IMAGE=dalec-homebrew-live:dev] \
-       [DALEC_HOMEBREW_LIVE_OUTPUT=load|push] \
-       ./scripts/live-test.sh
+usage: rebuild components:
+       DALEC_HOMEBREW_LIVE_BUILDER=<buildx-builder> \
+         DALEC_HOMEBREW_LIVE_REGISTRY=<registry-host> \
+         DALEC_HOMEBREW_LIVE_PLATFORM=linux/<amd64|arm64> \
+         ./scripts/live-test.sh
+
+       test a published component tuple:
+       DALEC_HOMEBREW_LIVE_BUILDER=<buildx-builder> \
+         DALEC_HOMEBREW_LIVE_PLATFORM=linux/<amd64|arm64> \
+         DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=<image@sha256:digest> \
+         DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=<image@sha256:digest> \
+         DALEC_HOMEBREW_LIVE_FRONTEND_REF=<image@sha256:digest> \
+         ./scripts/live-test.sh
+
+Optional settings for either mode:
+       DALEC_HOMEBREW_LIVE_SPEC=examples/live-test.yaml
+       DALEC_HOMEBREW_LIVE_IMAGE=dalec-homebrew-live:dev
+       DALEC_HOMEBREW_LIVE_OUTPUT=load|push
 
 The registry must be reachable from the selected builder and configured as an
-insecure HTTP registry when appropriate. Component and frontend references are
-always consumed by digest even though temporary tags are used for publication.
+insecure HTTP registry when appropriate when rebuilding components. Component
+and frontend references are always consumed by digest even though temporary
+tags are used for publication.
 USAGE
   exit 64
 fi
@@ -76,65 +120,80 @@ trap cleanup EXIT
 
 docker buildx inspect "$BUILDER" >/dev/null
 
-echo "==> Building runtime base for $PLATFORM"
-docker buildx build \
-  --builder "$BUILDER" \
-  --platform "$PLATFORM" \
-  --target runtime-base \
-  --build-arg "RUNTIME_BASE=$RUNTIME_BASE" \
-  --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
-  --tag "$REGISTRY/dalec-homebrew-runtime-base:$RUN_ID" \
-  --metadata-file "$WORK/base.json" \
-  --provenance=false \
-  --progress="$PROGRESS" \
-  --push \
-  .
-BASE_REF="$REGISTRY/dalec-homebrew-runtime-base@$(jq -er '."containerimage.digest"' "$WORK/base.json")"
+if (( USE_PUBLISHED_COMPONENTS == 0 )); then
+  echo "==> Building runtime base for $PLATFORM"
+  docker buildx build \
+    --builder "$BUILDER" \
+    --platform "$PLATFORM" \
+    --target runtime-base \
+    --build-arg "RUNTIME_BASE=$RUNTIME_BASE" \
+    --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
+    --tag "$REGISTRY/dalec-homebrew-runtime-base:$RUN_ID" \
+    --metadata-file "$WORK/base.json" \
+    --provenance=false \
+    --progress="$PROGRESS" \
+    --push \
+    .
+  BASE_REF="$REGISTRY/dalec-homebrew-runtime-base@$(jq -er '."containerimage.digest"' "$WORK/base.json")"
 
-echo "==> Building materializer for $PLATFORM"
-docker buildx build \
-  --builder "$BUILDER" \
-  --platform "$PLATFORM" \
-  --target materializer \
-  --build-arg "RUNTIME_BASE=$RUNTIME_BASE" \
-  --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
-  --tag "$REGISTRY/dalec-homebrew-materializer:$RUN_ID" \
-  --metadata-file "$WORK/materializer.json" \
-  --provenance=false \
-  --progress="$PROGRESS" \
-  --push \
-  .
-MATERIALIZER_REF="$REGISTRY/dalec-homebrew-materializer@$(jq -er '."containerimage.digest"' "$WORK/materializer.json")"
+  echo "==> Building materializer for $PLATFORM"
+  docker buildx build \
+    --builder "$BUILDER" \
+    --platform "$PLATFORM" \
+    --target materializer \
+    --build-arg "RUNTIME_BASE=$RUNTIME_BASE" \
+    --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
+    --tag "$REGISTRY/dalec-homebrew-materializer:$RUN_ID" \
+    --metadata-file "$WORK/materializer.json" \
+    --provenance=false \
+    --progress="$PROGRESS" \
+    --push \
+    .
+  MATERIALIZER_REF="$REGISTRY/dalec-homebrew-materializer@$(jq -er '."containerimage.digest"' "$WORK/materializer.json")"
 
-echo "==> Building gateway frontend for $PLATFORM"
-docker buildx build \
-  --builder "$BUILDER" \
-  --platform "$PLATFORM" \
-  --target frontend \
-  --build-arg "RUNTIME_BASE_REF=$BASE_REF" \
-  --build-arg "MATERIALIZER_REF=$MATERIALIZER_REF" \
-  --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
-  --tag "$REGISTRY/dalec-homebrew:$RUN_ID" \
-  --metadata-file "$WORK/frontend.json" \
-  --provenance=false \
-  --progress="$PROGRESS" \
-  --push \
-  .
-FRONTEND_REF="$REGISTRY/dalec-homebrew@$(jq -er '."containerimage.digest"' "$WORK/frontend.json")"
+  echo "==> Building gateway frontend for $PLATFORM"
+  docker buildx build \
+    --builder "$BUILDER" \
+    --platform "$PLATFORM" \
+    --target frontend \
+    --build-arg "RUNTIME_BASE_REF=$BASE_REF" \
+    --build-arg "MATERIALIZER_REF=$MATERIALIZER_REF" \
+    --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
+    --tag "$REGISTRY/dalec-homebrew:$RUN_ID" \
+    --metadata-file "$WORK/frontend.json" \
+    --provenance=false \
+    --progress="$PROGRESS" \
+    --push \
+    .
+  FRONTEND_REF="$REGISTRY/dalec-homebrew@$(jq -er '."containerimage.digest"' "$WORK/frontend.json")"
+else
+  echo "==> Using published component tuple for $PLATFORM"
+fi
 
 sed "1s|.*|# syntax=$FRONTEND_REF|" "$SPEC" > "$WORK/spec.yaml"
 
 echo "==> Building final runtime image $FINAL_IMAGE"
-docker buildx build \
-  --builder "$BUILDER" \
-  --platform "$PLATFORM" \
-  --file "$WORK/spec.yaml" \
-  --tag "$FINAL_IMAGE" \
-  --metadata-file "$WORK/final.json" \
-  --provenance=false \
-  --progress="$PROGRESS" \
-  "$FINAL_OUTPUT_FLAG" \
-  .
+build_final_image() {
+  docker buildx build \
+    --builder "$BUILDER" \
+    --platform "$PLATFORM" \
+    --file "$WORK/spec.yaml" \
+    --tag "$FINAL_IMAGE" \
+    --metadata-file "$WORK/final.json" \
+    --provenance=false \
+    --progress="$PROGRESS" \
+    "$@" \
+    "$FINAL_OUTPUT_FLAG" \
+    .
+}
+if (( USE_PUBLISHED_COMPONENTS == 1 )); then
+  build_final_image \
+    --build-arg "DALEC_HOMEBREW_RUNTIME_BASE=$BASE_REF" \
+    --build-arg "DALEC_HOMEBREW_MATERIALIZER=$MATERIALIZER_REF" \
+    --build-arg "DALEC_HOMEBREW_FRONTEND_REF=$FRONTEND_REF"
+else
+  build_final_image
+fi
 FINAL_DIGEST=$(jq -er '."containerimage.digest"' "$WORK/final.json")
 FINAL_REF="$(repository_from_ref "$FINAL_IMAGE")@$FINAL_DIGEST"
 
