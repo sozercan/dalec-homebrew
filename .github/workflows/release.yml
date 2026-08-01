@@ -215,6 +215,13 @@ jobs:
               and parse(ref["ref"].removeprefix("refs/tags/")) is not None
           }
 
+          untagged_releases = sorted(tag for tag in published_releases if tag not in tags)
+          if untagged_releases:
+              raise SystemExit(
+                  "release continuity is broken; published release(s) lack protected tags: "
+                  + ", ".join(untagged_releases)
+              )
+
           prior_tags = [tag for tag in tags if compare(parse(tag), target_version) < 0]
           missing = sorted(tag for tag in prior_tags if tag not in published_releases)
           if missing:
