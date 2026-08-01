@@ -105,6 +105,7 @@ run_live_test() {
       DALEC_HOMEBREW_LIVE_OUTPUT \
       DALEC_HOMEBREW_LIVE_PROGRESS \
       DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH \
+      DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE \
       DALEC_HOMEBREW_LIVE_UBUNTU_BASE
     export PATH="$FAKE_BIN:$ORIGINAL_PATH"
     export TMPDIR="$TEST_ROOT"
@@ -152,7 +153,8 @@ run_live_test "$published_output" \
   DALEC_HOMEBREW_LIVE_PLATFORM=linux/amd64 \
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
   "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
-  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"
+  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF" \
+  DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z
 [[ $(grep -c '^buildx build ' "$TEST_ROOT/docker.log") -eq 1 ]] || fail "published mode did not build only the final image"
 assert_not_contains "$TEST_ROOT/docker.log" "--target runtime-base"
 assert_not_contains "$TEST_ROOT/docker.log" "--target materializer"
@@ -160,10 +162,12 @@ assert_not_contains "$TEST_ROOT/docker.log" "--target frontend"
 assert_contains "$TEST_ROOT/docker.log" "--build-arg DALEC_HOMEBREW_RUNTIME_BASE=$BASE_REF"
 assert_contains "$TEST_ROOT/docker.log" "--build-arg DALEC_HOMEBREW_MATERIALIZER=$MATERIALIZER_REF"
 assert_contains "$TEST_ROOT/docker.log" "--build-arg DALEC_HOMEBREW_FRONTEND_REF=$FRONTEND_REF"
+assert_contains "$TEST_ROOT/docker.log" "--build-arg DALEC_HOMEBREW_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z"
 [[ $(head -n 1 "$CAPTURED_SPEC") == "# syntax=$FRONTEND_REF" ]] || fail "published frontend reference was not written to the live spec"
 assert_contains "$published_output" "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF"
 assert_contains "$published_output" "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF"
 assert_contains "$published_output" "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"
+assert_contains "$published_output" "DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z"
 
 rebuild_output="$TEST_ROOT/rebuild.out"
 unset CAPTURED_SPEC
@@ -177,6 +181,7 @@ assert_contains "$TEST_ROOT/docker.log" "--target runtime-base"
 assert_contains "$TEST_ROOT/docker.log" "--target materializer"
 assert_contains "$TEST_ROOT/docker.log" "--target frontend"
 assert_not_contains "$TEST_ROOT/docker.log" "--build-arg DALEC_HOMEBREW_RUNTIME_BASE="
+assert_not_contains "$TEST_ROOT/docker.log" "--build-arg DALEC_HOMEBREW_METADATA_NOT_BEFORE="
 assert_contains "$rebuild_output" "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=registry.example/dalec-homebrew-runtime-base@$DIGEST_A"
 assert_contains "$rebuild_output" "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=registry.example/dalec-homebrew-materializer@$DIGEST_B"
 assert_contains "$rebuild_output" "DALEC_HOMEBREW_LIVE_FRONTEND_REF=registry.example/dalec-homebrew@$DIGEST_C"

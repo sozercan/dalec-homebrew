@@ -83,6 +83,7 @@ Optional variables:
 | `DALEC_HOMEBREW_LIVE_OUTPUT` | `load` | `load` the final image or `push` it |
 | `DALEC_HOMEBREW_LIVE_PROGRESS` | `plain` | Buildx progress output |
 | `DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH` | `1781049600` | Reproducible component timestamp (rebuild mode) |
+| `DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE` | unset | RFC3339 rollback floor for authenticated Homebrew metadata |
 | `DALEC_HOMEBREW_LIVE_RUN_ID` | timestamp and architecture | Temporary component tag suffix (rebuild mode) |
 | `DALEC_HOMEBREW_LIVE_UBUNTU_BASE` | pinned platform child | Runtime base override for local rebuilding |
 | `DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF` | unset | Published runtime-base index reference (`image@sha256:...`) |

@@ -9,7 +9,7 @@ on:
         type: string
 
 concurrency:
-  group: release-${{ github.repository }}-${{ inputs.tag }}
+  group: release-${{ github.repository }}
   cancel-in-progress: false
 
 permissions: {}
@@ -108,6 +108,212 @@ jobs:
     uses: ./.github/workflows/ci.yml
     with:
       ref: ${{ needs.prepare.outputs.sha }}
+
+  rollback_floor:
+    name: Load signed metadata rollback floor
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.2
+
+      - name: Load rollback floor from latest signed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CERTIFICATE_IDENTITY_REGEXP: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/heads/main$
+          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          mkdir -p dist/rollback-floor
+          releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          tag_refs=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v?per_page=100")
+          printf '%s\n' "$releases" > "$RUNNER_TEMP/releases.json"
+          printf '%s\n' "$tag_refs" > "$RUNNER_TEMP/tag-refs.json"
+          python3 - "$RELEASE_TAG" "$RUNNER_TEMP/releases.json" "$RUNNER_TEMP/tag-refs.json" > "$RUNNER_TEMP/floor-selection.json" <<'PYSELECT'
+          import functools
+          import json
+          import re
+          import sys
+
+          target_tag, releases_path, refs_path = sys.argv[1:]
+          semver_re = re.compile(
+              r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+              r"(?:-([0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?$"
+          )
+
+          def parse(value):
+              match = semver_re.fullmatch(value)
+              if not match:
+                  return None
+              prerelease = match.group(4)
+              identifiers = [] if prerelease is None else prerelease.split(".")
+              for identifier in identifiers:
+                  if identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0"):
+                      return None
+              return (tuple(map(int, match.group(1, 2, 3))), identifiers)
+
+          def compare(left, right):
+              left_core, left_pre = left
+              right_core, right_pre = right
+              if left_core != right_core:
+                  return -1 if left_core < right_core else 1
+              if not left_pre or not right_pre:
+                  if not left_pre and not right_pre:
+                      return 0
+                  return 1 if not left_pre else -1
+              for lval, rval in zip(left_pre, right_pre):
+                  if lval == rval:
+                      continue
+                  lnum, rnum = lval.isdigit(), rval.isdigit()
+                  if lnum and rnum:
+                      return -1 if int(lval) < int(rval) else 1
+                  if lnum != rnum:
+                      return -1 if lnum else 1
+                  return -1 if lval < rval else 1
+              return (len(left_pre) > len(right_pre)) - (len(left_pre) < len(right_pre))
+
+          target_version = parse(target_tag)
+          if target_version is None:
+              raise SystemExit(f"unsupported release tag {target_tag!r}")
+
+          with open(releases_path, encoding="utf-8") as f:
+              release_pages = json.load(f)
+          with open(refs_path, encoding="utf-8") as f:
+              ref_pages = json.load(f)
+
+          releases = {
+              release["tag_name"]: release
+              for page in release_pages
+              for release in page
+              if not release.get("draft") and parse(release.get("tag_name", "")) is not None
+          }
+          tags = {
+              ref["ref"].removeprefix("refs/tags/")
+              for page in ref_pages
+              for ref in page
+              if ref.get("ref", "").startswith("refs/tags/")
+              and parse(ref["ref"].removeprefix("refs/tags/")) is not None
+          }
+
+          if target_tag in releases:
+              selection = {"source_release": target_tag, "same_release": True}
+          else:
+              newer = [tag for tag in tags if compare(parse(tag), target_version) > 0]
+              if newer:
+                  raise SystemExit(
+                      f"cannot publish {target_tag} after newer release(s): {', '.join(sorted(newer))}"
+                  )
+              prior_tags = [tag for tag in tags if compare(parse(tag), target_version) < 0]
+              missing = sorted(tag for tag in prior_tags if tag not in releases)
+              if missing:
+                  raise SystemExit(
+                      "release continuity is broken; protected tag(s) lack signed releases: "
+                      + ", ".join(missing)
+                  )
+              predecessor = max(
+                  prior_tags,
+                  key=functools.cmp_to_key(lambda left, right: compare(parse(left), parse(right))),
+                  default="",
+              )
+              selection = {"source_release": predecessor, "same_release": False}
+
+          json.dump(selection, sys.stdout, separators=(",", ":"))
+          PYSELECT
+          source_release=$(jq -r .source_release "$RUNNER_TEMP/floor-selection.json")
+          same_release=$(jq -r .same_release "$RUNNER_TEMP/floor-selection.json")
+          if [[ -z "$source_release" ]]; then
+            jq -n '{
+              schema_version: "dalec-homebrew-rollback-floor-input/v1",
+              source_release: null,
+              same_release: false,
+              not_before: null,
+              inherited_floor: null,
+              floor_snapshot: null
+            }' > dist/rollback-floor/rollback-floor-input.json
+            exit 0
+          fi
+
+          prior="$RUNNER_TEMP/prior-release"
+          mkdir -p "$prior"
+          gh release download "$source_release" \
+            --dir "$prior" \
+            --repo "$GITHUB_REPOSITORY"
+          cosign verify-blob \
+            --bundle "$prior/SHA256SUMS.bundle" \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            "$prior/SHA256SUMS"
+          cosign verify-blob \
+            --bundle "$prior/components.json.bundle" \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            "$prior/components.json"
+          cosign verify-blob \
+            --bundle "$prior/metadata-snapshot.json.bundle" \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            "$prior/metadata-snapshot.json"
+          (cd "$prior" && sha256sum -c SHA256SUMS)
+          grep -Eq '(^|[[:space:]])(\./)?metadata-snapshot\.json$' "$prior/SHA256SUMS" || {
+            echo "$source_release does not contain signed metadata snapshot evidence" >&2
+            exit 1
+          }
+          not_before=$(jq -er --arg source_release "$source_release" '
+            def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
+            select(.schema_version == "dalec-homebrew-release-metadata/v1")
+            | select(.release.tag == $source_release)
+            | select(.release.sha | type == "string" and test("^[0-9a-f]{40}$"))
+            | select(.rollback_floor == .accepted_snapshot.generated_at)
+            | select([.accepted_snapshot.digest, .accepted_snapshot.formula_digest, .accepted_snapshot.migration_digest, .accepted_snapshot.formula_envelope_digest, .accepted_snapshot.migration_envelope_digest] | all(sha256))
+            | select([.accepted_snapshot.formula_freshness_source, .accepted_snapshot.migration_freshness_source] | all(. == "signed-payload" or . == "http-last-modified"))
+            | select(.accepted_snapshot.formula_url | type == "string" and length > 0)
+            | select(.accepted_snapshot.migration_url | type == "string" and length > 0)
+            | .rollback_floor
+            | select(type == "string" and length > 0)
+          ' "$prior/metadata-snapshot.json")
+          python3 - "$not_before" <<'PYTIME'
+          from datetime import datetime
+          import sys
+
+          value = sys.argv[1]
+          try:
+              datetime.fromisoformat(value.replace("Z", "+00:00"))
+          except ValueError as exc:
+              raise SystemExit(f"invalid signed rollback floor {value!r}: {exc}")
+          PYTIME
+          jq -n \
+            --arg source_release "$source_release" \
+            --arg same_release "$same_release" \
+            --arg not_before "$not_before" \
+            --slurpfile metadata "$prior/metadata-snapshot.json" \
+            '{
+              schema_version: "dalec-homebrew-rollback-floor-input/v1",
+              source_release: $source_release,
+              same_release: ($same_release == "true"),
+              not_before: $not_before,
+              inherited_floor: (
+                if $same_release == "true" then $metadata[0].inherited_floor
+                else {source_release: $source_release, not_before: $not_before}
+                end
+              ),
+              floor_snapshot: $metadata[0].accepted_snapshot
+            }' > dist/rollback-floor/rollback-floor-input.json
+
+      - name: Upload rollback floor
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-rollback-floor
+          path: dist/rollback-floor/rollback-floor-input.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
 
   build:
     name: Build immutable component tuple
@@ -364,7 +570,7 @@ jobs:
 
   integration:
     name: Integration test (${{ matrix.platform }})
-    needs: [prepare, build]
+    needs: [prepare, build, rollback_floor]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     permissions:
@@ -393,6 +599,12 @@ jobs:
         with:
           name: release-build
           path: dist/release
+
+      - name: Download rollback floor
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-rollback-floor
+          path: dist/rollback-floor
 
       - name: Set up Docker Buildx
         id: buildx
@@ -428,6 +640,7 @@ jobs:
           materializer_ref=$(component_ref materializer)
           frontend_ref=$(component_ref frontend "$PLATFORM")
           source_date_epoch=$(jq -er .source.source_date_epoch dist/release/digests.json)
+          metadata_not_before=$(jq -r '.not_before // empty' dist/rollback-floor/rollback-floor-input.json)
 
           specs=(live-test live-python live-glibc live-redis live-graphviz)
           mkdir -p runtime-evidence
@@ -440,6 +653,7 @@ jobs:
             DALEC_HOMEBREW_LIVE_MATERIALIZER_REF="$materializer_ref" \
             DALEC_HOMEBREW_LIVE_FRONTEND_REF="$frontend_ref" \
             DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH="$source_date_epoch" \
+            DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE="$metadata_not_before" \
             DALEC_HOMEBREW_LIVE_IMAGE="$final_image" \
             DALEC_HOMEBREW_LIVE_OUTPUT=load \
             DALEC_HOMEBREW_LIVE_PROGRESS=plain \
@@ -571,7 +785,7 @@ jobs:
 
   sign:
     name: Sign and attest immutable tuple
-    needs: [prepare, build, integration, evidence]
+    needs: [prepare, build, rollback_floor, integration, evidence]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: release
@@ -621,6 +835,12 @@ jobs:
           name: release-build
           path: dist/release
 
+      - name: Download rollback floor
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-rollback-floor
+          path: dist/release
+
       - name: Download platform evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -668,8 +888,16 @@ jobs:
                 error("resolution metadata is missing")
               elif ([.metadata.digest, .metadata.formula_digest, .metadata.migration_digest, .metadata.formula_envelope_digest, .metadata.migration_envelope_digest] | all(sha256)) | not then
                 error("resolution metadata digests are missing or invalid")
+              elif (.metadata.generated_at | type) != "string" or (.metadata.generated_at | length) == 0 then
+                error("resolution metadata generated_at is missing")
+              elif ([.metadata.formula_freshness_source, .metadata.migration_freshness_source] | all(. == "signed-payload" or . == "http-last-modified")) | not then
+                error("resolution metadata freshness source is invalid")
+              elif (.metadata.formula_url | type) != "string" or (.metadata.formula_url | length) == 0 then
+                error("resolution Formula URL is missing")
+              elif (.metadata.migration_url | type) != "string" or (.metadata.migration_url | length) == 0 then
+                error("resolution migration URL is missing")
               else
-                {metadata: {digest: .metadata.digest, formula_digest: .metadata.formula_digest, migration_digest: .metadata.migration_digest, formula_envelope_digest: .metadata.formula_envelope_digest, migration_envelope_digest: .metadata.migration_envelope_digest}}
+                {metadata: {digest: .metadata.digest, formula_digest: .metadata.formula_digest, migration_digest: .metadata.migration_digest, formula_envelope_digest: .metadata.formula_envelope_digest, migration_envelope_digest: .metadata.migration_envelope_digest, generated_at: .metadata.generated_at, formula_freshness_source: .metadata.formula_freshness_source, migration_freshness_source: .metadata.migration_freshness_source, formula_url: .metadata.formula_url, migration_url: .metadata.migration_url}}
               end
             '
             tar -xOf "$amd64" ./resolution.json \
@@ -682,6 +910,58 @@ jobs:
               "$RUNNER_TEMP/${spec}-amd64-metadata.json" \
               "$RUNNER_TEMP/${spec}-arm64-metadata.json"
           done
+
+          reference="$RUNNER_TEMP/live-test-amd64-metadata.json"
+          for spec in live-python live-glibc live-redis live-graphviz; do
+            diff -u "$reference" "$RUNNER_TEMP/${spec}-amd64-metadata.json"
+          done
+          previous_not_before=$(jq -r '.not_before // empty' dist/release/rollback-floor-input.json)
+          accepted_not_before=$(jq -er '.metadata.generated_at' "$reference")
+          relation=$(python3 - "$previous_not_before" "$accepted_not_before" <<'PYTIME'
+          from datetime import datetime
+          import sys
+
+          previous, accepted = sys.argv[1:]
+          parse = lambda value: datetime.fromisoformat(value.replace("Z", "+00:00"))
+          accepted_time = parse(accepted)
+          if not previous:
+              print("genesis")
+          else:
+              previous_time = parse(previous)
+              if accepted_time < previous_time:
+                  raise SystemExit(f"accepted metadata snapshot {accepted} predates rollback floor {previous}")
+              print("equal" if accepted_time == previous_time else "newer")
+          PYTIME
+          )
+          same_release=$(jq -r '.same_release' dist/release/rollback-floor-input.json)
+          if [[ "$same_release" == true ]]; then
+            jq -e --slurpfile accepted "$reference" \
+              '.floor_snapshot == $accepted[0].metadata' \
+              dist/release/rollback-floor-input.json >/dev/null || {
+                echo "same-tag rerun resolved a different metadata snapshot" >&2
+                exit 1
+              }
+          elif [[ "$relation" == equal ]]; then
+            jq -e --slurpfile accepted "$reference" '
+              def identity: [.digest, .formula_digest, .migration_digest, .formula_envelope_digest, .migration_envelope_digest];
+              (.floor_snapshot | identity) == ($accepted[0].metadata | identity)
+            ' dist/release/rollback-floor-input.json >/dev/null || {
+              echo "metadata content changed without advancing the rollback timestamp" >&2
+              exit 1
+            }
+          fi
+          jq -n \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg release_sha "$RELEASE_SHA" \
+            --slurpfile previous dist/release/rollback-floor-input.json \
+            --slurpfile snapshot "$reference" \
+            '{
+              schema_version: "dalec-homebrew-release-metadata/v1",
+              release: {tag: $release_tag, sha: $release_sha},
+              inherited_floor: $previous[0].inherited_floor,
+              accepted_snapshot: $snapshot[0].metadata,
+              rollback_floor: $snapshot[0].metadata.generated_at
+            }' > dist/release/metadata-snapshot.json
 
       - name: Generate and verify component manifest
         run: |
@@ -843,6 +1123,9 @@ jobs:
             --bundle dist/release/components.json.bundle \
             dist/release/components.json
           cosign sign-blob --yes \
+            --bundle dist/release/metadata-snapshot.json.bundle \
+            dist/release/metadata-snapshot.json
+          cosign sign-blob --yes \
             --bundle dist/release/SHA256SUMS.bundle \
             dist/release/SHA256SUMS
           cosign verify-blob \
@@ -850,6 +1133,11 @@ jobs:
             --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
             --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
             dist/release/components.json
+          cosign verify-blob \
+            --bundle dist/release/metadata-snapshot.json.bundle \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            dist/release/metadata-snapshot.json
           cosign verify-blob \
             --bundle dist/release/SHA256SUMS.bundle \
             --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
@@ -952,6 +1240,11 @@ jobs:
             --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
             dist/release/components.json
           cosign verify-blob \
+            --bundle dist/release/metadata-snapshot.json.bundle \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            dist/release/metadata-snapshot.json
+          cosign verify-blob \
             --bundle dist/release/SHA256SUMS.bundle \
             --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
             --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
@@ -1053,10 +1346,15 @@ jobs:
             --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
             --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
             "$existing/components.json"
+          cosign verify-blob \
+            --bundle "$existing/metadata-snapshot.json.bundle" \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            "$existing/metadata-snapshot.json"
           (cd "$existing" && sha256sum -c SHA256SUMS)
           {
             awk '{ path=$2; sub(/^\*/, "", path); sub(/^\.\//, "", path); print path }' "$existing/SHA256SUMS"
-            printf '%s\n' SHA256SUMS SHA256SUMS.bundle components.json.bundle
+            printf '%s\n' SHA256SUMS SHA256SUMS.bundle components.json.bundle metadata-snapshot.json.bundle
           } | sort -u > "$RUNNER_TEMP/expected-release-assets.txt"
           find "$existing" -maxdepth 1 -type f -exec basename {} \; \
             | sort -u > "$RUNNER_TEMP/actual-release-assets.txt"
@@ -1071,7 +1369,7 @@ jobs:
             echo "existing $RELEASE_TAG asset differs: digests.json" >&2
             exit 1
           }
-          for name in inputs.json components.digest; do
+          for name in inputs.json components.digest metadata-snapshot.json; do
             cmp "dist/release/$name" "$existing/$name" || {
               echo "existing $RELEASE_TAG asset differs: $name" >&2
               exit 1

@@ -84,12 +84,14 @@ Release CI must reject:
 
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) publishes an existing v-prefixed SemVer tag, including supported pre-releases. The workflow is manual-only so write and signing privileges come from the trusted `main` branch workflow rather than from the tagged commit. Start it from `main` and provide a tag whose commit is reachable from `main`.
 
+Release runs are serialized repository-wide. New releases must advance the v-prefixed SemVer sequence, and every earlier protected release tag must retain its signed GitHub release so the metadata floor chain cannot be reordered or silently truncated.
+
 The workflow separates construction from promotion:
 
-1. Reuse normal CI against the tagged commit and validate the release inputs with [`../scripts/release-inputs.sh`](../scripts/release-inputs.sh).
+1. Reuse normal CI against the tagged commit, validate the release inputs with [`../scripts/release-inputs.sh`](../scripts/release-inputs.sh), and load the monotonic metadata rollback floor from the latest signed release evidence.
 2. Build the `amd64` and `arm64` runtime-base and materializer children with pinned Dockerfile frontend, Buildx, BuildKit, and QEMU inputs. BuildKit attestations are disabled during construction so the image-manifest digests remain unambiguous.
 3. Smoke-test the exact children, assemble the runtime-base and materializer indexes, and build the frontend against those digest-pinned indexes.
-4. Run every focused live spec on native `amd64` and `arm64` workers, retain each runtime evidence archive, and require the two platforms to use the same authenticated Homebrew metadata snapshot.
+4. Run every focused live spec on native `amd64` and `arm64` workers with the signed rollback floor, retain deterministic runtime evidence archives, and require every spec and platform to use the same authenticated Homebrew metadata snapshot.
 5. Generate SPDX SBOMs and reject fixed critical vulnerabilities for every platform child.
 6. Generate `components.json`, sign every child and index with keyless Cosign, attach SLSA provenance and SPDX attestations, and sign the release records and checksums.
 7. Reverify the tag, signatures, attestations, and release bundle immediately before adding the immutable version tag to the tested index digests and creating the GitHub release. The workflow never publishes `latest`, rebuilds during promotion, or overwrites a version with different digests.
@@ -99,9 +101,10 @@ The GitHub `release` environment gates signing. Configure it with required revie
 Release assets include:
 
 - `components.json`, `components.digest`, and the component Sigstore bundle
-- `digests.json` and `inputs.json`
+- `digests.json`, `inputs.json`, and the rollback-floor input
 - per-platform SPDX SBOMs and vulnerability reports
 - runtime evidence archives from the `amd64` and `arm64` integration images
+- `metadata-snapshot.json` and its Sigstore bundle, recording the accepted snapshot and next monotonic rollback floor
 - the SLSA provenance predicate
 - `SHA256SUMS` and its Sigstore bundle
 
