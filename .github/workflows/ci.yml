@@ -16,6 +16,8 @@ permissions:
 
 env:
   BUILDX_VERSION: v0.36.0
+  BUILDX_SHA256_AMD64: 07823fdfcd82a41be90155a8b16876c1a780a6462de805a9f3f63b3119ccfb99
+  BUILDX_SHA256_ARM64: 70382de03915c07c488ae4ddc4f7e169ee978f953e754ecfce110ba017e0132b
   BUILDKIT_IMAGE: docker.io/moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2
   ACTIONLINT_IMAGE: docker.io/rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
 
@@ -49,9 +51,41 @@ jobs:
           persist-credentials: false
       - name: Lint GitHub Actions workflows
         run: docker run --rm -v "$PWD:/repo:ro" -w /repo "$ACTIONLINT_IMAGE"
+      - name: Install checksum-pinned Buildx
+        run: |
+          set -euo pipefail
+          [[ "$BUILDX_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case "$(uname -m)" in
+            x86_64|amd64)
+              arch=amd64
+              expected=$BUILDX_SHA256_AMD64
+              ;;
+            aarch64|arm64)
+              arch=arm64
+              expected=$BUILDX_SHA256_ARM64
+              ;;
+            *)
+              echo "unsupported Buildx host architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+          asset="buildx-${BUILDX_VERSION}.linux-${arch}"
+          binary="$RUNNER_TEMP/$asset"
+          curl --fail --location --silent --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --max-filesize 134217728 \
+            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/${asset}" \
+            --output "$binary"
+          printf '%s  %s\n' "$expected" "$binary" | sha256sum -c -
+          plugin_dir="${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins"
+          install -d -m 0755 "$plugin_dir"
+          install -m 0755 "$binary" "$plugin_dir/docker-buildx"
+          docker buildx version | grep -F " $BUILDX_VERSION "
+
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
-          version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
           cache-binary: false
       - run: docker buildx bake --print release-children frontend

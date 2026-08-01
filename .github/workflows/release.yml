@@ -17,10 +17,14 @@ permissions: {}
 env:
   REGISTRY_NAMESPACE: ghcr.io/${{ github.repository_owner }}
   BUILDX_VERSION: v0.36.0
+  BUILDX_SHA256_AMD64: 07823fdfcd82a41be90155a8b16876c1a780a6462de805a9f3f63b3119ccfb99
+  BUILDX_SHA256_ARM64: 70382de03915c07c488ae4ddc4f7e169ee978f953e754ecfce110ba017e0132b
   BUILDKIT_IMAGE: docker.io/moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2
   BINFMT_IMAGE: docker.io/tonistiigi/binfmt:latest@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
   SYFT_VERSION: v1.42.3
+  SYFT_IMAGE: docker.io/anchore/syft:v1.42.3@sha256:5999d209a342e55e9edf70bf8930fb5b86d8f2a783fa401178372c50e21b1d36
   TRIVY_VERSION: v0.70.0
+  TRIVY_IMAGE: docker.io/aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e
   MAX_RELEASE_ASSET_BYTES: 268435456
   MAX_RELEASE_TOTAL_BYTES: 1073741824
 
@@ -634,10 +638,42 @@ jobs:
           platforms: arm64
           cache-image: false
 
+      - name: Install checksum-pinned Buildx
+        run: |
+          set -euo pipefail
+          [[ "$BUILDX_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case "$(uname -m)" in
+            x86_64|amd64)
+              arch=amd64
+              expected=$BUILDX_SHA256_AMD64
+              ;;
+            aarch64|arm64)
+              arch=arm64
+              expected=$BUILDX_SHA256_ARM64
+              ;;
+            *)
+              echo "unsupported Buildx host architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+          asset="buildx-${BUILDX_VERSION}.linux-${arch}"
+          binary="$RUNNER_TEMP/$asset"
+          curl --fail --location --silent --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --max-filesize 134217728 \
+            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/${asset}" \
+            --output "$binary"
+          printf '%s  %s\n' "$expected" "$binary" | sha256sum -c -
+          plugin_dir="${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins"
+          install -d -m 0755 "$plugin_dir"
+          install -m 0755 "$binary" "$plugin_dir/docker-buildx"
+          docker buildx version | grep -F " $BUILDX_VERSION "
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
-          version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
           cache-binary: false
 
@@ -893,11 +929,43 @@ jobs:
           name: release-rollback-floor
           path: dist/rollback-floor
 
+      - name: Install checksum-pinned Buildx
+        run: |
+          set -euo pipefail
+          [[ "$BUILDX_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case "$(uname -m)" in
+            x86_64|amd64)
+              arch=amd64
+              expected=$BUILDX_SHA256_AMD64
+              ;;
+            aarch64|arm64)
+              arch=arm64
+              expected=$BUILDX_SHA256_ARM64
+              ;;
+            *)
+              echo "unsupported Buildx host architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+          asset="buildx-${BUILDX_VERSION}.linux-${arch}"
+          binary="$RUNNER_TEMP/$asset"
+          curl --fail --location --silent --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --max-filesize 134217728 \
+            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/${asset}" \
+            --output "$binary"
+          printf '%s  %s\n' "$expected" "$binary" | sha256sum -c -
+          plugin_dir="${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins"
+          install -d -m 0755 "$plugin_dir"
+          install -m 0755 "$binary" "$plugin_dir/docker-buildx"
+          docker buildx version | grep -F " $BUILDX_VERSION "
+
       - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
-          version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
           cache-binary: false
 
@@ -1030,36 +1098,47 @@ jobs:
           digest=$(jq -er --arg component "$COMPONENT" --arg platform "$PLATFORM" '.components[$component].platforms[$platform]' dist/release/digests.json)
           echo "ref=$repository@$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Syft
-        id: syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
-        with:
-          syft-version: ${{ env.SYFT_VERSION }}
-
       - name: Generate SPDX SBOM
         env:
-          SYFT: ${{ steps.syft.outputs.cmd }}
+          SYFT_IMAGE: ${{ env.SYFT_IMAGE }}
           SUBJECT: ${{ steps.subject.outputs.ref }}
           PLATFORM: ${{ matrix.platform }}
           SLUG: ${{ matrix.slug }}
         run: |
+          set -euo pipefail
           mkdir -p evidence
-          "$SYFT" scan --platform "$PLATFORM" "$SUBJECT" \
-            -o "spdx-json=evidence/sbom-${SLUG}.spdx.json"
+          docker_config=${DOCKER_CONFIG:-$HOME/.docker}
+          test -f "$docker_config/config.json"
+          docker run --rm \
+            --volume "$docker_config:/root/.docker:ro" \
+            --volume "$PWD/evidence:/evidence" \
+            "$SYFT_IMAGE" scan --platform "$PLATFORM" "$SUBJECT" \
+            -o "spdx-json=/evidence/sbom-${SLUG}.spdx.json"
 
       - name: Scan for fixed critical vulnerabilities
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
-          TRIVY_PLATFORM: ${{ matrix.platform }}
-        with:
-          image-ref: ${{ steps.subject.outputs.ref }}
-          format: json
-          output: evidence/vulnerability-${{ matrix.slug }}.json
-          severity: CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
-          version: ${{ env.TRIVY_VERSION }}
-          cache: false
+          TRIVY_IMAGE: ${{ env.TRIVY_IMAGE }}
+          SUBJECT: ${{ steps.subject.outputs.ref }}
+          PLATFORM: ${{ matrix.platform }}
+          SLUG: ${{ matrix.slug }}
+        run: |
+          set -euo pipefail
+          docker_config=${DOCKER_CONFIG:-$HOME/.docker}
+          test -f "$docker_config/config.json"
+          docker run --rm \
+            --volume "$docker_config:/root/.docker:ro" \
+            --volume "$PWD/evidence:/evidence" \
+            "$TRIVY_IMAGE" image \
+            --platform "$PLATFORM" \
+            --scanners vuln \
+            --format json \
+            --output "/evidence/vulnerability-${SLUG}.json" \
+            --severity CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --no-progress \
+            --skip-version-check \
+            "$SUBJECT"
 
       - name: Upload evidence
         if: always()
@@ -1099,10 +1178,42 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Install checksum-pinned Buildx
+        run: |
+          set -euo pipefail
+          [[ "$BUILDX_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case "$(uname -m)" in
+            x86_64|amd64)
+              arch=amd64
+              expected=$BUILDX_SHA256_AMD64
+              ;;
+            aarch64|arm64)
+              arch=arm64
+              expected=$BUILDX_SHA256_ARM64
+              ;;
+            *)
+              echo "unsupported Buildx host architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+          asset="buildx-${BUILDX_VERSION}.linux-${arch}"
+          binary="$RUNNER_TEMP/$asset"
+          curl --fail --location --silent --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --max-filesize 134217728 \
+            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/${asset}" \
+            --output "$binary"
+          printf '%s  %s\n' "$expected" "$binary" | sha256sum -c -
+          plugin_dir="${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins"
+          install -d -m 0755 "$plugin_dir"
+          install -m 0755 "$binary" "$plugin_dir/docker-buildx"
+          docker buildx version | grep -F " $BUILDX_VERSION "
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
-          version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
           cache-binary: false
 
@@ -1311,10 +1422,14 @@ jobs:
                   tag: $tag,
                   source_date_epoch: $source_date_epoch,
                   buildx_version: env.BUILDX_VERSION,
+                  buildx_sha256_amd64: env.BUILDX_SHA256_AMD64,
+                  buildx_sha256_arm64: env.BUILDX_SHA256_ARM64,
                   buildkit_image: env.BUILDKIT_IMAGE,
                   binfmt_image: env.BINFMT_IMAGE,
                   syft_version: env.SYFT_VERSION,
+                  syft_image: env.SYFT_IMAGE,
                   trivy_version: env.TRIVY_VERSION,
+                  trivy_image: env.TRIVY_IMAGE,
                   workflow_ref: $workflow_ref,
                   workflow_sha: $workflow_sha
                 },
@@ -1518,10 +1633,42 @@ jobs:
           name: release-bundle
           path: dist/release
 
+      - name: Install checksum-pinned Buildx
+        run: |
+          set -euo pipefail
+          [[ "$BUILDX_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case "$(uname -m)" in
+            x86_64|amd64)
+              arch=amd64
+              expected=$BUILDX_SHA256_AMD64
+              ;;
+            aarch64|arm64)
+              arch=arm64
+              expected=$BUILDX_SHA256_ARM64
+              ;;
+            *)
+              echo "unsupported Buildx host architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+          asset="buildx-${BUILDX_VERSION}.linux-${arch}"
+          binary="$RUNNER_TEMP/$asset"
+          curl --fail --location --silent --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --max-filesize 134217728 \
+            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/${asset}" \
+            --output "$binary"
+          printf '%s  %s\n' "$expected" "$binary" | sha256sum -c -
+          plugin_dir="${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins"
+          install -d -m 0755 "$plugin_dir"
+          install -m 0755 "$binary" "$plugin_dir/docker-buildx"
+          docker buildx version | grep -F " $BUILDX_VERSION "
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
-          version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
           cache-binary: false
 

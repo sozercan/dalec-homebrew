@@ -88,9 +88,9 @@ Optional variables:
 | `DALEC_HOMEBREW_LIVE_UBUNTU_BASE` | pinned platform child | Runtime base override for local rebuilding |
 | `DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF` | unset | Published runtime-base index reference (`image@sha256:...`) |
 | `DALEC_HOMEBREW_LIVE_MATERIALIZER_REF` | unset | Published materializer index reference (`image@sha256:...`) |
-| `DALEC_HOMEBREW_LIVE_FRONTEND_REF` | unset | Published frontend index reference (`image@sha256:...`) |
+| `DALEC_HOMEBREW_LIVE_FRONTEND_REF` | unset | Published frontend platform-child reference (`image@sha256:...`) |
 
-The three published component references must be supplied together and must use `@sha256:` digests.
+The three published component references must be supplied together and must use `@sha256:` digests. Runtime-base and materializer references identify their multi-platform indexes; the frontend reference identifies the child for `DALEC_HOMEBREW_LIVE_PLATFORM`.
 
 When `DALEC_HOMEBREW_LIVE_OUTPUT=push`, the helper prints `DALEC_HOMEBREW_LIVE_FINAL_REF` with the immutable final manifest digest.
 
