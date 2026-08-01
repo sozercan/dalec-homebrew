@@ -103,7 +103,7 @@ The GitHub `release` environment gates signing. Configure it with required revie
 Release assets include:
 
 - `components.json`, `components.digest`, and the component Sigstore bundle
-- `digests.json`, `inputs.json`, and the rollback-floor input
+- `digests.json`, `inputs.json`, the rollback-floor input, and verified predecessor tag identities
 - per-platform SPDX SBOMs and vulnerability reports
 - runtime evidence archives from the `amd64` and `arm64` integration images
 - `metadata-snapshot.json` and its Sigstore bundle, recording the accepted snapshot and next monotonic rollback floor

@@ -144,6 +144,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/rollback-floor
+          verified_tags_tsv="$RUNNER_TEMP/verified-release-tags.tsv"
+          : > "$verified_tags_tsv"
           releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
           tag_refs=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v?per_page=100")
           printf '%s\n' "$releases" > "$RUNNER_TEMP/releases.json"
@@ -326,6 +328,10 @@ jobs:
               inherited_floor: null,
               floor_snapshot: null
             }' > dist/rollback-floor/rollback-floor-input.json
+            jq -n '{
+              schema_version: "dalec-homebrew-verified-release-tags/v1",
+              tags: []
+            }' > dist/rollback-floor/verified-release-tags.json
             exit 0
           fi
 
@@ -615,6 +621,7 @@ jobs:
               echo "protected tag $release_tag points to $actual_sha, not signed commit $signed_sha" >&2
               return 1
             }
+            printf '%s\t%s\n' "$release_tag" "$signed_sha" >> "$verified_tags_tsv"
           }
 
           protected_download_bytes=0
@@ -659,6 +666,10 @@ jobs:
                     inherited_floor: null,
                     floor_snapshot: null
                   }' > dist/rollback-floor/rollback-floor-input.json
+                  jq -n '{
+                    schema_version: "dalec-homebrew-verified-release-tags/v1",
+                    tags: []
+                  }' > dist/rollback-floor/verified-release-tags.json
                   exit 0
                 fi
                 ;;
@@ -762,6 +773,34 @@ jobs:
             echo "source tag $source_release points to $source_actual_sha, not signed commit $source_signed_sha" >&2
             exit 1
           }
+          printf '%s\t%s\n' "$source_release" "$source_signed_sha" >> "$verified_tags_tsv"
+          python3 - "$verified_tags_tsv" > dist/rollback-floor/verified-release-tags.json <<'PYTAGS'
+          import json
+          import re
+          import sys
+
+          tag_re = re.compile(
+              r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+              r"(?:-([0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?$"
+          )
+          tags = {}
+          with open(sys.argv[1], encoding="utf-8") as f:
+              for line in f:
+                  tag, sha = line.rstrip("\n").split("\t")
+                  if tag_re.fullmatch(tag) is None or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+                      raise SystemExit("invalid verified release tag identity")
+                  if tag in tags and tags[tag] != sha:
+                      raise SystemExit(f"conflicting verified identity for {tag}")
+                  tags[tag] = sha
+          json.dump(
+              {
+                  "schema_version": "dalec-homebrew-verified-release-tags/v1",
+                  "tags": [{"tag": tag, "sha": tags[tag]} for tag in sorted(tags)],
+              },
+              sys.stdout,
+              separators=(",", ":"),
+          )
+          PYTAGS
           not_before=$(jq -er \
             --arg source_release "$source_release" \
             --arg source_predecessor "$source_predecessor" '
@@ -813,7 +852,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-rollback-floor
-          path: dist/rollback-floor/rollback-floor-input.json
+          path: dist/rollback-floor
           if-no-files-found: error
           retention-days: 7
           overwrite: true
@@ -1915,6 +1954,12 @@ jobs:
           name: release-bundle
           path: dist/release
 
+      - name: Download verified predecessor identities
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-rollback-floor
+          path: dist/rollback-floor
+
       - name: Install checksum-pinned Buildx
         run: |
           set -euo pipefail
@@ -2204,23 +2249,49 @@ jobs:
             echo "$RELEASE_TAG is no longer reachable from main (comparison: $comparison)" >&2
             exit 1
           fi
-          require_release_tag() {
-            local object object_type actual
-            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")
-            object_type=$(jq -er '.object.type' <<<"$object")
-            actual=$(jq -er '.object.sha' <<<"$object")
+          resolve_tag_commit() {
+            local tag=$1 object object_type actual
+            [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || return 1
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag") || return 1
+            object_type=$(jq -er '.object.type' <<<"$object") || return 1
+            actual=$(jq -er '.object.sha' <<<"$object") || return 1
             for _ in $(seq 1 8); do
               [[ "$object_type" == tag ]] || break
-              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$actual")
-              object_type=$(jq -er '.object.type' <<<"$object")
-              actual=$(jq -er '.object.sha' <<<"$object")
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$actual") || return 1
+              object_type=$(jq -er '.object.type' <<<"$object") || return 1
+              actual=$(jq -er '.object.sha' <<<"$object") || return 1
             done
-            [[ "$object_type" == commit && "$actual" == "$RELEASE_SHA" ]] || {
+            [[ "$object_type" == commit && "$actual" =~ ^[0-9a-f]{40}$ ]] || return 1
+            printf '%s\n' "$actual"
+          }
+          require_release_tag() {
+            local actual
+            actual=$(resolve_tag_commit "$RELEASE_TAG") || return 1
+            [[ "$actual" == "$RELEASE_SHA" ]] || {
               echo "refs/tags/$RELEASE_TAG no longer points to $RELEASE_SHA" >&2
               return 1
             }
           }
           require_release_tag
+          jq -e --argjson max_tags "$((MAX_PROTECTED_RELEASES + 1))" '
+            .schema_version == "dalec-homebrew-verified-release-tags/v1"
+            and (.tags | type == "array" and length <= $max_tags)
+            and all(.tags[];
+              (.tag | type == "string" and test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$"))
+              and (.sha | type == "string" and test("^[0-9a-f]{40}$")))
+            and ([.tags[].tag] | length == (unique | length))
+          ' dist/rollback-floor/verified-release-tags.json >/dev/null
+          while IFS=$'\t' read -r verified_tag verified_sha; do
+            actual=$(resolve_tag_commit "$verified_tag") || {
+              echo "could not resolve verified predecessor tag $verified_tag" >&2
+              exit 1
+            }
+            [[ "$actual" == "$verified_sha" ]] || {
+              echo "verified predecessor tag $verified_tag moved from $verified_sha to $actual" >&2
+              exit 1
+            }
+          done < <(jq -r '.tags[] | [.tag, .sha] | @tsv' \
+            dist/rollback-floor/verified-release-tags.json)
           read_registry_digest() {
             local ref=$1 descriptor digest attempt error_file errors_file all_missing
             errors_file=$(mktemp "$RUNNER_TEMP/registry-inspect.XXXXXX")
