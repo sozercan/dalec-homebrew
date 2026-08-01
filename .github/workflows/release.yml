@@ -146,8 +146,10 @@ jobs:
           mkdir -p dist/rollback-floor
           verified_tags_tsv="$RUNNER_TEMP/verified-release-tags.tsv"
           verified_floors_tsv="$RUNNER_TEMP/verified-release-floors.tsv"
+          verified_assets_jsonl="$RUNNER_TEMP/verified-release-assets.jsonl"
           : > "$verified_tags_tsv"
           : > "$verified_floors_tsv"
+          : > "$verified_assets_jsonl"
           cat > "$RUNNER_TEMP/rfc3339-compare.py" <<'PYRFC3339'
           from datetime import datetime, timezone
           import re
@@ -368,6 +370,10 @@ jobs:
               schema_version: "dalec-homebrew-verified-release-tags/v1",
               tags: []
             }' > dist/rollback-floor/verified-release-tags.json
+            jq -n '{
+              schema_version: "dalec-homebrew-verified-release-assets/v1",
+              releases: []
+            }' > dist/rollback-floor/verified-release-assets.json
             exit 0
           fi
 
@@ -406,6 +412,25 @@ jobs:
             floors=$(awk -F '\t' -v tag="$tag" '$1 == tag { print $2 }' "$verified_floors_tsv") || return 1
             [[ -n "$floors" && "$floors" != *$'\n'* ]] || return 1
             printf '%s\n' "$floors"
+          }
+
+          record_release_assets() {
+            local tag=$1 release_id=$2 draft=$3 assets_file=$4
+            [[ "$draft" == true || "$draft" == false ]]
+            jq -cn \
+              --arg tag "$tag" \
+              --argjson release_id "$release_id" \
+              --argjson draft "$draft" \
+              --slurpfile assets "$assets_file" '
+                {
+                  tag: $tag,
+                  release_id: $release_id,
+                  draft: $draft,
+                  assets: ($assets[0]
+                    | map({id, name, size, digest, state})
+                    | sort_by(.name))
+                }
+              ' >> "$verified_assets_jsonl"
           }
 
           verify_component_digest_binding() {
@@ -716,6 +741,7 @@ jobs:
               "$current_floor" "$inherited_floor" >/dev/null
             printf '%s\t%s\n' "$release_tag" "$signed_sha" >> "$verified_tags_tsv"
             printf '%s\t%s\n' "$release_tag" "$current_floor" >> "$verified_floors_tsv"
+            record_release_assets "$release_tag" "$release_id" false "$assets_file"
           }
 
           protected_download_bytes=0
@@ -764,6 +790,10 @@ jobs:
                     schema_version: "dalec-homebrew-verified-release-tags/v1",
                     tags: []
                   }' > dist/rollback-floor/verified-release-tags.json
+                  jq -n '{
+                    schema_version: "dalec-homebrew-verified-release-assets/v1",
+                    releases: []
+                  }' > dist/rollback-floor/verified-release-assets.json
                   exit 0
                 fi
                 ;;
@@ -784,6 +814,8 @@ jobs:
           }
           assets=$(gh api --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/releases/$source_release_id/assets?per_page=100")
+          source_assets_file="$RUNNER_TEMP/source-release-assets.json"
+          jq -c '[.[][]]' <<<"$assets" > "$source_assets_file"
           jq -e \
             --argjson max_asset "$MAX_RELEASE_ASSET_BYTES" \
             --argjson max_total "$MAX_RELEASE_TOTAL_BYTES" '
@@ -931,6 +963,28 @@ jobs:
           python3 "$RUNNER_TEMP/rfc3339-compare.py" \
             "$not_before" "$source_predecessor_floor" >/dev/null
           printf '%s\t%s\n' "$source_release" "$not_before" >> "$verified_floors_tsv"
+          record_release_assets "$source_release" "$source_release_id" "$source_draft" "$source_assets_file"
+          python3 - "$verified_assets_jsonl" > dist/rollback-floor/verified-release-assets.json <<'PYASSETIDS'
+          import json
+          import sys
+
+          releases = {}
+          with open(sys.argv[1], encoding="utf-8") as f:
+              for line in f:
+                  release = json.loads(line)
+                  tag = release["tag"]
+                  if tag in releases and releases[tag] != release:
+                      raise SystemExit(f"conflicting verified asset identity for {tag}")
+                  releases[tag] = release
+          json.dump(
+              {
+                  "schema_version": "dalec-homebrew-verified-release-assets/v1",
+                  "releases": [releases[tag] for tag in sorted(releases)],
+              },
+              sys.stdout,
+              separators=(",", ":"),
+          )
+          PYASSETIDS
           jq -n \
             --arg source_release "$source_release" \
             --arg same_release "$same_release" \
@@ -2406,6 +2460,60 @@ jobs:
             }
           done < <(jq -r '.tags[] | [.tag, .sha] | @tsv' \
             dist/rollback-floor/verified-release-tags.json)
+          jq -e \
+            --argjson max_releases "$MAX_PROTECTED_RELEASES" \
+            --argjson max_asset "$MAX_RELEASE_ASSET_BYTES" \
+            --argjson max_total "$MAX_RELEASE_TOTAL_BYTES" '
+            .schema_version == "dalec-homebrew-verified-release-assets/v1"
+            and (.releases | type == "array" and length <= $max_releases)
+            and all(.releases[];
+              (.tag | type == "string" and test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$"))
+              and (.release_id | type == "number" and . > 0)
+              and (.draft | type == "boolean")
+              and (.assets | type == "array" and length > 0 and length <= 200)
+              and all(.assets[];
+                (.id | type == "number" and . > 0)
+                and (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"))
+                and (.size | type == "number" and . >= 0 and . <= $max_asset)
+                and (.digest == null or (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))
+                and .state == "uploaded")
+              and ([.assets[].size] | add <= $max_total)
+              and ([.assets[].name] | length == (unique | length)))
+            and ([.releases[].tag] | length == (unique | length))
+          ' dist/rollback-floor/verified-release-assets.json >/dev/null
+          jq -e \
+            --slurpfile releases dist/rollback-floor/verified-release-assets.json '
+              [.tags[].tag] == [$releases[0].releases[].tag]
+            ' dist/rollback-floor/verified-release-tags.json >/dev/null
+          current_releases=$(gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          while read -r verified_release; do
+            verified_release_tag=$(jq -er .tag <<<"$verified_release")
+            verified_release_id=$(jq -er .release_id <<<"$verified_release")
+            verified_release_draft=$(jq -r .draft <<<"$verified_release")
+            current_release=$(jq -c --arg tag "$verified_release_tag" '
+              [.[][] | select(.tag_name == $tag)]
+              | if length == 1 then .[0]
+                elif length == 0 then error("verified release tag no longer exists")
+                else error("multiple releases use the verified tag")
+                end
+            ' <<<"$current_releases")
+            current_release_id=$(jq -er '.id | select(type == "number" and . > 0)' <<<"$current_release")
+            jq -e '.draft | type == "boolean"' <<<"$current_release" >/dev/null
+            current_release_draft=$(jq -r .draft <<<"$current_release")
+            [[ "$current_release_id" == "$verified_release_id" && "$current_release_draft" == "$verified_release_draft" ]] || {
+              echo "verified release binding changed for $verified_release_tag" >&2
+              exit 1
+            }
+            expected_assets=$(jq -c '.assets | sort_by(.name)' <<<"$verified_release")
+            current_assets=$(gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/releases/$verified_release_id/assets?per_page=100" \
+              | jq -c '[.[][] | {id, name, size, digest, state}] | sort_by(.name)')
+            [[ "$current_assets" == "$expected_assets" ]] || {
+              echo "verified release assets changed for $verified_release_tag" >&2
+              exit 1
+            }
+          done < <(jq -c '.releases[]' dist/rollback-floor/verified-release-assets.json)
           read_registry_digest() {
             local ref=$1 descriptor digest attempt error_file errors_file all_missing
             errors_file=$(mktemp "$RUNNER_TEMP/registry-inspect.XXXXXX")
