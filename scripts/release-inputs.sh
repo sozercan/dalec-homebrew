@@ -247,8 +247,20 @@ for target in materializer-amd64 materializer-arm64; do
   }
 done
 
-dalec_module=$(go list -m -f '{{.Version}}' github.com/project-dalec/dalec)
-buildkit_module=$(go list -m -f '{{.Version}}' github.com/moby/buildkit)
+module_version() {
+  local module=$1 metadata
+  metadata=$(go list -m -json "$module")
+  jq -e --arg module "$module" '
+    .Path == $module and ((.Replace // null) == null)
+  ' <<<"$metadata" >/dev/null || {
+    echo "release module $module must not be replaced" >&2
+    return 1
+  }
+  jq -er '.Version | select(type == "string" and length > 0)' <<<"$metadata"
+}
+
+dalec_module=$(module_version github.com/project-dalec/dalec)
+buildkit_module=$(module_version github.com/moby/buildkit)
 [[ -n "$dalec_module" && -n "$buildkit_module" ]] || {
   echo "failed to resolve release module versions" >&2
   exit 1
