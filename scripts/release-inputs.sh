@@ -181,6 +181,30 @@ dockerfile_homebrew_commit=$(dockerfile_arg HOMEBREW_COMMIT)
 dockerfile_ruby_version=$(dockerfile_arg HOMEBREW_RUBY_VERSION)
 dockerfile_keys_digest=$(dockerfile_arg HOMEBREW_KEYS_DIGEST)
 
+validate_target_arg() {
+  local target=$1 name=$2 expected=$3 actual
+  actual=$(jq -r --arg target "$target" --arg name "$name" --arg expected "$expected" '
+    .target[$target].args[$name] // $expected
+  ' <<<"$bake")
+  [[ "$actual" == "$expected" ]] || {
+    echo "$target overrides $name with an unrecorded release value" >&2
+    exit 1
+  }
+}
+for target in "${targets[@]}"; do
+  validate_target_arg "$target" GO_IMAGE "$go_image"
+  validate_target_arg "$target" UBUNTU_SNAPSHOT "$ubuntu_snapshot"
+  validate_target_arg "$target" CHISEL_VERSION "$chisel_version"
+  validate_target_arg "$target" CHISEL_RELEASES_COMMIT "$chisel_releases_commit"
+  validate_target_arg "$target" CHISEL_RELEASES_SHA256 "$chisel_releases_sha256"
+  validate_target_arg "$target" CHISEL_AMD64_SHA256 "$chisel_amd64_sha256"
+  validate_target_arg "$target" CHISEL_ARM64_SHA256 "$chisel_arm64_sha256"
+  validate_target_arg "$target" HOMEBREW_ARCHIVE_SHA256 "$homebrew_archive_sha256"
+  validate_target_arg "$target" HOMEBREW_COMMIT "$dockerfile_homebrew_commit"
+  validate_target_arg "$target" HOMEBREW_RUBY_VERSION "$dockerfile_ruby_version"
+  validate_target_arg "$target" HOMEBREW_KEYS_DIGEST "$dockerfile_keys_digest"
+done
+
 [[ "$go_image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || {
   echo "GO_IMAGE is not digest pinned: $go_image" >&2
   exit 1
