@@ -16,7 +16,7 @@
 
 ## Build an image
 
-You need Docker Buildx and a digest-pinned `dalec-homebrew` frontend. Use the digest from a published release; if none is available, see [Contributing](CONTRIBUTING.md) to build the frontend yourself.
+You need Docker Buildx and a digest-pinned `dalec-homebrew` frontend. This repository does not currently publish one; use a digest supplied by your release pipeline or see [Contributing](CONTRIBUTING.md) to build it yourself.
 
 ### Build from the command line
 
@@ -80,10 +80,6 @@ See the [usage reference](docs/usage.md) for image settings, tests, dependency r
 ## Examples
 
 More examples: [multi-package toolchain](examples/live-toolchain.yaml), [Python](examples/live-python.yaml), [Redis](examples/live-redis.yaml), [Graphviz](examples/live-graphviz.yaml), and [glibc](examples/live-glibc.yaml).
-
-## Releases
-
-Maintainers publish an existing v-prefixed SemVer tag, including supported pre-releases, by running the release workflow from the trusted `main` branch. The workflow builds, tests, scans, and signs the complete `amd64`/`arm64` component tuple before promoting the exact tested digests. See the [release guide](docs/release.md).
 
 ## Learn more
 
