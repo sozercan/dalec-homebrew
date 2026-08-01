@@ -450,7 +450,17 @@ jobs:
             container=$(docker create --platform "$PLATFORM" "$final_image")
             docker cp "$container:/usr/share/dalec-homebrew/." "$evidence_root/"
             docker rm -v "$container" >/dev/null
-            tar -C "$evidence_root" -czf "runtime-evidence-${PLATFORM_SLUG}-${spec}.tar.gz" .
+            tar \
+              --sort=name \
+              --mtime="@${source_date_epoch}" \
+              --owner=0 \
+              --group=0 \
+              --numeric-owner \
+              --format=posix \
+              --pax-option=delete=atime,delete=ctime \
+              -C "$evidence_root" \
+              -cf - . \
+              | gzip -n > "runtime-evidence-${PLATFORM_SLUG}-${spec}.tar.gz"
           done
 
       - name: Upload runtime evidence
@@ -947,6 +957,30 @@ jobs:
             --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
             dist/release/SHA256SUMS
 
+          verify_attestation_predicate() {
+            local type=$1 subject=$2 predicate=$3 output
+            output=$(mktemp "$RUNNER_TEMP/verified-attestations.XXXXXX")
+            cosign verify-attestation \
+              --type "$type" \
+              --output text \
+              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$subject" > "$output"
+            jq -s -e --slurpfile expected "$predicate" '
+              def predicate:
+                if has("payload") then (.payload | @base64d | fromjson | .predicate)
+                elif has("predicate") then .predicate
+                else empty
+                end;
+              any(.[]; predicate == $expected[0])
+            ' "$output" >/dev/null || {
+              echo "no verified $type attestation for $subject matches $predicate" >&2
+              rm -f "$output"
+              return 1
+            }
+            rm -f "$output"
+          }
+
           mapfile -t subjects < <(jq -r '
             .components[]
             | .repository as $repository
@@ -958,25 +992,28 @@ jobs:
               --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
               --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
               "$subject" >/dev/null
-            cosign verify-attestation \
-              --type slsaprovenance02 \
-              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
-              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-              "$subject" >/dev/null
+            verify_attestation_predicate \
+              slsaprovenance02 \
+              "$subject" \
+              dist/release/provenance.json
           done
 
-          while IFS= read -r subject; do
-            cosign verify-attestation \
-              --type spdxjson \
-              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
-              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-              "$subject" >/dev/null
+          while IFS=$'\t' read -r component platform subject; do
+            slug="${component}-${platform//\//-}"
+            verify_attestation_predicate \
+              spdxjson \
+              "$subject" \
+              "dist/release/sbom-${slug}.spdx.json"
           done < <(jq -r '
-            .components[]
-            | .repository as $repository
-            | .platforms[]
-            | $repository + "@" + .
-          ' dist/release/digests.json | sort -u)
+            .components
+            | to_entries[]
+            | .key as $component
+            | .value.repository as $repository
+            | .value.platforms
+            | to_entries[]
+            | [$component, .key, ($repository + "@" + .value)]
+            | @tsv
+          ' dist/release/digests.json)
 
       - name: Validate existing GitHub release before promotion
         id: existing_release
@@ -1017,6 +1054,15 @@ jobs:
             --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
             "$existing/components.json"
           (cd "$existing" && sha256sum -c SHA256SUMS)
+          {
+            awk '{ path=$2; sub(/^\*/, "", path); sub(/^\.\//, "", path); print path }' "$existing/SHA256SUMS"
+            printf '%s\n' SHA256SUMS SHA256SUMS.bundle components.json.bundle
+          } | sort -u > "$RUNNER_TEMP/expected-release-assets.txt"
+          find "$existing" -maxdepth 1 -type f -exec basename {} \; \
+            | sort -u > "$RUNNER_TEMP/actual-release-assets.txt"
+          diff -u \
+            "$RUNNER_TEMP/expected-release-assets.txt" \
+            "$RUNNER_TEMP/actual-release-assets.txt"
           jq -S 'del(.source.build_invocation, .source.build_run_attempt)' \
             dist/release/digests.json > "$RUNNER_TEMP/current-digests.json"
           jq -S 'del(.source.build_invocation, .source.build_run_attempt)' \
@@ -1034,8 +1080,15 @@ jobs:
           echo "exists=true" >> "$GITHUB_OUTPUT"
 
       - name: Add release tags without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$RELEASE_SHA...main" --jq .status)
+          if [[ "$comparison" != ahead && "$comparison" != identical ]]; then
+            echo "$RELEASE_TAG is no longer reachable from main (comparison: $comparison)" >&2
+            exit 1
+          fi
           read_registry_digest() {
             local ref=$1 descriptor digest attempt error_file errors_file all_missing
             errors_file=$(mktemp "$RUNNER_TEMP/registry-inspect.XXXXXX")

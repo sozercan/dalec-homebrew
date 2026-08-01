@@ -126,6 +126,16 @@ frontend_platforms=$(jq -c '.target.frontend.platforms | sort' <<<"$bake")
 
 runtime_base_amd64=$(jq -er '.target["runtime-base-amd64"].args.RUNTIME_BASE' <<<"$bake")
 runtime_base_arm64=$(jq -er '.target["runtime-base-arm64"].args.RUNTIME_BASE' <<<"$bake")
+materializer_base_amd64=$(jq -er '.target["materializer-amd64"].args.RUNTIME_BASE' <<<"$bake")
+materializer_base_arm64=$(jq -er '.target["materializer-arm64"].args.RUNTIME_BASE' <<<"$bake")
+[[ "$materializer_base_amd64" == "$runtime_base_amd64" ]] || {
+  echo "materializer-amd64 Ubuntu base differs from runtime-base-amd64" >&2
+  exit 1
+}
+[[ "$materializer_base_arm64" == "$runtime_base_arm64" ]] || {
+  echo "materializer-arm64 Ubuntu base differs from runtime-base-arm64" >&2
+  exit 1
+}
 for ref in "$runtime_base_amd64" "$runtime_base_arm64"; do
   [[ "$ref" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || {
     echo "runtime base is not digest pinned: $ref" >&2
