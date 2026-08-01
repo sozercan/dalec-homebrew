@@ -333,6 +333,25 @@ jobs:
               --output "$output"
           }
 
+          resolve_tag_commit() {
+            local tag=$1 object object_type actual
+            [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || {
+              echo "unsafe release tag for API lookup: $tag" >&2
+              return 1
+            }
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag") || return 1
+            object_type=$(jq -er '.object.type' <<<"$object") || return 1
+            actual=$(jq -er '.object.sha' <<<"$object") || return 1
+            for _ in $(seq 1 8); do
+              [[ "$object_type" == tag ]] || break
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$actual") || return 1
+              object_type=$(jq -er '.object.type' <<<"$object") || return 1
+              actual=$(jq -er '.object.sha' <<<"$object") || return 1
+            done
+            [[ "$object_type" == commit && "$actual" =~ ^[0-9a-f]{40}$ ]] || return 1
+            printf '%s\n' "$actual"
+          }
+
           check_draft_inventory() (
             set -euo pipefail
             local release_id=$1 state_file=$2 bundle assets_file name asset_id count
@@ -484,7 +503,7 @@ jobs:
           PYASSETS
 
           verify_protected_release() {
-            local release_tag=$1 release_id=$2 expected_predecessor=$3 bundle assets_file asset_id name
+            local release_tag=$1 release_id=$2 expected_predecessor=$3 bundle assets_file asset_id name signed_sha actual_sha
             [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || {
               echo "protected release $release_tag has an invalid API id" >&2
               return 1
@@ -560,6 +579,12 @@ jobs:
                 | select(any($provenance[0].materials[];
                     (.uri | endswith("@refs/tags/" + $tag)) and .digest.sha1 == $sha))
               ' "$bundle/digests.json" >/dev/null
+            signed_sha=$(jq -er '.source.git_sha' "$bundle/digests.json")
+            actual_sha=$(resolve_tag_commit "$release_tag")
+            [[ "$actual_sha" == "$signed_sha" ]] || {
+              echo "protected tag $release_tag points to $actual_sha, not signed commit $signed_sha" >&2
+              return 1
+            }
           }
 
           while read -r protected; do
@@ -700,6 +725,12 @@ jobs:
               exit 1
             }
           fi
+          source_signed_sha=$(jq -er '.source.git_sha' "$prior/digests.json")
+          source_actual_sha=$(resolve_tag_commit "$source_release")
+          [[ "$source_actual_sha" == "$source_signed_sha" ]] || {
+            echo "source tag $source_release points to $source_actual_sha, not signed commit $source_signed_sha" >&2
+            exit 1
+          }
           not_before=$(jq -er \
             --arg source_release "$source_release" \
             --arg source_predecessor "$source_predecessor" '
