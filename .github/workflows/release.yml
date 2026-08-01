@@ -408,6 +408,29 @@ jobs:
             printf '%s\n' "$floors"
           }
 
+          verify_component_digest_binding() {
+            local manifest=$1 digests=$2
+            jq -e --slurpfile digests "$digests" '
+              def platform_refs($component):
+                [$component.platforms[]
+                  | {key: (.platform.os + "/" + .platform.architecture), value: .ref}]
+                | from_entries;
+              def expected_refs($component):
+                $component.platforms
+                | with_entries(.value = ($component.repository + "@" + .value));
+              def matches($manifest_key; $digest_key):
+                $digests[0].components[$digest_key] as $digest_component
+                | .[$manifest_key] as $manifest_component
+                | $manifest_component.index == ($digest_component.repository + "@" + $digest_component.index)
+                and platform_refs($manifest_component) == expected_refs($digest_component);
+              .schema_version == "dalec-homebrew-components/v1"
+              and $digests[0].schema_version == "dalec-homebrew-release-digests/v1"
+              and matches("frontend"; "frontend")
+              and matches("runtime_base"; "runtime-base")
+              and matches("materializer"; "materializer")
+            ' "$manifest" >/dev/null
+          }
+
           check_draft_inventory() (
             set -euo pipefail
             local release_id=$1 state_file=$2 bundle assets_file name asset_id count
@@ -637,6 +660,7 @@ jobs:
               --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
               --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
               "$bundle/metadata-snapshot.json"
+            verify_component_digest_binding "$bundle/components.json" "$bundle/digests.json"
             python3 "$RUNNER_TEMP/verify-release-assets.py" \
               "$assets_file" "$bundle/SHA256SUMS" "$bundle" \
               "$MAX_RELEASE_ASSET_BYTES" "$MAX_RELEASE_TOTAL_BYTES"
@@ -807,6 +831,7 @@ jobs:
             --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
             "$prior/metadata-snapshot.json"
           (cd "$prior" && sha256sum -c SHA256SUMS)
+          verify_component_digest_binding "$prior/components.json" "$prior/digests.json"
           {
             awk '{ path=$2; sub(/^\*/, "", path); sub(/^\.\//, "", path); print path }' "$prior/SHA256SUMS"
             printf '%s\n' SHA256SUMS SHA256SUMS.bundle components.json.bundle metadata-snapshot.json.bundle
