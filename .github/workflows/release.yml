@@ -27,8 +27,6 @@ env:
   TRIVY_IMAGE: docker.io/aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e
   MAX_RELEASE_ASSET_BYTES: 268435456
   MAX_RELEASE_TOTAL_BYTES: 1073741824
-  MAX_PROTECTED_RELEASES: 64
-  MAX_PROTECTED_DOWNLOAD_BYTES: 2147483648
   MAX_RELEASE_DISCOVERY_PAGES: 10
 
 jobs:
@@ -118,955 +116,58 @@ jobs:
     with:
       ref: ${{ needs.prepare.outputs.sha }}
 
-  rollback_floor:
-    name: Load signed metadata rollback floor
+  release_target:
+    name: Require unused release tag
     needs: prepare
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 10
     permissions:
       contents: write
-    outputs:
-      same_release: ${{ steps.floor.outputs.same_release }}
     env:
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-      RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
     steps:
-      - name: Set up Cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        with:
-          cosign-release: v3.1.2
-
-      - name: Load rollback floor from latest signed release
-        id: floor
+      - name: Reject an existing GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          CERTIFICATE_IDENTITY_REGEXP: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/heads/main$
-          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
         run: |
           set -euo pipefail
-          mkdir -p dist/rollback-floor
-          verified_tags_tsv="$RUNNER_TEMP/verified-release-tags.tsv"
-          verified_floors_tsv="$RUNNER_TEMP/verified-release-floors.tsv"
-          verified_assets_jsonl="$RUNNER_TEMP/verified-release-assets.jsonl"
-          : > "$verified_tags_tsv"
-          : > "$verified_floors_tsv"
-          : > "$verified_assets_jsonl"
-          cat > "$RUNNER_TEMP/rfc3339-compare.py" <<'PYRFC3339'
-          from datetime import datetime, timezone
-          import re
-          import sys
-
-          pattern = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z$")
-          epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-          def parse(value):
-              match = pattern.fullmatch(value)
-              if match is None:
-                  raise SystemExit(f"timestamp is not canonical RFC3339 UTC: {value!r}")
-              instant = datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-              delta = instant - epoch
-              nanoseconds = int((match.group(2) or "").ljust(9, "0"))
-              return (delta.days * 86400 + delta.seconds, nanoseconds)
-
-          current, inherited = sys.argv[1:]
-          current_value = parse(current)
-          if not inherited:
-              print("genesis")
-          else:
-              inherited_value = parse(inherited)
-              if current_value < inherited_value:
-                  raise SystemExit(f"rollback floor regressed from {inherited} to {current}")
-              print("equal" if current_value == inherited_value else "newer")
-          PYRFC3339
-          fetch_bounded_pages() {
-            local endpoint=$1 output=$2 pages_file page response count
-            pages_file=$(mktemp "$RUNNER_TEMP/api-pages.XXXXXX")
-            : > "$pages_file"
-            for page in $(seq 1 "$((MAX_RELEASE_DISCOVERY_PAGES + 1))"); do
-              response=$(gh api --method GET "$endpoint" -F per_page=100 -F page="$page")
-              count=$(jq -er 'if type == "array" then length else error("expected an array page") end' <<<"$response")
-              if (( page > MAX_RELEASE_DISCOVERY_PAGES )); then
-                (( count == 0 )) || {
-                  echo "GitHub API discovery exceeds $MAX_RELEASE_DISCOVERY_PAGES pages for $endpoint" >&2
-                  return 1
-                }
-                break
-              fi
-              printf '%s\n' "$response" >> "$pages_file"
-              (( count < 100 )) && break
-            done
-            jq -s . "$pages_file" > "$output"
-          }
-          fetch_bounded_pages \
-            "repos/$GITHUB_REPOSITORY/releases" \
-            "$RUNNER_TEMP/releases.json"
-          fetch_bounded_pages \
-            "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
-            "$RUNNER_TEMP/tag-refs.json"
-          python3 - "$RELEASE_TAG" "$RUNNER_TEMP/releases.json" "$RUNNER_TEMP/tag-refs.json" > "$RUNNER_TEMP/floor-selection.json" <<'PYSELECT'
-          import functools
-          import json
-          import re
-          import sys
-
-          target_tag, releases_path, refs_path = sys.argv[1:]
-          semver_re = re.compile(
-              r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
-              r"(?:-([0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?$"
-          )
-
-          def parse(value):
-              match = semver_re.fullmatch(value)
-              if not match:
-                  return None
-              prerelease = match.group(4)
-              identifiers = [] if prerelease is None else prerelease.split(".")
-              for identifier in identifiers:
-                  if identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0"):
-                      return None
-              return (tuple(map(int, match.group(1, 2, 3))), identifiers)
-
-          def compare(left, right):
-              left_core, left_pre = left
-              right_core, right_pre = right
-              if left_core != right_core:
-                  return -1 if left_core < right_core else 1
-              if not left_pre or not right_pre:
-                  if not left_pre and not right_pre:
-                      return 0
-                  return 1 if not left_pre else -1
-              for lval, rval in zip(left_pre, right_pre):
-                  if lval == rval:
-                      continue
-                  lnum, rnum = lval.isdigit(), rval.isdigit()
-                  if lnum and rnum:
-                      return -1 if int(lval) < int(rval) else 1
-                  if lnum != rnum:
-                      return -1 if lnum else 1
-                  return -1 if lval < rval else 1
-              return (len(left_pre) > len(right_pre)) - (len(left_pre) < len(right_pre))
-
-          target_version = parse(target_tag)
-          if target_version is None:
-              raise SystemExit(f"unsupported release tag {target_tag!r}")
-
-          with open(releases_path, encoding="utf-8") as f:
-              release_pages = json.load(f)
-          with open(refs_path, encoding="utf-8") as f:
-              ref_pages = json.load(f)
-
-          all_releases = {
-              release["tag_name"]: release
-              for page in release_pages
-              for release in page
-              if parse(release.get("tag_name", "")) is not None
-          }
-          published_releases = {
-              tag: release for tag, release in all_releases.items() if not release.get("draft")
-          }
-          tags = {
-              ref["ref"].removeprefix("refs/tags/")
-              for page in ref_pages
-              for ref in page
-              if ref.get("ref", "").startswith("refs/tags/")
-              and parse(ref["ref"].removeprefix("refs/tags/")) is not None
-          }
-
-          untagged_releases = sorted(tag for tag in published_releases if tag not in tags)
-          if untagged_releases:
-              raise SystemExit(
-                  "release continuity is broken; published release(s) lack protected tags: "
-                  + ", ".join(untagged_releases)
-              )
-
-          prior_tags = [tag for tag in tags if compare(parse(tag), target_version) < 0]
-          missing = sorted(tag for tag in prior_tags if tag not in published_releases)
-          if missing:
-              raise SystemExit(
-                  "release continuity is broken; protected tag(s) lack signed releases: "
-                  + ", ".join(missing)
-              )
-          ordered_prior = sorted(
-              prior_tags,
-              key=functools.cmp_to_key(lambda left, right: compare(parse(left), parse(right))),
-          )
-
-          def chain_entries(release_tags):
-              return [
-                  {
-                      "tag": tag,
-                      "id": published_releases[tag].get("id"),
-                      "predecessor": release_tags[index - 1] if index > 0 else None,
-                  }
-                  for index, tag in enumerate(release_tags)
-              ]
-
-          target_release = all_releases.get(target_tag)
-          if target_release is not None and not target_release.get("draft"):
-              selection = {
-                  "source_release": target_tag,
-                  "source_release_id": target_release.get("id"),
-                  "source_draft": False,
-                  "source_predecessor": ordered_prior[-1] if ordered_prior else None,
-                  "fallback_release": None,
-                  "fallback_release_id": None,
-                  "fallback_predecessor": None,
-                  "protected_releases": chain_entries(ordered_prior),
-                  "same_release": True,
-              }
-          else:
-              newer = [tag for tag in tags if compare(parse(tag), target_version) > 0]
-              if newer:
-                  raise SystemExit(
-                      f"cannot publish {target_tag} after newer release(s): {', '.join(sorted(newer))}"
-                  )
-              if target_release is not None:
-                  selection = {
-                      "source_release": target_tag,
-                      "source_release_id": target_release.get("id"),
-                      "source_draft": True,
-                      "source_predecessor": ordered_prior[-1] if ordered_prior else None,
-                      "fallback_release": ordered_prior[-1] if ordered_prior else None,
-                      "fallback_release_id": (
-                          published_releases[ordered_prior[-1]].get("id")
-                          if ordered_prior
-                          else None
-                      ),
-                      "fallback_predecessor": (
-                          ordered_prior[-2] if len(ordered_prior) > 1 else None
-                      ),
-                      "protected_releases": chain_entries(ordered_prior),
-                      "same_release": True,
-                  }
-              else:
-                  predecessor = ordered_prior[-1] if ordered_prior else ""
-                  selection = {
-                      "source_release": predecessor,
-                      "source_release_id": (
-                          published_releases[predecessor].get("id") if predecessor else None
-                      ),
-                      "source_draft": False,
-                      "source_predecessor": (
-                          ordered_prior[-2] if len(ordered_prior) > 1 else None
-                      ),
-                      "fallback_release": None,
-                      "fallback_release_id": None,
-                      "fallback_predecessor": None,
-                      "protected_releases": chain_entries(ordered_prior[:-1]),
-                      "same_release": False,
-                  }
-
-          json.dump(selection, sys.stdout, separators=(",", ":"))
-          PYSELECT
-          source_release=$(jq -r .source_release "$RUNNER_TEMP/floor-selection.json")
-          source_release_id=$(jq -r '.source_release_id // empty' "$RUNNER_TEMP/floor-selection.json")
-          source_draft=$(jq -r .source_draft "$RUNNER_TEMP/floor-selection.json")
-          source_predecessor=$(jq -r '.source_predecessor // empty' "$RUNNER_TEMP/floor-selection.json")
-          fallback_release=$(jq -r '.fallback_release // empty' "$RUNNER_TEMP/floor-selection.json")
-          fallback_release_id=$(jq -r '.fallback_release_id // empty' "$RUNNER_TEMP/floor-selection.json")
-          fallback_predecessor=$(jq -r '.fallback_predecessor // empty' "$RUNNER_TEMP/floor-selection.json")
-          same_release=$(jq -r .same_release "$RUNNER_TEMP/floor-selection.json")
-          protected_release_count=$(jq -er '.protected_releases | length' "$RUNNER_TEMP/floor-selection.json")
-          source_in_protected=$(jq -r --arg source "$source_release" '
-            any(.protected_releases[]; .tag == $source)
-          ' "$RUNNER_TEMP/floor-selection.json")
-          verified_release_count=$protected_release_count
-          if [[ -n "$source_release" && "$source_release" != "$RELEASE_TAG" && "$source_in_protected" != true ]]; then
-            verified_release_count=$((verified_release_count + 1))
-          fi
-          (( verified_release_count <= MAX_PROTECTED_RELEASES )) || {
-            echo "release history exceeds the verification limit of $MAX_PROTECTED_RELEASES" >&2
-            exit 1
-          }
-          if [[ -z "$source_release" ]]; then
-            echo "same_release=false" >> "$GITHUB_OUTPUT"
-            jq -n '{
-              schema_version: "dalec-homebrew-rollback-floor-input/v1",
-              source_release: null,
-              same_release: false,
-              not_before: null,
-              inherited_floor: null,
-              floor_snapshot: null
-            }' > dist/rollback-floor/rollback-floor-input.json
-            jq -n '{
-              schema_version: "dalec-homebrew-verified-release-tags/v1",
-              tags: []
-            }' > dist/rollback-floor/verified-release-tags.json
-            jq -n '{
-              schema_version: "dalec-homebrew-verified-release-assets/v1",
-              releases: []
-            }' > dist/rollback-floor/verified-release-assets.json
-            exit 0
-          fi
-
-          download_release_asset() {
-            local asset_id=$1 output=$2
-            curl --fail --location --silent --show-error \
-              --retry 3 \
-              --retry-all-errors \
-              -H 'Accept: application/octet-stream' \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
-              --output "$output"
-          }
-
-          resolve_tag_commit() {
-            local tag=$1 object object_type actual
-            [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || {
-              echo "unsafe release tag for API lookup: $tag" >&2
-              return 1
-            }
-            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag") || return 1
-            object_type=$(jq -er '.object.type' <<<"$object") || return 1
-            actual=$(jq -er '.object.sha' <<<"$object") || return 1
-            for _ in $(seq 1 8); do
-              [[ "$object_type" == tag ]] || break
-              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$actual") || return 1
-              object_type=$(jq -er '.object.type' <<<"$object") || return 1
-              actual=$(jq -er '.object.sha' <<<"$object") || return 1
-            done
-            [[ "$object_type" == commit && "$actual" =~ ^[0-9a-f]{40}$ ]] || return 1
-            printf '%s\n' "$actual"
-          }
-
-          floor_for_tag() {
-            local tag=$1 floors
-            floors=$(awk -F '\t' -v tag="$tag" '$1 == tag { print $2 }' "$verified_floors_tsv") || return 1
-            [[ -n "$floors" && "$floors" != *$'\n'* ]] || return 1
-            printf '%s\n' "$floors"
-          }
-
-          record_release_assets() {
-            local tag=$1 release_id=$2 draft=$3 assets_file=$4
-            [[ "$draft" == true || "$draft" == false ]]
-            jq -cn \
-              --arg tag "$tag" \
-              --argjson release_id "$release_id" \
-              --argjson draft "$draft" \
-              --slurpfile assets "$assets_file" '
-                {
-                  tag: $tag,
-                  release_id: $release_id,
-                  draft: $draft,
-                  assets: ($assets[0]
-                    | map({id, name, size, digest, state})
-                    | sort_by(.name))
-                }
-              ' >> "$verified_assets_jsonl"
-          }
-
-          verify_component_digest_binding() {
-            local manifest=$1 digests=$2
-            jq -e --slurpfile digests "$digests" '
-              def platform_refs($component):
-                [$component.platforms[]
-                  | {key: (.platform.os + "/" + .platform.architecture), value: .ref}]
-                | from_entries;
-              def expected_refs($component):
-                $component.platforms
-                | with_entries(.value = ($component.repository + "@" + .value));
-              def matches($manifest_key; $digest_key):
-                $digests[0].components[$digest_key] as $digest_component
-                | .[$manifest_key] as $manifest_component
-                | $manifest_component.index == ($digest_component.repository + "@" + $digest_component.index)
-                and platform_refs($manifest_component) == expected_refs($digest_component);
-              .schema_version == "dalec-homebrew-components/v1"
-              and $digests[0].schema_version == "dalec-homebrew-release-digests/v1"
-              and matches("frontend"; "frontend")
-              and matches("runtime_base"; "runtime-base")
-              and matches("materializer"; "materializer")
-            ' "$manifest" >/dev/null
-          }
-
-          check_draft_inventory() (
-            set -euo pipefail
-            local release_id=$1 state_file=$2 bundle assets_file name asset_id count
-            bundle="$RUNNER_TEMP/draft-inventory-$release_id"
-            assets_file="$RUNNER_TEMP/draft-inventory-$release_id-assets.json"
-            mkdir -p "$bundle"
-            gh api --paginate --slurp \
-              "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
-              > "$assets_file"
-            jq -e \
-              --argjson max_asset "$MAX_RELEASE_ASSET_BYTES" \
-              --argjson max_total "$MAX_RELEASE_TOTAL_BYTES" '
-                [.[][] | {id, name, size, state}]
-                | length <= 200
-                and all(.[]; (.id | type == "number" and . > 0))
-                and all(.[]; (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")))
-                and all(.[]; (.size | type == "number" and . >= 0 and . <= $max_asset))
-                and ([.[].size] | add <= $max_total)
-                and ([.[].name] | length == (unique | length))
-              ' "$assets_file" >/dev/null
-            if jq -e 'any(.[][]; .state != "uploaded" or .size == 0)' "$assets_file" >/dev/null; then
-              printf 'incomplete\n' > "$state_file"
-              exit 0
-            fi
-            for name in SHA256SUMS SHA256SUMS.bundle; do
-              count=$(jq -r --arg name "$name" '[.[][] | select(.name == $name)] | length' "$assets_file")
-              if (( count == 0 )); then
-                printf 'incomplete\n' > "$state_file"
-                exit 0
-              fi
-              (( count == 1 ))
-              asset_id=$(jq -er --arg name "$name" '.[][] | select(.name == $name) | .id' "$assets_file")
-              download_release_asset "$asset_id" "$bundle/$name"
-            done
-            cosign verify-blob \
-              --bundle "$bundle/SHA256SUMS.bundle" \
-              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
-              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-              "$bundle/SHA256SUMS"
-            {
-              awk '{ path=$2; sub(/^\*/, "", path); sub(/^\.\//, "", path); print path }' "$bundle/SHA256SUMS"
-              printf '%s\n' SHA256SUMS SHA256SUMS.bundle components.json.bundle metadata-snapshot.json.bundle
-            } | sort -u > "$bundle/expected.txt"
-            jq -r '.[][] | .name' "$assets_file" | sort -u > "$bundle/actual.txt"
-            comm -13 "$bundle/expected.txt" "$bundle/actual.txt" > "$bundle/extra.txt"
-            if [[ -s "$bundle/extra.txt" ]]; then
-              exit 1
-            fi
-            comm -23 "$bundle/expected.txt" "$bundle/actual.txt" > "$bundle/missing.txt"
-            if [[ -s "$bundle/missing.txt" ]]; then
-              printf 'incomplete\n' > "$state_file"
-              exit 0
-            fi
-            printf 'complete\n' > "$state_file"
-          )
-
-          cat > "$RUNNER_TEMP/verify-release-assets.py" <<'PYASSETS'
-          import hashlib
-          import json
-          from pathlib import Path
-          import re
-          import sys
-
-          assets_path, sums_path, bundle_path = map(Path, sys.argv[1:4])
-          max_asset_bytes = int(sys.argv[4])
-          max_total_bytes = int(sys.argv[5])
-          assets = json.loads(assets_path.read_text(encoding="utf-8"))
-          if not 0 < len(assets) <= 200:
-              raise SystemExit("release asset count is invalid or unbounded")
-
-          name_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
-          digest_re = re.compile(r"^sha256:[0-9a-f]{64}$")
-          by_name = {}
-          total_bytes = 0
-          for asset in assets:
-              name = asset.get("name")
-              asset_id = asset.get("id")
-              digest = asset.get("digest")
-              if not isinstance(name, str) or not name_re.fullmatch(name):
-                  raise SystemExit(f"invalid release asset name: {name!r}")
-              if name in by_name:
-                  raise SystemExit(f"duplicate release asset: {name}")
-              if not isinstance(asset_id, int) or asset_id <= 0:
-                  raise SystemExit(f"invalid release asset id for {name}")
-              size = asset.get("size")
-              if not isinstance(size, int) or size < 0 or size > max_asset_bytes:
-                  raise SystemExit(f"release asset {name} has an invalid or excessive size")
-              total_bytes += size
-              if asset.get("state") != "uploaded":
-                  raise SystemExit(f"release asset {name} is not fully uploaded")
-              if digest is not None and (not isinstance(digest, str) or not digest_re.fullmatch(digest)):
-                  raise SystemExit(f"release asset {name} has an invalid SHA-256 digest")
-              by_name[name] = asset
-          if total_bytes > max_total_bytes:
-              raise SystemExit("release asset total size is excessive")
-
-          checksum_re = re.compile(
-              r"^([0-9a-f]{64}) [ *](?:\./)?([A-Za-z0-9][A-Za-z0-9._-]{0,255})$"
-          )
-          checksums = {}
-          for line in sums_path.read_text(encoding="utf-8").splitlines():
-              match = checksum_re.fullmatch(line)
-              if not match:
-                  raise SystemExit(f"invalid SHA256SUMS line: {line!r}")
-              digest, name = match.groups()
-              if name in checksums:
-                  raise SystemExit(f"duplicate SHA256SUMS entry: {name}")
-              checksums[name] = digest
-
-          bundle_names = {
-              "SHA256SUMS.bundle",
-              "components.json.bundle",
-              "metadata-snapshot.json.bundle",
-          }
-          expected_names = set(checksums) | bundle_names | {"SHA256SUMS"}
-          actual_names = set(by_name)
-          if actual_names != expected_names:
-              missing = sorted(expected_names - actual_names)
-              extra = sorted(actual_names - expected_names)
-              raise SystemExit(f"release asset set mismatch: missing={missing}, extra={extra}")
-
-          for name, digest in checksums.items():
-              api_digest = by_name[name].get("digest")
-              if api_digest is not None and api_digest != f"sha256:{digest}":
-                  raise SystemExit(f"release API digest mismatch for {name}")
-
-          downloaded_names = {
-              "SHA256SUMS",
-              "SHA256SUMS.bundle",
-              "components.json",
-              "components.json.bundle",
-              "digests.json",
-              "metadata-snapshot.json",
-              "metadata-snapshot.json.bundle",
-              "provenance.json",
-          }
-          downloaded_names.update(
-              name for name, asset in by_name.items() if asset.get("digest") is None
-          )
-          for name in downloaded_names:
-              path = bundle_path / name
-              digest = hashlib.sha256(path.read_bytes()).hexdigest()
-              api_digest = by_name[name].get("digest")
-              if api_digest is not None and api_digest != f"sha256:{digest}":
-                  raise SystemExit(f"downloaded release asset digest mismatch for {name}")
-              if name in checksums and checksums[name] != digest:
-                  raise SystemExit(f"signed checksum mismatch for {name}")
-          PYASSETS
-
-          verify_protected_release() {
-            local release_tag=$1 release_id=$2 expected_predecessor=$3 bundle assets_pages_file assets_file asset_id name signed_sha actual_sha release_download_bytes current_floor inherited_floor expected_floor
-            [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || {
-              echo "protected release $release_tag has an invalid API id" >&2
-              return 1
-            }
-            bundle="$RUNNER_TEMP/protected-release-$release_id"
-            assets_pages_file="$RUNNER_TEMP/protected-release-$release_id-assets-pages.json"
-            assets_file="$RUNNER_TEMP/protected-release-$release_id-assets.json"
-            mkdir -p "$bundle"
-            gh api --paginate --slurp \
-              "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
-              > "$assets_pages_file"
-            jq -c '[.[][]]' "$assets_pages_file" > "$assets_file"
-            jq -e \
-              --argjson max_asset "$MAX_RELEASE_ASSET_BYTES" \
-              --argjson max_total "$MAX_RELEASE_TOTAL_BYTES" '
-                [.[] | {id, name, size}]
-                | length > 0 and length <= 200
-                and all(.[]; (.id | type == "number" and . > 0))
-                and all(.[]; (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")))
-                and all(.[]; (.size | type == "number" and . >= 0 and . <= $max_asset))
-                and ([.[].size] | add <= $max_total)
-                and ([.[].name] | length == (unique | length))
-              ' "$assets_file" >/dev/null
-            release_download_bytes=$(jq -er '
-              [
-                .[]
-                | select(
-                    .digest == null or
-                    .name == "SHA256SUMS" or
-                    .name == "SHA256SUMS.bundle" or
-                    .name == "components.json" or
-                    .name == "components.json.bundle" or
-                    .name == "digests.json" or
-                    .name == "metadata-snapshot.json" or
-                    .name == "metadata-snapshot.json.bundle" or
-                    .name == "provenance.json")
-                | .size
-              ]
-              | add // 0
-            ' "$assets_file")
-            (( protected_download_bytes + release_download_bytes <= MAX_PROTECTED_DOWNLOAD_BYTES )) || {
-              echo "protected release verification exceeds the aggregate download budget" >&2
-              return 1
-            }
-            protected_download_bytes=$((protected_download_bytes + release_download_bytes))
-            while read -r asset; do
-              asset_id=$(jq -er .id <<<"$asset")
-              name=$(jq -er .name <<<"$asset")
-              [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$ ]]
-              download_release_asset "$asset_id" "$bundle/$name"
-            done < <(jq -c '.[] | select(.digest == null) | {id, name}' "$assets_file")
-            for name in \
-              SHA256SUMS SHA256SUMS.bundle \
-              components.json components.json.bundle \
-              digests.json \
-              metadata-snapshot.json metadata-snapshot.json.bundle \
-              provenance.json; do
-              asset_id=$(jq -er --arg name "$name" '
-                [.[] | select(.name == $name)]
-                | if length == 1 then .[0].id else error("missing or duplicate release asset") end
-              ' "$assets_file")
-              [[ -f "$bundle/$name" ]] || download_release_asset "$asset_id" "$bundle/$name"
-            done
-            cosign verify-blob \
-              --bundle "$bundle/SHA256SUMS.bundle" \
-              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
-              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-              "$bundle/SHA256SUMS"
-            cosign verify-blob \
-              --bundle "$bundle/components.json.bundle" \
-              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
-              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-              "$bundle/components.json"
-            cosign verify-blob \
-              --bundle "$bundle/metadata-snapshot.json.bundle" \
-              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
-              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-              "$bundle/metadata-snapshot.json"
-            verify_component_digest_binding "$bundle/components.json" "$bundle/digests.json"
-            python3 "$RUNNER_TEMP/verify-release-assets.py" \
-              "$assets_file" "$bundle/SHA256SUMS" "$bundle" \
-              "$MAX_RELEASE_ASSET_BYTES" "$MAX_RELEASE_TOTAL_BYTES"
-            jq -e --arg tag "$release_tag" \
-              --arg predecessor "$expected_predecessor" \
-              --slurpfile metadata "$bundle/metadata-snapshot.json" \
-              --slurpfile provenance "$bundle/provenance.json" '
-                select(.schema_version == "dalec-homebrew-release-digests/v1")
-                | select(.source.tag == $tag)
-                | .source.git_sha as $sha
-                | select($sha | type == "string" and test("^[0-9a-f]{40}$"))
-                | select($metadata[0].schema_version == "dalec-homebrew-release-metadata/v1")
-                | select($metadata[0].release.tag == $tag and $metadata[0].release.sha == $sha)
-                | select(
-                    if $predecessor == "" then $metadata[0].inherited_floor == null
-                    else $metadata[0].inherited_floor.source_release == $predecessor
-                    end)
-                | select($provenance[0].invocation.parameters.tag == $tag)
-                | select(any($provenance[0].materials[];
-                    (.uri | endswith("@refs/tags/" + $tag)) and .digest.sha1 == $sha))
-              ' "$bundle/digests.json" >/dev/null
-            signed_sha=$(jq -er '.source.git_sha' "$bundle/digests.json")
-            actual_sha=$(resolve_tag_commit "$release_tag")
-            [[ "$actual_sha" == "$signed_sha" ]] || {
-              echo "protected tag $release_tag points to $actual_sha, not signed commit $signed_sha" >&2
-              return 1
-            }
-            current_floor=$(jq -er '
-              select(.schema_version == "dalec-homebrew-release-metadata/v1")
-              | select(.rollback_floor == .accepted_snapshot.generated_at)
-              | .rollback_floor
-              | select(type == "string" and length > 0)
-            ' "$bundle/metadata-snapshot.json")
-            inherited_floor=""
-            if [[ -n "$expected_predecessor" ]]; then
-              expected_floor=$(floor_for_tag "$expected_predecessor")
-              inherited_floor=$(jq -er --arg predecessor "$expected_predecessor" '
-                select(.inherited_floor.source_release == $predecessor)
-                | .inherited_floor.not_before
-                | select(type == "string" and length > 0)
-              ' "$bundle/metadata-snapshot.json")
-              [[ "$inherited_floor" == "$expected_floor" ]] || {
-                echo "protected release $release_tag inherited floor $inherited_floor, expected $expected_floor" >&2
-                return 1
-              }
-            else
-              jq -e '.inherited_floor == null' "$bundle/metadata-snapshot.json" >/dev/null || {
-                echo "genesis release $release_tag unexpectedly inherits a prior floor" >&2
-                return 1
-              }
-            fi
-            python3 "$RUNNER_TEMP/rfc3339-compare.py" \
-              "$current_floor" "$inherited_floor" >/dev/null
-            printf '%s\t%s\n' "$release_tag" "$signed_sha" >> "$verified_tags_tsv"
-            printf '%s\t%s\n' "$release_tag" "$current_floor" >> "$verified_floors_tsv"
-            record_release_assets "$release_tag" "$release_id" false "$assets_file"
-          }
-
-          protected_download_bytes=0
-          while read -r protected; do
-            protected_tag=$(jq -er .tag <<<"$protected")
-            protected_id=$(jq -er .id <<<"$protected")
-            protected_predecessor=$(jq -r '.predecessor // empty' <<<"$protected")
-            echo "verifying protected predecessor $protected_tag"
-            verify_protected_release "$protected_tag" "$protected_id" "$protected_predecessor"
-          done < <(jq -c '.protected_releases[]' "$RUNNER_TEMP/floor-selection.json")
-
-          if [[ "$source_draft" == true ]]; then
-            draft_state_file="$RUNNER_TEMP/draft-inventory-state"
-            set +e
-            check_draft_inventory "$source_release_id" "$draft_state_file"
-            draft_status=$?
-            set -e
-            if (( draft_status != 0 )); then
-              echo "draft release $source_release has invalid or unverifiable assets" >&2
-              exit "$draft_status"
-            fi
-            draft_state=$(cat "$draft_state_file")
-            case "$draft_state" in
-              complete)
-                ;;
-              incomplete)
-                echo "discarding incomplete draft release $source_release" >&2
-                gh api --method DELETE \
-                  "repos/$GITHUB_REPOSITORY/releases/$source_release_id" >/dev/null
-                source_release=$fallback_release
-                source_release_id=$fallback_release_id
-                source_draft=false
-                source_predecessor=$fallback_predecessor
-                same_release=false
-                if [[ -z "$source_release" ]]; then
-                  echo "same_release=false" >> "$GITHUB_OUTPUT"
-                  jq -n '{
-                    schema_version: "dalec-homebrew-rollback-floor-input/v1",
-                    source_release: null,
-                    same_release: false,
-                    not_before: null,
-                    inherited_floor: null,
-                    floor_snapshot: null
-                  }' > dist/rollback-floor/rollback-floor-input.json
-                  jq -n '{
-                    schema_version: "dalec-homebrew-verified-release-tags/v1",
-                    tags: []
-                  }' > dist/rollback-floor/verified-release-tags.json
-                  jq -n '{
-                    schema_version: "dalec-homebrew-verified-release-assets/v1",
-                    releases: []
-                  }' > dist/rollback-floor/verified-release-assets.json
-                  exit 0
-                fi
-                ;;
-              *)
-                echo "draft release $source_release produced an invalid inventory state" >&2
+          pages=$(mktemp "$RUNNER_TEMP/releases.XXXXXX")
+          : > "$pages"
+          for page in $(seq 1 "$((MAX_RELEASE_DISCOVERY_PAGES + 1))"); do
+            response=$(gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/releases" \
+              -F per_page=100 \
+              -F page="$page")
+            count=$(jq -er 'if type == "array" then length else error("expected an array page") end' <<<"$response")
+            if (( page > MAX_RELEASE_DISCOVERY_PAGES )); then
+              (( count == 0 )) || {
+                echo "release discovery exceeds $MAX_RELEASE_DISCOVERY_PAGES pages" >&2
                 exit 1
-                ;;
-            esac
-          fi
-
-          echo "same_release=$same_release" >> "$GITHUB_OUTPUT"
-
-          prior="$RUNNER_TEMP/prior-release"
-          mkdir -p "$prior"
-          [[ "$source_release_id" =~ ^[1-9][0-9]*$ ]] || {
-            echo "release $source_release has an invalid API id" >&2
-            exit 1
-          }
-          assets=$(gh api --paginate --slurp \
-            "repos/$GITHUB_REPOSITORY/releases/$source_release_id/assets?per_page=100")
-          source_assets_file="$RUNNER_TEMP/source-release-assets.json"
-          jq -c '[.[][]]' <<<"$assets" > "$source_assets_file"
-          jq -e \
-            --argjson max_asset "$MAX_RELEASE_ASSET_BYTES" \
-            --argjson max_total "$MAX_RELEASE_TOTAL_BYTES" '
-            [.[][] | {id, name, size}]
-            | length > 0 and length <= 200
-            and all(.[]; (.id | type == "number" and . > 0))
-            and all(.[]; (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")))
-            and all(.[]; (.size | type == "number" and . >= 0 and . <= $max_asset))
-            and ([.[].size] | add <= $max_total)
-            and ([.[].name] | length == (unique | length))
-          ' <<<"$assets" >/dev/null || {
-            echo "release $source_release has invalid or unbounded assets" >&2
-            exit 1
-          }
-          source_download_bytes=$(jq -er '[.[][] | .size] | add // 0' <<<"$assets")
-          (( protected_download_bytes + source_download_bytes <= MAX_PROTECTED_DOWNLOAD_BYTES )) || {
-            echo "source release verification exceeds the aggregate download budget" >&2
-            exit 1
-          }
-          protected_download_bytes=$((protected_download_bytes + source_download_bytes))
-          while read -r asset; do
-            asset_id=$(jq -er .id <<<"$asset")
-            asset_name=$(jq -er .name <<<"$asset")
-            curl --fail --location --silent --show-error \
-              --retry 3 \
-              --retry-all-errors \
-              -H 'Accept: application/octet-stream' \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
-              --output "$prior/$asset_name"
-          done < <(jq -c '.[][] | {id, name}' <<<"$assets")
-          cosign verify-blob \
-            --bundle "$prior/SHA256SUMS.bundle" \
-            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
-            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-            "$prior/SHA256SUMS"
-          cosign verify-blob \
-            --bundle "$prior/components.json.bundle" \
-            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
-            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-            "$prior/components.json"
-          cosign verify-blob \
-            --bundle "$prior/metadata-snapshot.json.bundle" \
-            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
-            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-            "$prior/metadata-snapshot.json"
-          (cd "$prior" && sha256sum -c SHA256SUMS)
-          verify_component_digest_binding "$prior/components.json" "$prior/digests.json"
-          {
-            awk '{ path=$2; sub(/^\*/, "", path); sub(/^\.\//, "", path); print path }' "$prior/SHA256SUMS"
-            printf '%s\n' SHA256SUMS SHA256SUMS.bundle components.json.bundle metadata-snapshot.json.bundle
-          } | sort -u > "$RUNNER_TEMP/source-release-assets-expected.txt"
-          jq -r '.[][] | .name' <<<"$assets" \
-            | sort -u > "$RUNNER_TEMP/source-release-assets-actual.txt"
-          diff -u \
-            "$RUNNER_TEMP/source-release-assets-expected.txt" \
-            "$RUNNER_TEMP/source-release-assets-actual.txt"
-          for name in digests.json metadata-snapshot.json provenance.json; do
-            grep -Eq "(^|[[:space:]])(\\./)?${name//./\\.}$" "$prior/SHA256SUMS" || {
-              echo "$source_release does not contain signed $name evidence" >&2
-              exit 1
-            }
+              }
+              break
+            fi
+            printf '%s\n' "$response" >> "$pages"
+            (( count < 100 )) && break
           done
-          if [[ "$same_release" == true ]]; then
-            jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
-              .source.tag == $tag and .source.git_sha == $sha
-            ' "$prior/digests.json" >/dev/null || {
-              echo "signed digests.json does not match $RELEASE_TAG at $RELEASE_SHA" >&2
-              exit 1
-            }
-            jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
-              .release.tag == $tag and .release.sha == $sha
-            ' "$prior/metadata-snapshot.json" >/dev/null || {
-              echo "signed metadata-snapshot.json does not match $RELEASE_TAG at $RELEASE_SHA" >&2
-              exit 1
-            }
-            jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
-              .invocation.parameters.tag == $tag and
-              any(.materials[]; (.uri | endswith("@refs/tags/" + $tag)) and .digest.sha1 == $sha)
-            ' "$prior/provenance.json" >/dev/null || {
-              echo "signed provenance.json does not bind $RELEASE_TAG at $RELEASE_SHA" >&2
-              exit 1
-            }
+
+          matches=$(jq -s -c --arg tag "$RELEASE_TAG" '[.[][] | select(.tag_name == $tag)]' "$pages")
+          count=$(jq -er 'length' <<<"$matches")
+          (( count <= 1 )) || {
+            echo "multiple GitHub releases use $RELEASE_TAG" >&2
+            exit 1
+          }
+          if (( count == 1 )); then
+            state=$(jq -r 'if .[0].draft then "draft" else "published" end' <<<"$matches")
+            echo "$RELEASE_TAG already has a $state GitHub release; releases are not rebuilt or overwritten" >&2
+            if [[ "$state" == draft ]]; then
+              echo "delete the incomplete draft explicitly before retrying" >&2
+            fi
+            exit 1
           fi
-          source_signed_sha=$(jq -er '.source.git_sha' "$prior/digests.json")
-          jq -e --arg tag "$source_release" --arg sha "$source_signed_sha" '
-            .source.tag == $tag and .source.git_sha == $sha
-          ' "$prior/digests.json" >/dev/null || {
-            echo "signed digests.json does not bind source release $source_release" >&2
-            exit 1
-          }
-          jq -e --arg tag "$source_release" --arg sha "$source_signed_sha" '
-            .release.tag == $tag and .release.sha == $sha
-          ' "$prior/metadata-snapshot.json" >/dev/null || {
-            echo "signed metadata-snapshot.json does not bind source release $source_release" >&2
-            exit 1
-          }
-          jq -e --arg tag "$source_release" --arg sha "$source_signed_sha" '
-            .invocation.parameters.tag == $tag and
-            any(.materials[]; (.uri | endswith("@refs/tags/" + $tag)) and .digest.sha1 == $sha)
-          ' "$prior/provenance.json" >/dev/null || {
-            echo "signed provenance.json does not bind source release $source_release" >&2
-            exit 1
-          }
-          source_actual_sha=$(resolve_tag_commit "$source_release")
-          [[ "$source_actual_sha" == "$source_signed_sha" ]] || {
-            echo "source tag $source_release points to $source_actual_sha, not signed commit $source_signed_sha" >&2
-            exit 1
-          }
-          printf '%s\t%s\n' "$source_release" "$source_signed_sha" >> "$verified_tags_tsv"
-          python3 - "$verified_tags_tsv" > dist/rollback-floor/verified-release-tags.json <<'PYTAGS'
-          import json
-          import re
-          import sys
-
-          tag_re = re.compile(
-              r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
-              r"(?:-([0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?$"
-          )
-          tags = {}
-          with open(sys.argv[1], encoding="utf-8") as f:
-              for line in f:
-                  tag, sha = line.rstrip("\n").split("\t")
-                  if tag_re.fullmatch(tag) is None or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
-                      raise SystemExit("invalid verified release tag identity")
-                  if tag in tags and tags[tag] != sha:
-                      raise SystemExit(f"conflicting verified identity for {tag}")
-                  tags[tag] = sha
-          json.dump(
-              {
-                  "schema_version": "dalec-homebrew-verified-release-tags/v1",
-                  "tags": [{"tag": tag, "sha": tags[tag]} for tag in sorted(tags)],
-              },
-              sys.stdout,
-              separators=(",", ":"),
-          )
-          PYTAGS
-          source_predecessor_floor=""
-          if [[ -n "$source_predecessor" ]]; then
-            source_predecessor_floor=$(floor_for_tag "$source_predecessor")
-          fi
-          not_before=$(jq -er \
-            --arg source_release "$source_release" \
-            --arg source_predecessor "$source_predecessor" \
-            --arg source_predecessor_floor "$source_predecessor_floor" '
-            def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
-            select(.schema_version == "dalec-homebrew-release-metadata/v1")
-            | select(.release.tag == $source_release)
-            | select(.release.sha | type == "string" and test("^[0-9a-f]{40}$"))
-            | select(
-                if $source_predecessor == "" then .inherited_floor == null
-                else
-                  .inherited_floor.source_release == $source_predecessor and
-                  .inherited_floor.not_before == $source_predecessor_floor
-                end)
-            | select(.rollback_floor == .accepted_snapshot.generated_at)
-            | select([.accepted_snapshot.digest, .accepted_snapshot.formula_digest, .accepted_snapshot.migration_digest, .accepted_snapshot.formula_envelope_digest, .accepted_snapshot.migration_envelope_digest] | all(sha256))
-            | select([.accepted_snapshot.formula_freshness_source, .accepted_snapshot.migration_freshness_source] | all(. == "signed-payload" or . == "http-last-modified"))
-            | select(.accepted_snapshot.formula_url | type == "string" and length > 0)
-            | select(.accepted_snapshot.migration_url | type == "string" and length > 0)
-            | .rollback_floor
-            | select(type == "string" and length > 0)
-          ' "$prior/metadata-snapshot.json")
-          python3 "$RUNNER_TEMP/rfc3339-compare.py" \
-            "$not_before" "$source_predecessor_floor" >/dev/null
-          printf '%s\t%s\n' "$source_release" "$not_before" >> "$verified_floors_tsv"
-          record_release_assets "$source_release" "$source_release_id" "$source_draft" "$source_assets_file"
-          python3 - "$verified_assets_jsonl" > dist/rollback-floor/verified-release-assets.json <<'PYASSETIDS'
-          import json
-          import sys
-
-          releases = {}
-          with open(sys.argv[1], encoding="utf-8") as f:
-              for line in f:
-                  release = json.loads(line)
-                  tag = release["tag"]
-                  if tag in releases and releases[tag] != release:
-                      raise SystemExit(f"conflicting verified asset identity for {tag}")
-                  releases[tag] = release
-          json.dump(
-              {
-                  "schema_version": "dalec-homebrew-verified-release-assets/v1",
-                  "releases": [releases[tag] for tag in sorted(releases)],
-              },
-              sys.stdout,
-              separators=(",", ":"),
-          )
-          PYASSETIDS
-          jq -n \
-            --arg source_release "$source_release" \
-            --arg same_release "$same_release" \
-            --arg not_before "$not_before" \
-            --slurpfile metadata "$prior/metadata-snapshot.json" \
-            '{
-              schema_version: "dalec-homebrew-rollback-floor-input/v1",
-              source_release: $source_release,
-              same_release: ($same_release == "true"),
-              not_before: $not_before,
-              inherited_floor: (
-                if $same_release == "true" then $metadata[0].inherited_floor
-                else {source_release: $source_release, not_before: $not_before}
-                end
-              ),
-              floor_snapshot: $metadata[0].accepted_snapshot
-            }' > dist/rollback-floor/rollback-floor-input.json
-
-      - name: Upload rollback floor
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-rollback-floor
-          path: dist/rollback-floor
-          if-no-files-found: error
-          retention-days: 7
-          overwrite: true
-
-      - name: Upload existing signed release bundle
-        if: steps.floor.outputs.same_release == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: existing-release-bundle
-          path: ${{ runner.temp }}/prior-release
-          if-no-files-found: error
-          retention-days: 7
-          overwrite: true
 
   build:
     name: Build immutable component tuple
-    needs: [prepare, ci, rollback_floor]
-    if: needs.rollback_floor.outputs.same_release != 'true'
+    needs: [prepare, ci, release_target]
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     permissions:
@@ -1393,8 +494,7 @@ jobs:
 
   integration:
     name: Integration test (${{ matrix.platform }})
-    needs: [prepare, build, rollback_floor]
-    if: needs.rollback_floor.outputs.same_release != 'true'
+    needs: [prepare, build]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     permissions:
@@ -1423,12 +523,6 @@ jobs:
         with:
           name: release-build
           path: dist/release
-
-      - name: Download rollback floor
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-rollback-floor
-          path: dist/rollback-floor
 
       - name: Install checksum-pinned Buildx
         run: |
@@ -1503,7 +597,6 @@ jobs:
           materializer_ref=$(component_ref materializer)
           frontend_ref=$(component_ref frontend "$PLATFORM")
           source_date_epoch=$(jq -er .source.source_date_epoch dist/release/digests.json)
-          metadata_not_before=$(jq -r '.not_before // empty' dist/rollback-floor/rollback-floor-input.json)
 
           specs=(live-test live-python live-glibc live-redis live-graphviz)
           mkdir -p runtime-evidence
@@ -1516,7 +609,6 @@ jobs:
             DALEC_HOMEBREW_LIVE_MATERIALIZER_REF="$materializer_ref" \
             DALEC_HOMEBREW_LIVE_FRONTEND_REF="$frontend_ref" \
             DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH="$source_date_epoch" \
-            DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE="$metadata_not_before" \
             DALEC_HOMEBREW_LIVE_IMAGE="$final_image" \
             DALEC_HOMEBREW_LIVE_OUTPUT=load \
             DALEC_HOMEBREW_LIVE_PROGRESS=plain \
@@ -1551,8 +643,7 @@ jobs:
 
   evidence:
     name: Evidence (${{ matrix.component }}, ${{ matrix.platform }})
-    needs: [build, rollback_floor]
-    if: needs.rollback_floor.outputs.same_release != 'true'
+    needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -1660,8 +751,7 @@ jobs:
 
   sign:
     name: Sign and attest immutable tuple
-    needs: [prepare, build, rollback_floor, integration, evidence]
-    if: needs.rollback_floor.outputs.same_release != 'true'
+    needs: [prepare, build, integration, evidence]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: release
@@ -1750,12 +840,6 @@ jobs:
           name: release-build
           path: dist/release
 
-      - name: Download rollback floor
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-rollback-floor
-          path: dist/release
-
       - name: Download platform evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1773,33 +857,6 @@ jobs:
       - name: Verify integration metadata snapshots match across platforms
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/rfc3339-compare.py" <<'PYRFC3339'
-          from datetime import datetime, timezone
-          import re
-          import sys
-
-          pattern = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z$")
-          epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-          def parse(value):
-              match = pattern.fullmatch(value)
-              if match is None:
-                  raise SystemExit(f"timestamp is not canonical RFC3339 UTC: {value!r}")
-              instant = datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-              delta = instant - epoch
-              nanoseconds = int((match.group(2) or "").ljust(9, "0"))
-              return (delta.days * 86400 + delta.seconds, nanoseconds)
-
-          current, inherited = sys.argv[1:]
-          current_value = parse(current)
-          if not inherited:
-              print("genesis")
-          else:
-              inherited_value = parse(inherited)
-              if current_value < inherited_value:
-                  raise SystemExit(f"rollback floor regressed from {inherited} to {current}")
-              print("equal" if current_value == inherited_value else "newer")
-          PYRFC3339
           for spec in live-test live-python live-glibc live-redis live-graphviz; do
             amd64="dist/release/runtime-evidence/runtime-evidence-linux-amd64-${spec}.tar.gz"
             arm64="dist/release/runtime-evidence/runtime-evidence-linux-arm64-${spec}.tar.gz"
@@ -1857,38 +914,14 @@ jobs:
           for spec in live-python live-glibc live-redis live-graphviz; do
             diff -u "$reference" "$RUNNER_TEMP/${spec}-amd64-metadata.json"
           done
-          previous_not_before=$(jq -r '.not_before // empty' dist/release/rollback-floor-input.json)
-          accepted_not_before=$(jq -er '.metadata.generated_at' "$reference")
-          relation=$(python3 "$RUNNER_TEMP/rfc3339-compare.py" \
-            "$accepted_not_before" "$previous_not_before")
-          same_release=$(jq -r '.same_release' dist/release/rollback-floor-input.json)
-          if [[ "$same_release" == true ]]; then
-            jq -e --slurpfile accepted "$reference" \
-              '.floor_snapshot == $accepted[0].metadata' \
-              dist/release/rollback-floor-input.json >/dev/null || {
-                echo "same-tag rerun resolved a different metadata snapshot" >&2
-                exit 1
-              }
-          elif [[ "$relation" == equal ]]; then
-            jq -e --slurpfile accepted "$reference" '
-              def identity: [.digest, .formula_digest, .migration_digest, .formula_envelope_digest, .migration_envelope_digest];
-              (.floor_snapshot | identity) == ($accepted[0].metadata | identity)
-            ' dist/release/rollback-floor-input.json >/dev/null || {
-              echo "metadata content changed without advancing the rollback timestamp" >&2
-              exit 1
-            }
-          fi
           jq -n \
             --arg release_tag "$RELEASE_TAG" \
             --arg release_sha "$RELEASE_SHA" \
-            --slurpfile previous dist/release/rollback-floor-input.json \
             --slurpfile snapshot "$reference" \
             '{
               schema_version: "dalec-homebrew-release-metadata/v1",
               release: {tag: $release_tag, sha: $release_sha},
-              inherited_floor: $previous[0].inherited_floor,
-              accepted_snapshot: $snapshot[0].metadata,
-              rollback_floor: $snapshot[0].metadata.generated_at
+              accepted_snapshot: $snapshot[0].metadata
             }' > dist/release/metadata-snapshot.json
 
       - name: Generate and verify component manifest
@@ -1958,8 +991,6 @@ jobs:
                   syft_image: env.SYFT_IMAGE,
                   trivy_version: env.TRIVY_VERSION,
                   trivy_image: env.TRIVY_IMAGE,
-                  max_protected_releases: env.MAX_PROTECTED_RELEASES,
-                  max_protected_download_bytes: env.MAX_PROTECTED_DOWNLOAD_BYTES,
                   max_release_discovery_pages: env.MAX_RELEASE_DISCOVERY_PAGES,
                   workflow_ref: $workflow_ref,
                   workflow_sha: $workflow_sha
@@ -2090,23 +1121,9 @@ jobs:
 
   promote:
     name: Promote tested digests
-    needs: [prepare, ci, rollback_floor, build, integration, evidence, sign]
-    if: >-
-      always() &&
-      !cancelled() &&
-      needs.prepare.result == 'success' &&
-      needs.ci.result == 'success' &&
-      needs.rollback_floor.result == 'success' &&
-      (
-        needs.rollback_floor.outputs.same_release == 'true' ||
-        (
-          needs.build.result == 'success' &&
-          needs.integration.result == 'success' &&
-          needs.evidence.result == 'success' &&
-          needs.sign.result == 'success'
-        )
-      )
+    needs: [prepare, sign]
     runs-on: ubuntu-24.04
+    environment: release
     timeout-minutes: 20
     permissions:
       actions: read
@@ -2150,25 +1167,11 @@ jobs:
             exit 1
           fi
 
-      - name: Download existing signed release bundle
-        if: needs.rollback_floor.outputs.same_release == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: existing-release-bundle
-          path: dist/release
-
-      - name: Download newly signed release bundle
-        if: needs.rollback_floor.outputs.same_release != 'true'
+      - name: Download signed release bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-bundle
           path: dist/release
-
-      - name: Download verified predecessor identities
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-rollback-floor
-          path: dist/rollback-floor
 
       - name: Install checksum-pinned Buildx
         run: |
@@ -2321,159 +1324,9 @@ jobs:
             | @tsv
           ' dist/release/digests.json)
 
-      - name: Validate existing GitHub release before promotion
-        id: existing_release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CERTIFICATE_IDENTITY_REGEXP: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/heads/main$
-          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
-        run: |
-          set -euo pipefail
-          fetch_bounded_pages() {
-            local endpoint=$1 output=$2 pages_file page response count
-            pages_file=$(mktemp "$RUNNER_TEMP/api-pages.XXXXXX")
-            : > "$pages_file"
-            for page in $(seq 1 "$((MAX_RELEASE_DISCOVERY_PAGES + 1))"); do
-              response=$(gh api --method GET "$endpoint" -F per_page=100 -F page="$page")
-              count=$(jq -er 'if type == "array" then length else error("expected an array page") end' <<<"$response")
-              if (( page > MAX_RELEASE_DISCOVERY_PAGES )); then
-                (( count == 0 )) || {
-                  echo "GitHub API discovery exceeds $MAX_RELEASE_DISCOVERY_PAGES pages for $endpoint" >&2
-                  return 1
-                }
-                break
-              fi
-              printf '%s\n' "$response" >> "$pages_file"
-              (( count < 100 )) && break
-            done
-            jq -s . "$pages_file" > "$output"
-          }
-          fetch_bounded_pages \
-            "repos/$GITHUB_REPOSITORY/releases" \
-            "$RUNNER_TEMP/existing-release-pages.json"
-          releases=$(cat "$RUNNER_TEMP/existing-release-pages.json")
-          release_json=$(jq -c --arg tag "$RELEASE_TAG" '
-            [.[][] | select(.tag_name == $tag)]
-            | if length == 0 then empty
-              elif length == 1 then .[0]
-              else error("multiple releases use the requested tag")
-              end
-          ' <<<"$releases")
-          if [[ -z "$release_json" ]]; then
-            {
-              echo "exists=false"
-              echo "draft=false"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          expected_prerelease=false
-          [[ "$STABLE" == true ]] || expected_prerelease=true
-          jq -e --argjson expected_prerelease "$expected_prerelease" '
-            (.draft | type == "boolean") and .prerelease == $expected_prerelease
-          ' <<<"$release_json" >/dev/null || {
-            echo "existing $RELEASE_TAG has invalid state or the wrong prerelease classification" >&2
-            exit 1
-          }
-          release_draft=$(jq -r .draft <<<"$release_json")
-          release_id=$(jq -er '.id | select(type == "number" and . > 0)' <<<"$release_json")
-
-          existing="$RUNNER_TEMP/existing-release"
-          mkdir -p "$existing"
-          assets=$(gh api --paginate --slurp \
-            "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100")
-          jq -e \
-            --argjson max_asset "$MAX_RELEASE_ASSET_BYTES" \
-            --argjson max_total "$MAX_RELEASE_TOTAL_BYTES" '
-            [.[][] | {id, name, size}]
-            | length > 0 and length <= 200
-            and all(.[]; (.id | type == "number" and . > 0))
-            and all(.[]; (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")))
-            and all(.[]; (.size | type == "number" and . >= 0 and . <= $max_asset))
-            and ([.[].size] | add <= $max_total)
-            and ([.[].name] | length == (unique | length))
-          ' <<<"$assets" >/dev/null || {
-            echo "release $RELEASE_TAG has invalid or unbounded assets" >&2
-            exit 1
-          }
-          while read -r asset; do
-            asset_id=$(jq -er .id <<<"$asset")
-            asset_name=$(jq -er .name <<<"$asset")
-            curl --fail --location --silent --show-error \
-              --retry 3 \
-              --retry-all-errors \
-              -H 'Accept: application/octet-stream' \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
-              --output "$existing/$asset_name"
-          done < <(jq -c '.[][] | {id, name}' <<<"$assets")
-          cosign verify-blob \
-            --bundle "$existing/SHA256SUMS.bundle" \
-            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
-            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-            "$existing/SHA256SUMS"
-          cosign verify-blob \
-            --bundle "$existing/components.json.bundle" \
-            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
-            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-            "$existing/components.json"
-          cosign verify-blob \
-            --bundle "$existing/metadata-snapshot.json.bundle" \
-            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
-            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-            "$existing/metadata-snapshot.json"
-          (cd "$existing" && sha256sum -c SHA256SUMS)
-          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
-            .source.tag == $tag and .source.git_sha == $sha
-          ' "$existing/digests.json" >/dev/null || {
-            echo "signed digests.json does not match $RELEASE_TAG at $RELEASE_SHA" >&2
-            exit 1
-          }
-          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
-            .release.tag == $tag and .release.sha == $sha
-          ' "$existing/metadata-snapshot.json" >/dev/null || {
-            echo "signed metadata-snapshot.json does not match $RELEASE_TAG at $RELEASE_SHA" >&2
-            exit 1
-          }
-          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
-            .invocation.parameters.tag == $tag and
-            any(.materials[]; (.uri | endswith("@refs/tags/" + $tag)) and .digest.sha1 == $sha)
-          ' "$existing/provenance.json" >/dev/null || {
-            echo "signed provenance.json does not bind $RELEASE_TAG at $RELEASE_SHA" >&2
-            exit 1
-          }
-          {
-            awk '{ path=$2; sub(/^\*/, "", path); sub(/^\.\//, "", path); print path }' "$existing/SHA256SUMS"
-            printf '%s\n' SHA256SUMS SHA256SUMS.bundle components.json.bundle metadata-snapshot.json.bundle
-          } | sort -u > "$RUNNER_TEMP/expected-release-assets.txt"
-          find "$existing" -maxdepth 1 -type f -exec basename {} \; \
-            | sort -u > "$RUNNER_TEMP/actual-release-assets.txt"
-          diff -u \
-            "$RUNNER_TEMP/expected-release-assets.txt" \
-            "$RUNNER_TEMP/actual-release-assets.txt"
-          jq -S 'del(.source.build_invocation, .source.build_run_attempt)' \
-            dist/release/digests.json > "$RUNNER_TEMP/current-digests.json"
-          jq -S 'del(.source.build_invocation, .source.build_run_attempt)' \
-            "$existing/digests.json" > "$RUNNER_TEMP/existing-digests.json"
-          cmp "$RUNNER_TEMP/current-digests.json" "$RUNNER_TEMP/existing-digests.json" || {
-            echo "existing $RELEASE_TAG asset differs: digests.json" >&2
-            exit 1
-          }
-          for name in inputs.json components.digest metadata-snapshot.json; do
-            cmp "dist/release/$name" "$existing/$name" || {
-              echo "existing $RELEASE_TAG asset differs: $name" >&2
-              exit 1
-            }
-          done
-          {
-            echo "exists=true"
-            echo "draft=$release_draft"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Add release tags without rebuilding
+      - name: Stage assets, promote digests, and publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          EXISTING_RELEASE: ${{ steps.existing_release.outputs.exists }}
-          EXISTING_DRAFT: ${{ steps.existing_release.outputs.draft }}
         run: |
           set -euo pipefail
           comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$RELEASE_SHA...main" --jq .status)
@@ -2481,10 +1334,10 @@ jobs:
             echo "$RELEASE_TAG is no longer reachable from main (comparison: $comparison)" >&2
             exit 1
           fi
-          resolve_tag_commit() {
-            local tag=$1 object object_type actual
-            [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || return 1
-            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag") || return 1
+
+          resolve_release_tag() {
+            local object object_type actual
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG") || return 1
             object_type=$(jq -er '.object.type' <<<"$object") || return 1
             actual=$(jq -er '.object.sha' <<<"$object") || return 1
             for _ in $(seq 1 8); do
@@ -2496,200 +1349,19 @@ jobs:
             [[ "$object_type" == commit && "$actual" =~ ^[0-9a-f]{40}$ ]] || return 1
             printf '%s\n' "$actual"
           }
+
           require_release_tag() {
             local actual
-            actual=$(resolve_tag_commit "$RELEASE_TAG") || return 1
+            actual=$(resolve_release_tag) || {
+              echo "refs/tags/$RELEASE_TAG no longer resolves to a commit" >&2
+              exit 1
+            }
             [[ "$actual" == "$RELEASE_SHA" ]] || {
-              echo "refs/tags/$RELEASE_TAG no longer points to $RELEASE_SHA" >&2
-              return 1
-            }
-          }
-          require_release_tag
-          jq -e --argjson max_tags "$((MAX_PROTECTED_RELEASES + 1))" '
-            .schema_version == "dalec-homebrew-verified-release-tags/v1"
-            and (.tags | type == "array" and length <= $max_tags)
-            and all(.tags[];
-              (.tag | type == "string" and test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$"))
-              and (.sha | type == "string" and test("^[0-9a-f]{40}$")))
-            and ([.tags[].tag] | length == (unique | length))
-          ' dist/rollback-floor/verified-release-tags.json >/dev/null
-          while IFS=$'\t' read -r verified_tag verified_sha; do
-            actual=$(resolve_tag_commit "$verified_tag") || {
-              echo "could not resolve verified predecessor tag $verified_tag" >&2
+              echo "refs/tags/$RELEASE_TAG moved from $RELEASE_SHA to $actual" >&2
               exit 1
             }
-            [[ "$actual" == "$verified_sha" ]] || {
-              echo "verified predecessor tag $verified_tag moved from $verified_sha to $actual" >&2
-              exit 1
-            }
-          done < <(jq -r '.tags[] | [.tag, .sha] | @tsv' \
-            dist/rollback-floor/verified-release-tags.json)
-          jq -e \
-            --argjson max_releases "$((MAX_PROTECTED_RELEASES + 1))" \
-            --argjson max_asset "$MAX_RELEASE_ASSET_BYTES" \
-            --argjson max_total "$MAX_RELEASE_TOTAL_BYTES" '
-            .schema_version == "dalec-homebrew-verified-release-assets/v1"
-            and (.releases | type == "array" and length <= $max_releases)
-            and all(.releases[];
-              (.tag | type == "string" and test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$"))
-              and (.release_id | type == "number" and . > 0)
-              and (.draft | type == "boolean")
-              and (.assets | type == "array" and length > 0 and length <= 200)
-              and all(.assets[];
-                (.id | type == "number" and . > 0)
-                and (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"))
-                and (.size | type == "number" and . >= 0 and . <= $max_asset)
-                and (.digest == null or (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))
-                and .state == "uploaded")
-              and ([.assets[].size] | add <= $max_total)
-              and ([.assets[].name] | length == (unique | length)))
-            and ([.releases[].tag] | length == (unique | length))
-          ' dist/rollback-floor/verified-release-assets.json >/dev/null
-          jq -e \
-            --slurpfile releases dist/rollback-floor/verified-release-assets.json '
-              [.tags[].tag] == [$releases[0].releases[].tag]
-            ' dist/rollback-floor/verified-release-tags.json >/dev/null
-          fetch_bounded_pages() {
-            local endpoint=$1 output=$2 pages_file page response count
-            pages_file=$(mktemp "$RUNNER_TEMP/api-pages.XXXXXX")
-            : > "$pages_file"
-            for page in $(seq 1 "$((MAX_RELEASE_DISCOVERY_PAGES + 1))"); do
-              response=$(gh api --method GET "$endpoint" -F per_page=100 -F page="$page")
-              count=$(jq -er 'if type == "array" then length else error("expected an array page") end' <<<"$response")
-              if (( page > MAX_RELEASE_DISCOVERY_PAGES )); then
-                (( count == 0 )) || {
-                  echo "GitHub API discovery exceeds $MAX_RELEASE_DISCOVERY_PAGES pages for $endpoint" >&2
-                  return 1
-                }
-                break
-              fi
-              printf '%s\n' "$response" >> "$pages_file"
-              (( count < 100 )) && break
-            done
-            jq -s . "$pages_file" > "$output"
           }
-          fetch_bounded_pages \
-            "repos/$GITHUB_REPOSITORY/releases" \
-            "$RUNNER_TEMP/current-release-pages.json"
-          fetch_bounded_pages \
-            "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
-            "$RUNNER_TEMP/current-tag-ref-pages.json"
-          current_releases=$(cat "$RUNNER_TEMP/current-release-pages.json")
-          allow_newer=false
-          if [[ "$EXISTING_RELEASE" == true && "$EXISTING_DRAFT" != true ]]; then
-            allow_newer=true
-          fi
-          python3 - \
-            "$RELEASE_TAG" \
-            "$allow_newer" \
-            dist/rollback-floor/verified-release-tags.json \
-            "$RUNNER_TEMP/current-release-pages.json" \
-            "$RUNNER_TEMP/current-tag-ref-pages.json" <<'PYCONTINUITY'
-          import functools
-          import json
-          import re
-          import sys
 
-          target_tag, allow_newer, verified_path, releases_path, refs_path = sys.argv[1:]
-          semver_re = re.compile(
-              r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
-              r"(?:-([0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?$"
-          )
-
-          def parse(value):
-              match = semver_re.fullmatch(value)
-              if match is None:
-                  return None
-              prerelease = match.group(4)
-              identifiers = [] if prerelease is None else prerelease.split(".")
-              if any(value.isdigit() and len(value) > 1 and value.startswith("0") for value in identifiers):
-                  return None
-              return (tuple(map(int, match.group(1, 2, 3))), identifiers)
-
-          def compare(left, right):
-              left_core, left_pre = left
-              right_core, right_pre = right
-              if left_core != right_core:
-                  return -1 if left_core < right_core else 1
-              if not left_pre or not right_pre:
-                  if not left_pre and not right_pre:
-                      return 0
-                  return 1 if not left_pre else -1
-              for lval, rval in zip(left_pre, right_pre):
-                  if lval == rval:
-                      continue
-                  lnum, rnum = lval.isdigit(), rval.isdigit()
-                  if lnum and rnum:
-                      return -1 if int(lval) < int(rval) else 1
-                  if lnum != rnum:
-                      return -1 if lnum else 1
-                  return -1 if lval < rval else 1
-              return (len(left_pre) > len(right_pre)) - (len(left_pre) < len(right_pre))
-
-          target_version = parse(target_tag)
-          if target_version is None:
-              raise SystemExit(f"unsupported release tag {target_tag!r}")
-          with open(verified_path, encoding="utf-8") as f:
-              verified = json.load(f)
-          with open(releases_path, encoding="utf-8") as f:
-              release_pages = json.load(f)
-          with open(refs_path, encoding="utf-8") as f:
-              ref_pages = json.load(f)
-          expected = {item["tag"] for item in verified["tags"] if item["tag"] != target_tag}
-          tags = {
-              ref["ref"].removeprefix("refs/tags/")
-              for page in ref_pages
-              for ref in page
-              if ref.get("ref", "").startswith("refs/tags/")
-              and parse(ref["ref"].removeprefix("refs/tags/")) is not None
-          }
-          published = {
-              release["tag_name"]
-              for page in release_pages
-              for release in page
-              if not release.get("draft") and parse(release.get("tag_name", "")) is not None
-          }
-          orphaned = sorted(published - tags)
-          if orphaned:
-              raise SystemExit("published releases lost protected tags: " + ", ".join(orphaned))
-          lower_tags = {tag for tag in tags if compare(parse(tag), target_version) < 0}
-          lower_releases = {tag for tag in published if compare(parse(tag), target_version) < 0}
-          if lower_tags != expected or lower_releases != expected:
-              raise SystemExit(
-                  "protected release chain changed during the run: "
-                  f"expected={sorted(expected)}, tags={sorted(lower_tags)}, releases={sorted(lower_releases)}"
-              )
-          newer = sorted(tag for tag in tags if compare(parse(tag), target_version) > 0)
-          if newer and allow_newer != "true":
-              raise SystemExit("newer release tags appeared during the run: " + ", ".join(newer))
-          PYCONTINUITY
-          while read -r verified_release; do
-            verified_release_tag=$(jq -er .tag <<<"$verified_release")
-            verified_release_id=$(jq -er .release_id <<<"$verified_release")
-            verified_release_draft=$(jq -r .draft <<<"$verified_release")
-            current_release=$(jq -c --arg tag "$verified_release_tag" '
-              [.[][] | select(.tag_name == $tag)]
-              | if length == 1 then .[0]
-                elif length == 0 then error("verified release tag no longer exists")
-                else error("multiple releases use the verified tag")
-                end
-            ' <<<"$current_releases")
-            current_release_id=$(jq -er '.id | select(type == "number" and . > 0)' <<<"$current_release")
-            jq -e '.draft | type == "boolean"' <<<"$current_release" >/dev/null
-            current_release_draft=$(jq -r .draft <<<"$current_release")
-            [[ "$current_release_id" == "$verified_release_id" && "$current_release_draft" == "$verified_release_draft" ]] || {
-              echo "verified release binding changed for $verified_release_tag" >&2
-              exit 1
-            }
-            expected_assets=$(jq -c '.assets | sort_by(.name)' <<<"$verified_release")
-            current_assets=$(gh api --paginate --slurp \
-              "repos/$GITHUB_REPOSITORY/releases/$verified_release_id/assets?per_page=100" \
-              | jq -c '[.[][] | {id, name, size, digest, state}] | sort_by(.name)')
-            [[ "$current_assets" == "$expected_assets" ]] || {
-              echo "verified release assets changed for $verified_release_tag" >&2
-              exit 1
-            }
-          done < <(jq -c '.releases[]' dist/rollback-floor/verified-release-assets.json)
           read_registry_digest() {
             local ref=$1 descriptor digest attempt error_file errors_file all_missing
             errors_file=$(mktemp "$RUNNER_TEMP/registry-inspect.XXXXXX")
@@ -2731,10 +1403,10 @@ jobs:
             repository=$(jq -er --arg component "$component" '.components[$component].repository' dist/release/digests.json)
             digest=$(jq -er --arg component "$component" '.components[$component].index' dist/release/digests.json)
             if existing=$(read_registry_digest "$repository:$RELEASE_TAG"); then
-              if [[ "$existing" != "$digest" ]]; then
+              [[ "$existing" == "$digest" ]] || {
                 echo "immutable release tag $repository:$RELEASE_TAG already points to $existing, not $digest" >&2
                 exit 1
-              fi
+              }
               return 0
             else
               status=$?
@@ -2745,123 +1417,95 @@ jobs:
             fi
           }
 
+          require_release_tag
           for component in runtime-base materializer frontend; do
             require_expected_or_missing_tag "$component"
           done
 
-          while IFS=$'\t' read -r verified_tag verified_sha; do
-            actual=$(resolve_tag_commit "$verified_tag") || {
-              echo "could not re-resolve verified predecessor tag $verified_tag" >&2
-              exit 1
-            }
-            [[ "$actual" == "$verified_sha" ]] || {
-              echo "verified predecessor tag $verified_tag moved from $verified_sha to $actual" >&2
-              exit 1
-            }
-          done < <(jq -r '.tags[] | [.tag, .sha] | @tsv' \
-            dist/rollback-floor/verified-release-tags.json)
+          mapfile -t assets < <(find dist/release -maxdepth 1 -type f | sort)
+          (( ${#assets[@]} > 0 && ${#assets[@]} <= 200 ))
+          total_asset_bytes=0
+          for asset in "${assets[@]}"; do
+            asset_name=${asset##*/}
+            [[ "$asset_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$ ]]
+            asset_bytes=$(wc -c < "$asset")
+            (( asset_bytes >= 0 && asset_bytes <= MAX_RELEASE_ASSET_BYTES ))
+            total_asset_bytes=$((total_asset_bytes + asset_bytes))
+            (( total_asset_bytes <= MAX_RELEASE_TOTAL_BYTES ))
+          done
 
-          if [[ "$EXISTING_RELEASE" == true ]]; then
-            require_release_tag
-            echo "$RELEASE_TAG already has verified signed release assets"
-          else
-            require_release_tag
-            expected_prerelease=false
-            [[ "$STABLE" == true ]] || expected_prerelease=true
-            draft_release=$(gh api --method POST \
-              "repos/$GITHUB_REPOSITORY/releases" \
-              -f tag_name="$RELEASE_TAG" \
-              -f target_commitish="$RELEASE_SHA" \
-              -f name="$RELEASE_TAG" \
-              -F draft=true \
-              -F prerelease="$expected_prerelease" \
-              -F generate_release_notes=true \
-              -f make_latest=false)
-            draft_release_id=$(jq -er '
-              select(.draft == true)
-              | .id
-              | select(type == "number" and . > 0)
-            ' <<<"$draft_release")
-            mapfile -t assets < <(find dist/release -maxdepth 1 -type f | sort)
-            (
-              set -euo pipefail
-              cleanup_draft=true
-              trap '
-                if [[ "$cleanup_draft" == true ]]; then
-                  gh api --method DELETE \
-                    "repos/$GITHUB_REPOSITORY/releases/$draft_release_id" >/dev/null \
-                    || echo "could not delete incomplete draft release $draft_release_id" >&2
-                fi
-              ' EXIT
+          expected_prerelease=false
+          release_args=(
+            --draft
+            --verify-tag
+            --generate-notes
+            --title "$RELEASE_TAG"
+            --target "$RELEASE_SHA"
+            --latest=false
+          )
+          if [[ "$STABLE" != true ]]; then
+            expected_prerelease=true
+            release_args+=(--prerelease)
+          fi
 
-              jq -e --arg tag "$RELEASE_TAG" --argjson prerelease "$expected_prerelease" '
-                .tag_name == $tag and .draft == true and .prerelease == $prerelease
-                and (.upload_url | type == "string" and startswith("https://uploads.github.com/"))
-              ' <<<"$draft_release" >/dev/null
-              (( ${#assets[@]} > 0 && ${#assets[@]} <= 200 ))
-              total_asset_bytes=0
-              for asset in "${assets[@]}"; do
-                asset_bytes=$(wc -c < "$asset")
-                (( asset_bytes >= 0 && asset_bytes <= MAX_RELEASE_ASSET_BYTES ))
-                total_asset_bytes=$((total_asset_bytes + asset_bytes))
-                (( total_asset_bytes <= MAX_RELEASE_TOTAL_BYTES ))
-              done
-              expected_assets=$(mktemp "$RUNNER_TEMP/draft-assets-expected.XXXXXX")
-              actual_assets=$(mktemp "$RUNNER_TEMP/draft-assets-actual.XXXXXX")
-              printf '%s\n' "${assets[@]##*/}" | sort -u > "$expected_assets"
-              [[ $(wc -l < "$expected_assets") -eq ${#assets[@]} ]]
-
-              upload_url=$(jq -er .upload_url <<<"$draft_release")
-              upload_endpoint=${upload_url%%\{*}
-              for asset in "${assets[@]}"; do
-                asset_name=${asset##*/}
-                [[ "$asset_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$ ]]
-                curl --fail --location --silent --show-error \
-                  -H 'Accept: application/vnd.github+json' \
-                  -H "Authorization: Bearer $GH_TOKEN" \
-                  -H 'Content-Type: application/octet-stream' \
-                  --data-binary "@$asset" \
-                  "$upload_endpoint?name=$asset_name" >/dev/null
-              done
-
-              uploaded_assets=$(gh api --paginate --slurp \
-                "repos/$GITHUB_REPOSITORY/releases/$draft_release_id/assets?per_page=100")
-              jq -e \
-                --argjson expected_count "${#assets[@]}" \
-                --argjson max_asset "$MAX_RELEASE_ASSET_BYTES" \
-                --argjson max_total "$MAX_RELEASE_TOTAL_BYTES" '
-                [.[][] | {id, name, digest, state, size}]
+          verify_draft_assets() {
+            local release_json release_id uploaded_assets asset asset_name expected_digest uploaded_digest uploaded_size expected_names actual_names
+            release_json=$(gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json databaseId,isDraft,isPrerelease,tagName)
+            jq -e \
+              --arg tag "$RELEASE_TAG" \
+              --argjson prerelease "$expected_prerelease" '
+                .tagName == $tag and
+                .isDraft == true and
+                .isPrerelease == $prerelease and
+                (.databaseId | type == "number" and . > 0)
+              ' <<<"$release_json" >/dev/null
+            release_id=$(jq -er .databaseId <<<"$release_json")
+            uploaded_assets=$(gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100")
+            jq -e \
+              --argjson expected_count "${#assets[@]}" \
+              --argjson max_asset "$MAX_RELEASE_ASSET_BYTES" \
+              --argjson max_total "$MAX_RELEASE_TOTAL_BYTES" '
+                [.[][] | {name, digest, state, size}]
                 | length == $expected_count
                 and all(.[];
-                  (.id | type == "number" and . > 0)
-                  and (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"))
+                  (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"))
                   and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
                   and .state == "uploaded"
                   and (.size | type == "number" and . >= 0 and . <= $max_asset))
                 and ([.[].size] | add <= $max_total)
                 and ([.[].name] | length == (unique | length))
               ' <<<"$uploaded_assets" >/dev/null
-              for asset in "${assets[@]}"; do
-                asset_name=${asset##*/}
-                expected_digest=$(sha256sum "$asset")
-                expected_digest="sha256:${expected_digest%% *}"
-                uploaded_digest=$(jq -er --arg name "$asset_name" '
-                  [.[][] | select(.name == $name)]
-                  | if length == 1 then .[0].digest else error("missing or duplicate release asset") end
-                ' <<<"$uploaded_assets")
-                uploaded_size=$(jq -er --arg name "$asset_name" '
-                  [.[][] | select(.name == $name)]
-                  | if length == 1 then .[0].size else error("missing or duplicate release asset") end
-                ' <<<"$uploaded_assets")
-                [[ "$uploaded_digest" == "$expected_digest" ]]
-                (( uploaded_size == $(wc -c < "$asset") ))
-              done
-              jq -r '.[][] | .name' <<<"$uploaded_assets" | sort -u > "$actual_assets"
-              diff -u "$expected_assets" "$actual_assets"
-              cleanup_draft=false
-              trap - EXIT
-            )
-          fi
+
+            expected_names=$(mktemp "$RUNNER_TEMP/release-assets-expected.XXXXXX")
+            actual_names=$(mktemp "$RUNNER_TEMP/release-assets-actual.XXXXXX")
+            printf '%s\n' "${assets[@]##*/}" | sort -u > "$expected_names"
+            jq -r '.[][] | .name' <<<"$uploaded_assets" | sort -u > "$actual_names"
+            diff -u "$expected_names" "$actual_names"
+            for asset in "${assets[@]}"; do
+              asset_name=${asset##*/}
+              expected_digest=$(sha256sum "$asset")
+              expected_digest="sha256:${expected_digest%% *}"
+              uploaded_digest=$(jq -er --arg name "$asset_name" '
+                [.[][] | select(.name == $name)]
+                | if length == 1 then .[0].digest else error("missing or duplicate release asset") end
+              ' <<<"$uploaded_assets")
+              uploaded_size=$(jq -er --arg name "$asset_name" '
+                [.[][] | select(.name == $name)]
+                | if length == 1 then .[0].size else error("missing or duplicate release asset") end
+              ' <<<"$uploaded_assets")
+              [[ "$uploaded_digest" == "$expected_digest" ]]
+              (( uploaded_size == $(wc -c < "$asset") ))
+            done
+          }
+
+          require_release_tag
+          gh release create "$RELEASE_TAG" "${assets[@]}" \
+            "${release_args[@]}" \
+            --repo "$GITHUB_REPOSITORY"
+          verify_draft_assets
 
           promote() {
             local component=$1 repository digest existing status published
@@ -2900,44 +1544,8 @@ jobs:
           promote materializer
           promote frontend
 
-      - name: Publish GitHub release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EXISTING_RELEASE: ${{ steps.existing_release.outputs.exists }}
-          EXISTING_DRAFT: ${{ steps.existing_release.outputs.draft }}
-        run: |
-          set -euo pipefail
-          resolve_release_tag() {
-            local object object_type actual
-            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")
-            object_type=$(jq -er '.object.type' <<<"$object")
-            actual=$(jq -er '.object.sha' <<<"$object")
-            for _ in $(seq 1 8); do
-              [[ "$object_type" == tag ]] || break
-              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$actual")
-              object_type=$(jq -er '.object.type' <<<"$object")
-              actual=$(jq -er '.object.sha' <<<"$object")
-            done
-            [[ "$object_type" == commit ]] || return 1
-            printf '%s\n' "$actual"
-          }
-          require_release_tag() {
-            local actual
-            actual=$(resolve_release_tag) || {
-              echo "refs/tags/$RELEASE_TAG no longer resolves to a commit" >&2
-              exit 1
-            }
-            [[ "$actual" == "$RELEASE_SHA" ]] || {
-              echo "refs/tags/$RELEASE_TAG moved from $RELEASE_SHA to $actual" >&2
-              exit 1
-            }
-          }
-
+          verify_draft_assets
           require_release_tag
-          if [[ "$EXISTING_RELEASE" == true && "$EXISTING_DRAFT" != true ]]; then
-            echo "$RELEASE_TAG is already published with the same immutable tuple"
-            exit 0
-          fi
           gh release edit "$RELEASE_TAG" \
             --draft=false \
             --latest=false \

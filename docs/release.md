@@ -79,34 +79,35 @@ Release CI must reject:
 - changed Chisel, release-definition, snapshot, or Ubuntu pins without review
 - unsigned or mixed component tuples
 - exporter settings that differ between test and promotion
+- any existing draft or published GitHub release for the target tag
 
 ## Automated component release
 
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) publishes an existing v-prefixed SemVer tag, including supported pre-releases. The workflow is manual-only so write and signing privileges come from the trusted `main` branch workflow rather than from the tagged commit. Start it from `main` and provide a tag whose commit is reachable from `main`.
 
-Release runs are serialized repository-wide. New releases must advance the v-prefixed SemVer sequence, and every earlier protected release tag must retain its signed GitHub release so the metadata floor chain cannot be reordered or silently truncated.
-
-Predecessor verification is fail-closed and bounded to 64 historical source/predecessor releases, 2 GiB of aggregate predecessor/current-draft downloads, and 10 discovery pages per GitHub API collection. Repositories approaching any limit must migrate the signed continuity proof under review before publishing another release rather than silently skipping history.
+Release runs are serialized repository-wide. Before construction, the workflow requires the target tag to have no existing draft or published GitHub release. It does not inspect earlier releases, derive a predecessor, or carry a metadata rollback floor across releases. An incomplete draft from a failed attempt must be deleted explicitly before retrying; release automation never deletes or overwrites it.
 
 The workflow separates construction from promotion:
 
-1. Reuse normal CI against the tagged commit, validate the release inputs with [`../scripts/release-inputs.sh`](../scripts/release-inputs.sh), and load the monotonic metadata rollback floor from the latest signed release evidence.
+1. Reuse normal CI against the tagged commit, validate the release inputs with [`../scripts/release-inputs.sh`](../scripts/release-inputs.sh), and reject any existing draft or published GitHub release for the target tag before building.
 2. Build the `amd64` and `arm64` runtime-base and materializer children with pinned Dockerfile frontend, Buildx, BuildKit, and QEMU inputs. BuildKit attestations are disabled during construction so the image-manifest digests remain unambiguous.
 3. Smoke-test the exact children, assemble the runtime-base and materializer indexes, and build the frontend against those digest-pinned indexes.
-4. Run every focused live spec on native `amd64` and `arm64` workers with the signed rollback floor, retain deterministic runtime evidence archives, and require every spec and platform to use the same authenticated Homebrew metadata snapshot.
+4. Run every focused live spec on native `amd64` and `arm64` workers, retain deterministic runtime evidence archives, and require every spec and platform to use the same authenticated Homebrew metadata snapshot. The frontend still enforces JWS verification, future-skew checks, and a release-bound maximum age of no more than seven days.
 5. Generate SPDX SBOMs and reject fixed critical vulnerabilities for every platform child.
-6. Generate `components.json`, sign every child and index with keyless Cosign, attach SLSA provenance and SPDX attestations, and sign the release records and checksums.
-7. Reverify the tag, signatures, attestations, and release bundle immediately before adding the immutable version tag to the tested index digests and creating the GitHub release. The workflow never publishes `latest`, rebuilds during promotion, or overwrites a version with different digests.
+6. Generate `components.json`, sign every child and index with keyless Cosign, attach SLSA provenance and SPDX attestations, and sign the exact tested metadata snapshot, release records, and checksums.
+7. Reverify the tag, signatures, attestations, and release bundle, then stage all signed assets in a new draft GitHub release before adding immutable version tags to the already tested index digests. Verify those promoted tags resolve to the recorded digests, then publish the staged draft. The workflow never publishes `latest`, rebuilds during promotion, or overwrites an existing release. If staging or promotion leaves an incomplete draft, an operator must delete it explicitly before retrying.
 
-The GitHub `release` environment gates signing. Configure it with required reviewers, protect release-critical paths through branch rules, and configure a tag ruleset that restricts creation and blocks updates or deletion of `v*.*.*` release tags. GHCR and GitHub Release writes use the scoped `GITHUB_TOKEN`; keyless Cosign uses GitHub Actions OIDC, so no private signing-key secret is required.
+Release CI intentionally does not compare the accepted metadata snapshot with snapshots from earlier releases. Its release-time guarantee is JWS-authenticated, sufficiently fresh metadata with one exact snapshot identity shared by all tested specs and platforms and recorded in signed evidence. `metadata-snapshot.json` is evidence of what was tested, not a cross-release anti-rollback floor. Callers that require monotonic metadata anti-rollback may continue to use the optional rollback-floor capability outside this workflow.
+
+The GitHub `release` environment gates signing and promotion. Configure it with required reviewers, protect release-critical paths through branch rules, and configure a tag ruleset that restricts creation and blocks updates or deletion of `v*.*.*` release tags. GHCR and GitHub Release writes use the scoped `GITHUB_TOKEN`; keyless Cosign uses GitHub Actions OIDC, so no private signing-key secret is required.
 
 Release assets include:
 
 - `components.json`, `components.digest`, and the component Sigstore bundle
-- `digests.json`, `inputs.json`, the rollback-floor input, and verified predecessor tag and release-asset identities
+- `digests.json` and `inputs.json`, binding the source and immutable release inputs
 - per-platform SPDX SBOMs and vulnerability reports
 - runtime evidence archives from the `amd64` and `arm64` integration images
-- `metadata-snapshot.json` and its Sigstore bundle, recording the accepted snapshot and next monotonic rollback floor
+- `metadata-snapshot.json` and its Sigstore bundle, recording the exact authenticated snapshot shared by every tested spec and platform
 - the SLSA provenance predicate
 - `SHA256SUMS` and its Sigstore bundle
 
@@ -114,4 +115,4 @@ The automated workflow releases the reusable component tuple. The images built f
 
 ## Rollback
 
-Rollback selects an earlier signed component, index, and resolution tuple together with its mirrored blobs. It must not reconstruct an old release from current Homebrew metadata.
+Rollback selects an earlier signed component, index, and resolution tuple together with its mirrored blobs. It must not reconstruct an old release from current Homebrew metadata. This immutable artifact rollback is independent of the optional metadata rollback floor used while resolving a new build.
