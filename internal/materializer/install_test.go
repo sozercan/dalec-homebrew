@@ -631,6 +631,89 @@ func TestValidateNodeNPMRuntimeAndGlobalLinks(t *testing.T) {
 	}
 }
 
+func TestValidateNodeNPMRuntimeRejectsRootOnlySourceTree(t *testing.T) {
+	const prefix = "/prefix"
+	node, after, options, _ := nodeNPMRuntimeLimitFixture(prefix)
+
+	_, err := validateNodeNPMRuntime(prefix, node, nil, after, options)
+	if err == nil || !strings.Contains(err.Error(), "verified Node npm source tree is empty") {
+		t.Fatalf("root-only Node npm source tree error = %v", err)
+	}
+}
+
+func TestValidateNodeNPMRuntimeEntryLimit(t *testing.T) {
+	const prefix = "/prefix"
+	node, after, options, sourceRoot := nodeNPMRuntimeLimitFixture(prefix)
+	state := nodeNPMRuntimeLimitRegular(0)
+	for i := 0; i < nodeNPMRuntimeMaxEntries-1; i++ {
+		name := fmt.Sprintf("entry-%05d", i)
+		after[path.Join(sourceRoot, name)] = state
+		after[path.Join(nodeNPMRuntimeRoot, name)] = state
+	}
+	if _, err := validateNodeNPMRuntime(prefix, node, nil, after, options); err != nil {
+		t.Fatalf("Node npm runtime at entry limit rejected: %v", err)
+	}
+
+	overLimit := maps.Clone(after)
+	name := fmt.Sprintf("entry-%05d", nodeNPMRuntimeMaxEntries-1)
+	overLimit[path.Join(sourceRoot, name)] = state
+	overLimit[path.Join(nodeNPMRuntimeRoot, name)] = state
+	_, err := validateNodeNPMRuntime(prefix, node, nil, overLimit, options)
+	want := fmt.Sprintf("Node npm runtime exceeds %d entries", nodeNPMRuntimeMaxEntries)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Node npm runtime above entry limit error = %v, want %q", err, want)
+	}
+}
+
+func TestValidateNodeNPMRuntimeByteLimit(t *testing.T) {
+	const prefix = "/prefix"
+	node, after, options, sourceRoot := nodeNPMRuntimeLimitFixture(prefix)
+	payloadPath := path.Join(sourceRoot, "payload")
+	runtimePayloadPath := path.Join(nodeNPMRuntimeRoot, "payload")
+	state := nodeNPMRuntimeLimitRegular(nodeNPMRuntimeMaxBytes)
+	after[payloadPath] = state
+	after[runtimePayloadPath] = state
+	if _, err := validateNodeNPMRuntime(prefix, node, nil, after, options); err != nil {
+		t.Fatalf("Node npm runtime at byte limit rejected: %v", err)
+	}
+
+	overLimit := maps.Clone(after)
+	state = nodeNPMRuntimeLimitRegular(nodeNPMRuntimeMaxBytes + 1)
+	overLimit[payloadPath] = state
+	overLimit[runtimePayloadPath] = state
+	_, err := validateNodeNPMRuntime(prefix, node, nil, overLimit, options)
+	want := fmt.Sprintf("Node npm runtime exceeds %d bytes", nodeNPMRuntimeMaxBytes)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Node npm runtime above byte limit error = %v, want %q", err, want)
+	}
+}
+
+func nodeNPMRuntimeLimitFixture(prefix string) (resolution.Node, map[string]fileState, classifyOptions, string) {
+	directory := fileState{Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true}
+	node := resolution.Node{Name: nodeFormula, PkgVersion: "1"}
+	sourceRoot := path.Join("Cellar", node.Name, node.PkgVersion, nodeNPMSourceRoot)
+	after := map[string]fileState{
+		sourceRoot:           directory,
+		nodeNPMRuntimeParent: directory,
+		nodeNPMRuntimeRoot:   directory,
+	}
+	npmrc := []byte("prefix = " + filepath.ToSlash(prefix) + "\n")
+	npmrcDigest := sha256.Sum256(npmrc)
+	after[path.Join(nodeNPMRuntimeRoot, "npmrc")] = fileState{
+		Type: "regular", Mode: 0o644, Size: int64(len(npmrc)), Digest: hex.EncodeToString(npmrcDigest[:]),
+		Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true,
+	}
+	verified := bottle.Result{Name: node.Name, PkgVersion: node.PkgVersion, KegPrefix: path.Join(node.Name, node.PkgVersion)}
+	return node, after, classifyOptions{verified: verified, runtimeUID: 1000, runtimeGID: 1000}, sourceRoot
+}
+
+func nodeNPMRuntimeLimitRegular(size int64) fileState {
+	return fileState{
+		Type: "regular", Mode: 0o644, Size: size, Digest: strings.Repeat("a", 64),
+		Inode: "inode:node-npm-limit", Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true,
+	}
+}
+
 func TestClassifyAllowsPrunableHomebrewStateLinkToCurrentKeg(t *testing.T) {
 	after := map[string]fileState{
 		"Cellar":                    {Type: "directory"},

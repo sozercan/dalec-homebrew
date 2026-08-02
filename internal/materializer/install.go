@@ -1048,7 +1048,7 @@ func validateNodeNPMRuntime(prefix string, node resolution.Node, before, after m
 			totalBytes += source.Size
 		}
 	}
-	if entries == 0 {
+	if entries <= 1 {
 		return nil, fmt.Errorf("verified Node npm source tree is empty")
 	}
 
