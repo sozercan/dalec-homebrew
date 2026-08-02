@@ -1010,15 +1010,108 @@ jobs:
             done
           done
 
-          mapfile -t component_digests < dist/release/components.digest
-          (( ${#component_digests[@]} == 1 ))
-          [[ "${component_digests[0]}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          actual_component_digest=$(sha256sum dist/release/components.json)
-          actual_component_digest="sha256:${actual_component_digest%% *}"
-          [[ "${component_digests[0]}" == "$actual_component_digest" ]] || {
-            echo "components.digest does not match canonical components.json" >&2
-            exit 1
+          python3 - dist/release/components.json dist/release/components.digest <<'PYCOMPONENTS'
+          import hashlib
+          import json
+          import sys
+
+          manifest_path, digest_path = sys.argv[1:]
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant {value!r}")
+
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON member {key!r}")
+                  result[key] = value
+              return result
+
+          def exact_keys(value, expected, label):
+              if not isinstance(value, dict) or set(value) != set(expected):
+                  raise ValueError(f"{label} has unexpected fields")
+
+          def require_string(value, label):
+              if not isinstance(value, str):
+                  raise ValueError(f"{label} is not a string")
+              return value
+
+          def canonical_platform_ref(value):
+              exact_keys(value, ("platform", "ref"), "platform reference")
+              platform = value["platform"]
+              exact_keys(platform, ("os", "architecture", "variant"), "platform") if "variant" in platform else exact_keys(platform, ("os", "architecture"), "platform")
+              canonical_platform = {
+                  "os": require_string(platform["os"], "platform.os"),
+                  "architecture": require_string(platform["architecture"], "platform.architecture"),
+              }
+              if "variant" in platform:
+                  variant = require_string(platform["variant"], "platform.variant")
+                  if variant:
+                      canonical_platform["variant"] = variant
+              return {
+                  "platform": canonical_platform,
+                  "ref": require_string(value["ref"], "platform reference ref"),
+              }
+
+          def canonical_component(value, label):
+              exact_keys(value, ("index", "platforms"), label)
+              if not isinstance(value["platforms"], list):
+                  raise ValueError(f"{label}.platforms is not an array")
+              platforms = [canonical_platform_ref(item) for item in value["platforms"]]
+              platforms.sort(key=lambda item: (
+                  item["platform"]["os"],
+                  item["platform"]["architecture"],
+                  item["platform"].get("variant", ""),
+              ))
+              return {
+                  "index": require_string(value["index"], f"{label}.index"),
+                  "platforms": platforms,
+              }
+
+          raw = open(manifest_path, "rb").read(4 * 1024 * 1024 + 1)
+          if len(raw) > 4 * 1024 * 1024:
+              raise SystemExit("component manifest exceeds 4 MiB")
+          manifest = json.loads(
+              raw.decode("utf-8"),
+              object_pairs_hook=unique_object,
+              parse_constant=reject_constant,
+          )
+          top_keys = (
+              "schema_version", "policy_version", "frontend", "runtime_base",
+              "materializer", "homebrew_commit", "portable_ruby_version",
+              "verification_keys_digest", "dalec_module", "buildkit_module",
+          )
+          exact_keys(manifest, top_keys, "component manifest")
+          canonical_manifest = {
+              "schema_version": require_string(manifest["schema_version"], "schema_version"),
+              "policy_version": require_string(manifest["policy_version"], "policy_version"),
+              "frontend": canonical_component(manifest["frontend"], "frontend"),
+              "runtime_base": canonical_component(manifest["runtime_base"], "runtime_base"),
+              "materializer": canonical_component(manifest["materializer"], "materializer"),
+              "homebrew_commit": require_string(manifest["homebrew_commit"], "homebrew_commit"),
+              "portable_ruby_version": require_string(manifest["portable_ruby_version"], "portable_ruby_version"),
+              "verification_keys_digest": require_string(manifest["verification_keys_digest"], "verification_keys_digest"),
+              "dalec_module": require_string(manifest["dalec_module"], "dalec_module"),
+              "buildkit_module": require_string(manifest["buildkit_module"], "buildkit_module"),
           }
+          canonical_text = json.dumps(
+              canonical_manifest,
+              ensure_ascii=False,
+              allow_nan=False,
+              separators=(",", ":"),
+          )
+          # release.Canonical disables HTML escaping, but encoding/json still
+          # escapes these two JavaScript line separators.
+          canonical_text = canonical_text.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+          canonical = canonical_text.encode("utf-8")
+          if raw != canonical:
+              raise SystemExit("components.json is not canonically encoded")
+          expected = ("sha256:" + hashlib.sha256(canonical).hexdigest() + "\n").encode("ascii")
+          actual = open(digest_path, "rb").read()
+          if actual != expected:
+              raise SystemExit("components.digest does not match canonical components.json")
+          PYCOMPONENTS
           jq -e \
             --slurpfile digests dist/release/digests.json \
             --slurpfile inputs dist/release/inputs.json '
