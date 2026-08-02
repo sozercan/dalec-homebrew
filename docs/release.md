@@ -88,7 +88,7 @@ Release CI must reject:
 ## Automated component release
 
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) publishes an
-existing v-prefixed SemVer tag, including supported pre-releases. Dispatch it
+existing v-prefixed, OCI-compatible SemVer tag, including supported pre-releases. Build metadata (`+...`) is not accepted because OCI tags cannot represent it without an additional mapping. Dispatch it
 from `main` with a tag whose commit is reachable from `main`; this keeps write
 and signing privileges in the trusted workflow rather than the tagged source.
 
