@@ -485,6 +485,38 @@ jobs:
 
           jq . dist/release/digests.json
 
+      - name: Generate and verify component manifest
+        run: |
+          set -euo pipefail
+          ref() {
+            local component=$1 kind=$2 platform=${3:-}
+            if [[ "$kind" == index ]]; then
+              jq -er --arg component "$component" '.components[$component].repository + "@" + .components[$component].index' dist/release/digests.json
+            else
+              jq -er --arg component "$component" --arg platform "$platform" '.components[$component].repository + "@" + .components[$component].platforms[$platform]' dist/release/digests.json
+            fi
+          }
+
+          go run ./cmd/release-manifest \
+            --frontend-index "$(ref frontend index)" \
+            --frontend-amd64 "$(ref frontend child linux/amd64)" \
+            --frontend-arm64 "$(ref frontend child linux/arm64)" \
+            --runtime-base-index "$(ref runtime-base index)" \
+            --runtime-base-amd64 "$(ref runtime-base child linux/amd64)" \
+            --runtime-base-arm64 "$(ref runtime-base child linux/arm64)" \
+            --materializer-index "$(ref materializer index)" \
+            --materializer-amd64 "$(ref materializer child linux/amd64)" \
+            --materializer-arm64 "$(ref materializer child linux/arm64)" \
+            --homebrew-commit "$(jq -er .homebrew_commit dist/release/inputs.json)" \
+            --portable-ruby-version "$(jq -er .portable_ruby_version dist/release/inputs.json)" \
+            --verification-keys-digest "$(jq -er .verification_keys_digest dist/release/inputs.json)" \
+            --dalec-module "$(jq -er .dalec_module dist/release/inputs.json)" \
+            --buildkit-module "$(jq -er .buildkit_module dist/release/inputs.json)" \
+            --output dist/release/components.json
+
+          go run ./cmd/release-verify dist/release/components.json \
+            | tee dist/release/components.digest
+
       - name: Upload immutable build tuple
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -729,20 +761,6 @@ jobs:
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
     steps:
-      - name: Check out tagged source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.prepare.outputs.sha }}
-          persist-credentials: false
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-
-
-
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -844,38 +862,6 @@ jobs:
               release: {tag: $release_tag, sha: $release_sha},
               accepted_snapshot: $snapshot[0].metadata
             }' > dist/release/metadata-snapshot.json
-
-      - name: Generate and verify component manifest
-        run: |
-          set -euo pipefail
-          ref() {
-            local component=$1 kind=$2 platform=${3:-}
-            if [[ "$kind" == index ]]; then
-              jq -er --arg component "$component" '.components[$component].repository + "@" + .components[$component].index' dist/release/digests.json
-            else
-              jq -er --arg component "$component" --arg platform "$platform" '.components[$component].repository + "@" + .components[$component].platforms[$platform]' dist/release/digests.json
-            fi
-          }
-
-          go run ./cmd/release-manifest \
-            --frontend-index "$(ref frontend index)" \
-            --frontend-amd64 "$(ref frontend child linux/amd64)" \
-            --frontend-arm64 "$(ref frontend child linux/arm64)" \
-            --runtime-base-index "$(ref runtime-base index)" \
-            --runtime-base-amd64 "$(ref runtime-base child linux/amd64)" \
-            --runtime-base-arm64 "$(ref runtime-base child linux/arm64)" \
-            --materializer-index "$(ref materializer index)" \
-            --materializer-amd64 "$(ref materializer child linux/amd64)" \
-            --materializer-arm64 "$(ref materializer child linux/arm64)" \
-            --homebrew-commit "$(jq -er .homebrew_commit dist/release/inputs.json)" \
-            --portable-ruby-version "$(jq -er .portable_ruby_version dist/release/inputs.json)" \
-            --verification-keys-digest "$(jq -er .verification_keys_digest dist/release/inputs.json)" \
-            --dalec-module "$(jq -er .dalec_module dist/release/inputs.json)" \
-            --buildkit-module "$(jq -er .buildkit_module dist/release/inputs.json)" \
-            --output dist/release/components.json
-
-          go run ./cmd/release-verify dist/release/components.json \
-            | tee dist/release/components.digest
 
       - name: Generate SLSA provenance predicate
         env:
@@ -1227,10 +1213,22 @@ jobs:
               all(.platforms[]; digest))
           ' dist/release/digests.json >/dev/null
           jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+            def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
             .schema_version == "dalec-homebrew-release-metadata/v1" and
             .release.tag == $tag and
             .release.sha == $sha and
-            (.accepted_snapshot | type) == "object"
+            (.accepted_snapshot | type) == "object" and
+            ([.accepted_snapshot.digest,
+              .accepted_snapshot.formula_digest,
+              .accepted_snapshot.migration_digest,
+              .accepted_snapshot.formula_envelope_digest,
+              .accepted_snapshot.migration_envelope_digest] | all(sha256)) and
+            (.accepted_snapshot.generated_at | type == "string" and length > 0) and
+            ([.accepted_snapshot.formula_freshness_source,
+              .accepted_snapshot.migration_freshness_source] |
+              all(. == "signed-payload" or . == "http-last-modified")) and
+            (.accepted_snapshot.formula_url | type == "string" and length > 0) and
+            (.accepted_snapshot.migration_url | type == "string" and length > 0)
           ' dist/release/metadata-snapshot.json >/dev/null
           jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
             .invocation.parameters.tag == $tag and
