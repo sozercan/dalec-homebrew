@@ -761,6 +761,9 @@ jobs:
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
     steps:
+      - name: Install checksum-pinned Buildx
+        run: *install-buildx
+
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -912,6 +915,157 @@ jobs:
                 digest: {sha1: $sha}
               }]
             }' > dist/release/provenance.json
+
+      - name: Validate release tuple before signing
+        run: &validate-release-tuple |
+          set -euo pipefail
+
+          jq -e '
+            def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
+            def hex256: type == "string" and test("^[0-9a-f]{64}$");
+            def pinned: type == "string" and test("^[^[:space:]@]+@sha256:[0-9a-f]{64}$");
+            (keys == ["builder", "buildkit_module", "dalec_module",
+              "homebrew_archive_sha256", "homebrew_commit", "portable_ruby_version",
+              "schema_version", "source_date_epoch", "ubuntu_base", "ubuntu_snapshot",
+              "verification_keys_digest"]) and
+            .schema_version == "dalec-homebrew-release-inputs/v1" and
+            (.source_date_epoch | type == "string" and test("^[0-9]+$")) and
+            (.ubuntu_snapshot | type == "string" and test("^[0-9]{8}T[0-9]{6}Z$")) and
+            ((.ubuntu_base | keys) == ["linux/amd64", "linux/arm64"]) and
+            all(.ubuntu_base[]; pinned) and
+            ((.builder | keys) == ["chisel_releases_commit", "chisel_releases_sha256",
+              "chisel_sha256", "chisel_version", "dockerfile_frontend", "go_image"]) and
+            (.builder.dockerfile_frontend | pinned) and
+            (.builder.go_image | pinned) and
+            (.builder.chisel_version | type == "string" and length > 0) and
+            (.builder.chisel_releases_commit | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.builder.chisel_releases_sha256 | hex256) and
+            ((.builder.chisel_sha256 | keys) == ["amd64", "arm64"]) and
+            all(.builder.chisel_sha256[]; hex256) and
+            (.homebrew_commit | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.homebrew_archive_sha256 | hex256) and
+            (.portable_ruby_version | type == "string" and length > 0) and
+            (.verification_keys_digest | sha256) and
+            (.dalec_module | type == "string" and length > 0) and
+            (.buildkit_module | type == "string" and length > 0)
+          ' dist/release/inputs.json >/dev/null
+          source_date_epoch=$(jq -er .source_date_epoch dist/release/inputs.json)
+          expected_snapshot=$(date -u --date="@$source_date_epoch" +%Y%m%dT%H%M%SZ)
+          [[ "$expected_snapshot" == "$(jq -er .ubuntu_snapshot dist/release/inputs.json)" ]] || {
+            echo "release input timestamp does not match the Ubuntu snapshot" >&2
+            exit 1
+          }
+
+          jq -e \
+            --arg tag "$RELEASE_TAG" \
+            --arg sha "$RELEASE_SHA" \
+            --arg frontend "$REGISTRY_NAMESPACE/dalec-homebrew" \
+            --arg runtime_base "$REGISTRY_NAMESPACE/dalec-homebrew-runtime-base" \
+            --arg materializer "$REGISTRY_NAMESPACE/dalec-homebrew-materializer" \
+            --slurpfile inputs dist/release/inputs.json '
+            def digest: type == "string" and test("^sha256:[0-9a-f]{64}$");
+            .schema_version == "dalec-homebrew-release-digests/v1" and
+            .source.tag == $tag and
+            .source.git_sha == $sha and
+            .source.source_date_epoch == $inputs[0].source_date_epoch and
+            (.components | keys) == ["frontend", "materializer", "runtime-base"] and
+            .components.frontend.repository == $frontend and
+            .components["runtime-base"].repository == $runtime_base and
+            .components.materializer.repository == $materializer and
+            all(.components[];
+              (.index | digest) and
+              ((.platforms | keys) == ["linux/amd64", "linux/arm64"]) and
+              all(.platforms[]; digest))
+          ' dist/release/digests.json >/dev/null
+
+          platform_digest() {
+            local ref=$1 platform=$2 os arch
+            os=${platform%/*}
+            arch=${platform#*/}
+            docker buildx imagetools inspect --raw "$ref" \
+              | jq -er --arg os "$os" --arg arch "$arch" '
+                  .manifests as $manifests
+                  | if (($manifests | length) == 2 and
+                        ([$manifests[] | .platform.os + "/" + .platform.architecture] | sort) ==
+                          ["linux/amd64", "linux/arm64"]) then
+                      $manifests
+                    else
+                      error("expected exactly the linux/amd64 and linux/arm64 platform children")
+                    end
+                  | [.[] | select(.platform.os == $os and .platform.architecture == $arch)]
+                  | if length == 1 then .[0].digest else error("expected exactly one platform child") end
+                  | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))
+                '
+          }
+          for component in frontend runtime-base materializer; do
+            repository=$(jq -er --arg component "$component" '.components[$component].repository' dist/release/digests.json)
+            index=$(jq -er --arg component "$component" '.components[$component].index' dist/release/digests.json)
+            for platform in linux/amd64 linux/arm64; do
+              recorded=$(jq -er --arg component "$component" --arg platform "$platform" '.components[$component].platforms[$platform]' dist/release/digests.json)
+              actual=$(platform_digest "$repository@$index" "$platform")
+              [[ "$actual" == "$recorded" ]] || {
+                echo "$component $platform child $actual does not match recorded digest $recorded" >&2
+                exit 1
+              }
+            done
+          done
+
+          mapfile -t component_digests < dist/release/components.digest
+          (( ${#component_digests[@]} == 1 ))
+          [[ "${component_digests[0]}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          actual_component_digest=$(sha256sum dist/release/components.json)
+          actual_component_digest="sha256:${actual_component_digest%% *}"
+          [[ "${component_digests[0]}" == "$actual_component_digest" ]] || {
+            echo "components.digest does not match canonical components.json" >&2
+            exit 1
+          }
+          jq -e \
+            --slurpfile digests dist/release/digests.json \
+            --slurpfile inputs dist/release/inputs.json '
+            def component_matches($manifest; $name):
+              $digests[0].components[$name] as $component
+              | $manifest.index == ($component.repository + "@" + $component.index) and
+                ([$manifest.platforms[].platform | .os + "/" + .architecture] | sort) ==
+                  ["linux/amd64", "linux/arm64"] and
+                all($manifest.platforms[];
+                  (.platform.variant // "") == "" and
+                  .ref == ($component.repository + "@" +
+                    $component.platforms["linux/" + .platform.architecture]));
+            .schema_version == "dalec-homebrew-components/v1" and
+            .policy_version == "homebrew-runtime-v1" and
+            component_matches(.frontend; "frontend") and
+            component_matches(.runtime_base; "runtime-base") and
+            component_matches(.materializer; "materializer") and
+            .homebrew_commit == $inputs[0].homebrew_commit and
+            .portable_ruby_version == $inputs[0].portable_ruby_version and
+            .verification_keys_digest == $inputs[0].verification_keys_digest and
+            .dalec_module == $inputs[0].dalec_module and
+            .buildkit_module == $inputs[0].buildkit_module
+          ' dist/release/components.json >/dev/null
+
+          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+            def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
+            .schema_version == "dalec-homebrew-release-metadata/v1" and
+            .release.tag == $tag and
+            .release.sha == $sha and
+            (.accepted_snapshot | type) == "object" and
+            ([.accepted_snapshot.digest,
+              .accepted_snapshot.formula_digest,
+              .accepted_snapshot.migration_digest,
+              .accepted_snapshot.formula_envelope_digest,
+              .accepted_snapshot.migration_envelope_digest] | all(sha256)) and
+            (.accepted_snapshot.generated_at | type == "string" and length > 0) and
+            ([.accepted_snapshot.formula_freshness_source,
+              .accepted_snapshot.migration_freshness_source] |
+              all(. == "signed-payload" or . == "http-last-modified")) and
+            (.accepted_snapshot.formula_url | type == "string" and length > 0) and
+            (.accepted_snapshot.migration_url | type == "string" and length > 0)
+          ' dist/release/metadata-snapshot.json >/dev/null
+          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+            .invocation.parameters.tag == $tag and
+            .metadata.completeness.parameters == false and
+            any(.materials[]; (.uri | endswith("@refs/tags/" + $tag)) and .digest.sha1 == $sha)
+          ' dist/release/provenance.json >/dev/null
 
       - name: Sign images and attach provenance and SBOM attestations
         run: |
@@ -1146,6 +1300,9 @@ jobs:
             sha256sum -c SHA256SUMS
           )
 
+      - name: Validate signed release tuple
+        run: *validate-release-tuple
+
       - name: Reverify release signatures and attestations
         env:
           CERTIFICATE_IDENTITY_REGEXP: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/heads/main$
@@ -1162,80 +1319,6 @@ jobs:
             --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
             --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
             dist/release/metadata-snapshot.json
-          jq -e '.schema_version == "dalec-homebrew-release-inputs/v1"' \
-            dist/release/inputs.json >/dev/null
-          mapfile -t component_digests < dist/release/components.digest
-          (( ${#component_digests[@]} == 1 ))
-          [[ "${component_digests[0]}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          actual_component_digest=$(sha256sum dist/release/components.json)
-          actual_component_digest="sha256:${actual_component_digest%% *}"
-          [[ "${component_digests[0]}" == "$actual_component_digest" ]] || {
-            echo "components.digest does not match canonical components.json" >&2
-            exit 1
-          }
-          jq -e \
-            --slurpfile digests dist/release/digests.json \
-            --slurpfile inputs dist/release/inputs.json '
-            def component_matches($manifest; $name):
-              $digests[0].components[$name] as $component
-              | $manifest.index == ($component.repository + "@" + $component.index) and
-                ([$manifest.platforms[].platform | .os + "/" + .architecture] | sort) ==
-                  ["linux/amd64", "linux/arm64"] and
-                all($manifest.platforms[];
-                  (.platform.variant // "") == "" and
-                  .ref == ($component.repository + "@" +
-                    $component.platforms["linux/" + .platform.architecture]));
-            .schema_version == "dalec-homebrew-components/v1" and
-            .policy_version == "homebrew-runtime-v1" and
-            component_matches(.frontend; "frontend") and
-            component_matches(.runtime_base; "runtime-base") and
-            component_matches(.materializer; "materializer") and
-            .homebrew_commit == $inputs[0].homebrew_commit and
-            .portable_ruby_version == $inputs[0].portable_ruby_version and
-            .verification_keys_digest == $inputs[0].verification_keys_digest and
-            .dalec_module == $inputs[0].dalec_module and
-            .buildkit_module == $inputs[0].buildkit_module
-          ' dist/release/components.json >/dev/null
-          jq -e \
-            --arg tag "$RELEASE_TAG" \
-            --arg sha "$RELEASE_SHA" \
-            --slurpfile inputs dist/release/inputs.json '
-            def digest: type == "string" and test("^sha256:[0-9a-f]{64}$");
-            .schema_version == "dalec-homebrew-release-digests/v1" and
-            .source.tag == $tag and
-            .source.git_sha == $sha and
-            .source.source_date_epoch == $inputs[0].source_date_epoch and
-            (.components | keys) == ["frontend", "materializer", "runtime-base"] and
-            all(.components[];
-              (.repository | type == "string" and length > 0) and
-              (.index | digest) and
-              ((.platforms | keys) == ["linux/amd64", "linux/arm64"]) and
-              all(.platforms[]; digest))
-          ' dist/release/digests.json >/dev/null
-          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
-            def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
-            .schema_version == "dalec-homebrew-release-metadata/v1" and
-            .release.tag == $tag and
-            .release.sha == $sha and
-            (.accepted_snapshot | type) == "object" and
-            ([.accepted_snapshot.digest,
-              .accepted_snapshot.formula_digest,
-              .accepted_snapshot.migration_digest,
-              .accepted_snapshot.formula_envelope_digest,
-              .accepted_snapshot.migration_envelope_digest] | all(sha256)) and
-            (.accepted_snapshot.generated_at | type == "string" and length > 0) and
-            ([.accepted_snapshot.formula_freshness_source,
-              .accepted_snapshot.migration_freshness_source] |
-              all(. == "signed-payload" or . == "http-last-modified")) and
-            (.accepted_snapshot.formula_url | type == "string" and length > 0) and
-            (.accepted_snapshot.migration_url | type == "string" and length > 0)
-          ' dist/release/metadata-snapshot.json >/dev/null
-          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
-            .invocation.parameters.tag == $tag and
-            .metadata.completeness.parameters == false and
-            any(.materials[]; (.uri | endswith("@refs/tags/" + $tag)) and .digest.sha1 == $sha)
-          ' dist/release/provenance.json >/dev/null
-
           verify_attestation_predicate() {
             local type=$1 subject=$2 predicate=$3 output
             output=$(mktemp "$RUNNER_TEMP/verified-attestations.XXXXXX")
