@@ -248,6 +248,25 @@ func TestVerifyValidReceipt(t *testing.T) {
 	}
 }
 
+func TestVerifyAcceptsLegacyReceiptDependencyWithoutPkgVersion(t *testing.T) {
+	t.Parallel()
+	receipt := strings.Replace(
+		validReceipt(),
+		`"revision":0,"bottle_rebuild":0,"pkg_version":"2.0",`,
+		`"revision":1,"bottle_rebuild":0,"compatibility_version":"2.0",`,
+		1,
+	)
+	members := validMembers(false)
+	members = append(members, receiptMember(receipt))
+	blob := makeArchive(t, members)
+	expected := expectationFor(blob)
+	expected.Dependencies[0].Revision = 1
+	expected.Dependencies[0].PkgVersion = "2.0_1"
+	if _, err := Verify(bytes.NewReader(blob), expected, Options{Policy: Policy{RequirePreInstallReceipt: true}}); err != nil {
+		t.Fatalf("Verify() legacy receipt error = %v", err)
+	}
+}
+
 func TestVerifyNodeProjectsAuthenticatedExpectation(t *testing.T) {
 	t.Parallel()
 	blob := makeArchive(t, validMembers(true))
@@ -574,6 +593,8 @@ func TestVerifyReceiptPolicyAndIdentity(t *testing.T) {
 		{"not built as bottle", strings.Replace(validReceipt(), `"built_as_bottle":true`, `"built_as_bottle":false`, 1)},
 		{"wrong tap", strings.Replace(validReceipt(), `"tap":"homebrew/core"`, `"tap":"evil/tap"`, 1)},
 		{"dependency mismatch", strings.Replace(validReceipt(), `"pkg_version":"2.0"`, `"pkg_version":"3.0"`, 1)},
+		{"empty dependency pkg version", strings.Replace(validReceipt(), `"pkg_version":"2.0"`, `"pkg_version":""`, 1)},
+		{"null dependency pkg version", strings.Replace(validReceipt(), `"pkg_version":"2.0"`, `"pkg_version":null`, 1)},
 		{"duplicate JSON key", strings.Replace(validReceipt(), `"built_as_bottle":true`, `"built_as_bottle":true,"built_as_bottle":true`, 1)},
 	}
 	for _, tt := range tests {

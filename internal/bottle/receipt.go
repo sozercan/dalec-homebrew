@@ -27,6 +27,41 @@ type installReceipt struct {
 	Source           receiptSource       `json:"source"`
 }
 
+func (dependency *ReceiptDependency) UnmarshalJSON(data []byte) error {
+	// Homebrew may add non-identity dependency metadata such as
+	// compatibility_version. Preserve encoding/json's existing unknown-field
+	// tolerance while tracking whether the exact pkg_version field was absent.
+	var encoded struct {
+		FullName         string          `json:"full_name"`
+		Version          string          `json:"version"`
+		Revision         int             `json:"revision"`
+		BottleRebuild    int             `json:"bottle_rebuild"`
+		PkgVersion       json.RawMessage `json:"pkg_version"`
+		DeclaredDirectly bool            `json:"declared_directly,omitempty"`
+	}
+	if err := json.Unmarshal(data, &encoded); err != nil {
+		return err
+	}
+	*dependency = ReceiptDependency{
+		FullName:         encoded.FullName,
+		Version:          encoded.Version,
+		Revision:         encoded.Revision,
+		BottleRebuild:    encoded.BottleRebuild,
+		DeclaredDirectly: encoded.DeclaredDirectly,
+	}
+	if encoded.PkgVersion == nil {
+		dependency.pkgVersionOmitted = true
+		return nil
+	}
+	if bytes.Equal(bytes.TrimSpace(encoded.PkgVersion), []byte("null")) {
+		return fmt.Errorf("pkg_version cannot be null")
+	}
+	if err := json.Unmarshal(encoded.PkgVersion, &dependency.PkgVersion); err != nil {
+		return fmt.Errorf("decode pkg_version: %w", err)
+	}
+	return nil
+}
+
 type receiptSource struct {
 	Spec     string          `json:"spec"`
 	Tap      string          `json:"tap"`
@@ -51,6 +86,7 @@ func validateReceiptWithPolicy(data []byte, expected Expectation, requirePoured 
 	if err := dec.Decode(&receipt); err != nil {
 		return ReceiptEvidence{}, fmt.Errorf("decode receipt: %w", err)
 	}
+	receipt.RuntimeDeps = normalizeOmittedReceiptDependencyPkgVersions(receipt.RuntimeDeps)
 	if receipt.BuiltAsBottle == nil || !*receipt.BuiltAsBottle {
 		return ReceiptEvidence{}, fmt.Errorf("built_as_bottle must be true")
 	}
@@ -240,6 +276,18 @@ func compareInstalledReceiptDependencyMembers(actual, expected []ReceiptDependen
 	return nil
 }
 
+func normalizeOmittedReceiptDependencyPkgVersions(deps []ReceiptDependency) []ReceiptDependency {
+	normalized := append([]ReceiptDependency(nil), deps...)
+	for i := range normalized {
+		if !normalized[i].pkgVersionOmitted {
+			continue
+		}
+		normalized[i].PkgVersion = hbversion.PkgVersion(normalized[i].Version, normalized[i].Revision)
+		normalized[i].pkgVersionOmitted = false
+	}
+	return normalized
+}
+
 func validateReceiptDependencies(deps []ReceiptDependency) error {
 	seen := make(map[string]struct{}, len(deps))
 	for _, dep := range deps {
@@ -377,6 +425,7 @@ func NormalizeInstalledReceiptDependencies(data []byte, node resolution.Node, cl
 	if err := json.Unmarshal(data, &receipt); err != nil {
 		return InstalledReceiptNormalization{}, fmt.Errorf("decode receipt: %w", err)
 	}
+	receipt.RuntimeDeps = normalizeOmittedReceiptDependencyPkgVersions(receipt.RuntimeDeps)
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return InstalledReceiptNormalization{}, fmt.Errorf("decode receipt fields: %w", err)

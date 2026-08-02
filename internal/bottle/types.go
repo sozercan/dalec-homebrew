@@ -99,6 +99,8 @@ type ReceiptDependency struct {
 	BottleRebuild    int    `json:"bottle_rebuild"`
 	PkgVersion       string `json:"pkg_version"`
 	DeclaredDirectly bool   `json:"declared_directly,omitempty"`
+
+	pkgVersionOmitted bool
 }
 
 // ExpectationFromNode projects the authenticated bottle facts from a
