@@ -22,23 +22,20 @@ fail_usage() {
   exit 64
 }
 
-require_digest_ref() {
-  local name=$1
-  local value=$2
-  if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$ ]]; then
-    fail_usage "$name must be a digest-pinned OCI reference using sha256"
-  fi
-}
-
 USE_PUBLISHED_COMPONENTS=0
 if [[ -n "$BASE_REF" || -n "$MATERIALIZER_REF" || -n "$FRONTEND_REF" ]]; then
-  if [[ -z "$BASE_REF" || -z "$MATERIALIZER_REF" || -z "$FRONTEND_REF" ]]; then
-    fail_usage "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF, DALEC_HOMEBREW_LIVE_MATERIALIZER_REF, and DALEC_HOMEBREW_LIVE_FRONTEND_REF must be set together"
-  fi
   USE_PUBLISHED_COMPONENTS=1
-  require_digest_ref DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF "$BASE_REF"
-  require_digest_ref DALEC_HOMEBREW_LIVE_MATERIALIZER_REF "$MATERIALIZER_REF"
-  require_digest_ref DALEC_HOMEBREW_LIVE_FRONTEND_REF "$FRONTEND_REF"
+fi
+if (( USE_PUBLISHED_COMPONENTS == 1 )) || [[ -n "$METADATA_NOT_BEFORE" ]]; then
+  command -v go >/dev/null 2>&1 ||
+    fail_usage "go is required to validate published component references and metadata timestamps"
+  if ! GOWORK=off GOFLAGS='' go run ./cmd/live-input-verify \
+    --runtime-base-ref "$BASE_REF" \
+    --materializer-ref "$MATERIALIZER_REF" \
+    --frontend-ref "$FRONTEND_REF" \
+    --metadata-not-before "$METADATA_NOT_BEFORE"; then
+    exit 64
+  fi
 fi
 
 if [[ -z "$BUILDER" || -z "$PLATFORM" || ( "$USE_PUBLISHED_COMPONENTS" -eq 0 && -z "$REGISTRY" ) ]]; then

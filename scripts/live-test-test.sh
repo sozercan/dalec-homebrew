@@ -60,6 +60,9 @@ DOCKER
 chmod +x "$FAKE_BIN/docker"
 
 ORIGINAL_PATH=$PATH
+ORIGINAL_HOME=${HOME:-}
+ORIGINAL_GOCACHE=$(go env GOCACHE)
+ORIGINAL_GOMODCACHE=$(go env GOMODCACHE)
 DIGEST_A=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 DIGEST_B=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 DIGEST_C=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -103,6 +106,9 @@ run_live_test() {
   : > "$DOCKER_LOG"
   env -i \
     PATH="$FAKE_BIN:$ORIGINAL_PATH" \
+    HOME="$ORIGINAL_HOME" \
+    GOCACHE="$ORIGINAL_GOCACHE" \
+    GOMODCACHE="$ORIGINAL_GOMODCACHE" \
     TMPDIR="$TEST_ROOT" \
     DOCKER_LOG="$DOCKER_LOG" \
     "$@" \
@@ -152,6 +158,28 @@ expect_rejected malformed-frontend "DALEC_HOMEBREW_LIVE_FRONTEND_REF must be a d
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
   "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
   "DALEC_HOMEBREW_LIVE_FRONTEND_REF=ghcr.io/example/front|end@$DIGEST_C"
+
+expect_rejected scheme-frontend "DALEC_HOMEBREW_LIVE_FRONTEND_REF must be a digest-pinned OCI reference" \
+  "${COMMON_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
+  "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
+  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=https://ghcr.io/example/frontend@$DIGEST_C"
+
+expect_rejected empty-reference-segment "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF must be a digest-pinned OCI reference" \
+  "${COMMON_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=ghcr.io//runtime-base@$DIGEST_A" \
+  "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
+  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"
+
+expect_rejected malformed-reference-tag "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF must be a digest-pinned OCI reference" \
+  "${COMMON_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
+  "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=ghcr.io/example/materializer:bad:tag@$DIGEST_B" \
+  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"
+
+expect_rejected invalid-metadata-not-before "DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE must be a valid RFC3339 timestamp" \
+  "${PUBLISHED_ENV[@]}" \
+  DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=2026-02-31T00:00:00Z
 
 printf 'name: missing-syntax\n' > "$TEST_ROOT/missing-syntax.yaml"
 expect_rejected missing-syntax "DALEC_HOMEBREW_LIVE_SPEC must start with a # syntax= directive" \

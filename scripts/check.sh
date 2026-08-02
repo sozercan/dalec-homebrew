@@ -8,6 +8,7 @@ done
 go test -trimpath ./...
 go vet ./...
 go test -race \
+  ./cmd/live-input-verify \
   ./internal/homebrew/metadata \
   ./internal/homebrew/oci \
   ./internal/bottle \
@@ -17,7 +18,7 @@ go test -race \
   ./internal/runtimebase \
   ./internal/testrunner
 for arch in amd64 arm64; do
-  for cmd in frontend materializer record-verify release-manifest release-verify test-runner resolve runtime-base-evidence snapshot-proxy; do
+  for cmd in frontend live-input-verify materializer record-verify release-manifest release-verify test-runner resolve runtime-base-evidence snapshot-proxy; do
     CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -o "/tmp/dalec-homebrew-${cmd}-${arch}" "./cmd/${cmd}"
   done
 done
