@@ -38,8 +38,6 @@ jobs:
       - run: git diff --exit-code -- go.mod go.sum
       - run: ./scripts/check.sh
       - run: make build
-      - run: ./scripts/release-inputs.sh > /tmp/release-inputs.json
-      - run: jq -e '.schema_version == "dalec-homebrew-release-inputs/v1"' /tmp/release-inputs.json
       - run: git diff --check
 
   dockerfile:
@@ -51,6 +49,11 @@ jobs:
           persist-credentials: false
       - name: Lint GitHub Actions workflows
         run: docker run --rm -v "$PWD:/repo:ro" -w /repo "$ACTIONLINT_IMAGE"
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
       - name: Install checksum-pinned Buildx
         run: |
           set -euo pipefail
@@ -84,6 +87,13 @@ jobs:
           install -m 0755 "$binary" "$plugin_dir/docker-buildx"
           docker buildx version | grep -F " $BUILDX_VERSION "
 
+      - name: Validate release inputs
+        run: |
+          set -euo pipefail
+          ./scripts/release-inputs.sh > "$RUNNER_TEMP/release-inputs.json"
+          jq -e '.schema_version == "dalec-homebrew-release-inputs/v1"' \
+            "$RUNNER_TEMP/release-inputs.json"
+
       - name: Set up Docker Buildx
         run: |
           set -euo pipefail
@@ -92,10 +102,8 @@ jobs:
             --name "$builder" \
             --driver docker-container \
             --driver-opt "image=$BUILDKIT_IMAGE" \
-            --buildkitd-flags '--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host' \
-            --use
-          docker buildx inspect --builder "$builder" --bootstrap
-          echo "name=$builder" >> "$GITHUB_OUTPUT"
+            --use \
+            --bootstrap
       - run: docker buildx bake --print release-children frontend
       - name: Build gateway frontend image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0

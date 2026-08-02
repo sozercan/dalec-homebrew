@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/sozercan/dalec-homebrew/internal/release"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
@@ -44,10 +43,6 @@ func run(args []string, stdout, stderr io.Writer) error {
 	var opts options
 	flags := flag.NewFlagSet("dalec-homebrew-release-manifest", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	flags.Usage = func() {
-		fmt.Fprintln(stderr, "usage: dalec-homebrew-release-manifest [flags]")
-		flags.PrintDefaults()
-	}
 
 	bindComponentFlags(flags, "frontend", &opts.frontend)
 	bindComponentFlags(flags, "runtime-base", &opts.runtimeBase)
@@ -63,10 +58,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return fmt.Errorf("unexpected positional arguments: %s", strings.Join(flags.Args(), " "))
-	}
-	if err := opts.validateRequired(); err != nil {
-		return err
+		return fmt.Errorf("unexpected positional arguments: %q", flags.Args())
 	}
 
 	manifest := &release.Manifest{
@@ -85,9 +77,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("canonicalize component manifest: %w", err)
 	}
-	data = append(data, '\n')
-
-	if opts.output == "" || opts.output == "-" {
+	if opts.output == "-" {
 		if _, err := stdout.Write(data); err != nil {
 			return fmt.Errorf("write stdout: %w", err)
 		}
@@ -103,34 +93,6 @@ func bindComponentFlags(flags *flag.FlagSet, name string, opts *componentOptions
 	flags.StringVar(&opts.index, name+"-index", "", "digest-pinned "+name+" multi-platform index ref")
 	flags.StringVar(&opts.amd64, name+"-amd64", "", "digest-pinned "+name+" linux/amd64 child ref")
 	flags.StringVar(&opts.arm64, name+"-arm64", "", "digest-pinned "+name+" linux/arm64 child ref")
-}
-
-func (opts options) validateRequired() error {
-	required := []struct {
-		name  string
-		value string
-	}{
-		{"frontend-index", opts.frontend.index},
-		{"frontend-amd64", opts.frontend.amd64},
-		{"frontend-arm64", opts.frontend.arm64},
-		{"runtime-base-index", opts.runtimeBase.index},
-		{"runtime-base-amd64", opts.runtimeBase.amd64},
-		{"runtime-base-arm64", opts.runtimeBase.arm64},
-		{"materializer-index", opts.materializer.index},
-		{"materializer-amd64", opts.materializer.amd64},
-		{"materializer-arm64", opts.materializer.arm64},
-		{"homebrew-commit", opts.homebrewCommit},
-		{"portable-ruby-version", opts.portableRubyVersion},
-		{"verification-keys-digest", opts.verificationKeysDigest},
-		{"dalec-module", opts.dalecModule},
-		{"buildkit-module", opts.buildKitModule},
-	}
-	for _, item := range required {
-		if item.value == "" {
-			return fmt.Errorf("--%s is required", item.name)
-		}
-	}
-	return nil
 }
 
 func (opts componentOptions) component() release.Component {

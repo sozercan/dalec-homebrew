@@ -4,11 +4,13 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
+fail() {
+  echo "$*" >&2
+  exit 1
+}
+
 for tool in docker jq go python3; do
-  command -v "$tool" >/dev/null 2>&1 || {
-    echo "required tool is unavailable: $tool" >&2
-    exit 127
-  }
+  command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"
 done
 
 targets=(
@@ -18,49 +20,30 @@ targets=(
   materializer-arm64
   frontend
 )
-
+targets_json=$(printf '%s\n' "${targets[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
+unset BUILDX_BAKE_FILE BUILDX_BAKE_PATH_SEPARATOR
 bake=$(docker buildx bake --print "${targets[@]}")
 
-for target in "${targets[@]}"; do
-  jq -e --arg target "$target" '.target[$target] != null' <<<"$bake" >/dev/null || {
-    echo "release bake target is missing: $target" >&2
-    exit 1
-  }
-done
-
-source_date_epoch=$(jq -er --argjson targets "$(printf '%s\n' "${targets[@]}" | jq -R . | jq -s .)" '
-  [$targets[] as $target | .target[$target].args.SOURCE_DATE_EPOCH]
+source_date_epoch=$(jq -er --argjson targets "$targets_json" '
+  . as $bake
+  | [$targets[] as $target | $bake.target[$target].args.SOURCE_DATE_EPOCH]
   | if any(. == null or . == "") then error("SOURCE_DATE_EPOCH is missing") else . end
   | unique
   | if length == 1 then .[0] else error("release targets use conflicting SOURCE_DATE_EPOCH values") end
 ' <<<"$bake")
-
-case "$source_date_epoch" in
-  ''|*[!0-9]*)
-    echo "invalid SOURCE_DATE_EPOCH in docker-bake.hcl: $source_date_epoch" >&2
-    exit 1
-    ;;
-esac
+[[ "$source_date_epoch" =~ ^[0-9]+$ ]] || fail "invalid SOURCE_DATE_EPOCH in docker-bake.hcl: $source_date_epoch"
 
 dockerfile_arg() {
   local name=$1 values
-  values=$(sed -n "s/^ARG ${name}=//p" Dockerfile | sort -u)
-  if [[ -z "$values" ]]; then
-    echo "Dockerfile ARG $name has no default" >&2
-    exit 1
-  fi
-  if [[ $(wc -l <<<"$values" | tr -d '[:space:]') != 1 ]]; then
-    echo "Dockerfile ARG $name has conflicting defaults" >&2
-    exit 1
-  fi
+  values=$(sed -n "s/^ARG ${name}=//p" Dockerfile)
+  [[ -n "$values" ]] || fail "Dockerfile ARG $name has no default"
+  [[ $(wc -l <<<"$values" | tr -d '[:space:]') == 1 ]] || fail "Dockerfile ARG $name has multiple defaults"
   printf '%s\n' "$values"
 }
 
 dockerfile_epoch=$(dockerfile_arg SOURCE_DATE_EPOCH)
-if [[ "$dockerfile_epoch" != "$source_date_epoch" ]]; then
-  echo "Dockerfile SOURCE_DATE_EPOCH ($dockerfile_epoch) differs from docker-bake.hcl ($source_date_epoch)" >&2
-  exit 1
-fi
+[[ "$dockerfile_epoch" == "$source_date_epoch" ]] || fail \
+  "Dockerfile SOURCE_DATE_EPOCH ($dockerfile_epoch) differs from docker-bake.hcl ($source_date_epoch)"
 
 ubuntu_snapshot=$(dockerfile_arg UBUNTU_SNAPSHOT)
 python3 - "$source_date_epoch" "$ubuntu_snapshot" <<'PY'
@@ -71,104 +54,63 @@ epoch = int(sys.argv[1])
 snapshot = sys.argv[2]
 try:
     parsed = datetime.strptime(snapshot, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-except ValueError as exc:
-    raise SystemExit(f"invalid UBUNTU_SNAPSHOT {snapshot!r}: {exc}")
-actual = datetime.fromtimestamp(epoch, timezone.utc)
+    actual = datetime.fromtimestamp(epoch, timezone.utc)
+except (OSError, OverflowError, ValueError) as exc:
+    raise SystemExit(f"invalid release timestamp: {exc}")
 if actual != parsed:
     raise SystemExit(
         f"SOURCE_DATE_EPOCH {epoch} resolves to {actual.isoformat()} instead of UBUNTU_SNAPSHOT {snapshot}"
     )
 PY
 
-if jq -e --argjson targets "$(printf '%s\n' "${targets[@]}" | jq -R . | jq -s .)" '
-  [$targets[] as $target | (.target[$target].args.DALEC_SKIP_TESTS // "")] | any(. != "")
+if jq -e --argjson targets "$targets_json" '
+  . as $bake
+  | [$targets[] as $target | ($bake.target[$target].args.DALEC_SKIP_TESTS // "")]
+  | any(. != "")
 ' <<<"$bake" >/dev/null; then
-  echo "release bake targets must not set DALEC_SKIP_TESTS" >&2
-  exit 1
+  fail "release bake targets must not set DALEC_SKIP_TESTS"
 fi
 
-frontend_ref=$(jq -r '.target.frontend.args.FRONTEND_REF // ""' <<<"$bake")
-if [[ -n "$frontend_ref" ]]; then
-  echo "release frontend must derive its own identity from the digest-pinned gateway source" >&2
-  exit 1
-fi
-
-for name in RUNTIME_BASE_REF MATERIALIZER_REF; do
+for name in FRONTEND_REF RUNTIME_BASE_REF MATERIALIZER_REF; do
   value=$(jq -r --arg name "$name" '.target.frontend.args[$name] // ""' <<<"$bake")
-  if [[ -n "$value" ]]; then
-    echo "default frontend $name must be empty; release CI supplies the immutable index reference" >&2
-    exit 1
-  fi
+  [[ -z "$value" ]] || fail "default frontend $name must be empty; release CI supplies or derives the immutable reference"
 done
 
-for target in runtime-base-amd64 materializer-amd64; do
-  expected='linux/amd64'
-  actual=$(jq -er --arg target "$target" '.target[$target].platforms | if length == 1 then .[0] else error("expected one platform") end' <<<"$bake")
-  [[ "$actual" == "$expected" ]] || {
-    echo "$target builds $actual, expected $expected" >&2
-    exit 1
-  }
-done
-for target in runtime-base-arm64 materializer-arm64; do
-  expected='linux/arm64'
-  actual=$(jq -er --arg target "$target" '.target[$target].platforms | if length == 1 then .[0] else error("expected one platform") end' <<<"$bake")
-  [[ "$actual" == "$expected" ]] || {
-    echo "$target builds $actual, expected $expected" >&2
-    exit 1
-  }
-done
-
-frontend_platforms=$(jq -c '.target.frontend.platforms | sort' <<<"$bake")
-[[ "$frontend_platforms" == '["linux/amd64","linux/arm64"]' ]] || {
-  echo "frontend platforms are $frontend_platforms, expected linux/amd64 and linux/arm64" >&2
-  exit 1
+validate_bake_target() {
+  local name=$1 target=$2 platforms=$3
+  jq -e --arg name "$name" --arg target "$target" --argjson platforms "$platforms" '
+    .target[$name] as $actual
+    | $actual != null
+      and $actual.context == "."
+      and $actual.dockerfile == "Dockerfile"
+      and $actual.target == $target
+      and (($actual.platforms | sort) == ($platforms | sort))
+  ' <<<"$bake" >/dev/null || fail \
+    "$name must use context ., Dockerfile, target $target, and platforms $platforms"
 }
+validate_bake_target runtime-base-amd64 runtime-base '["linux/amd64"]'
+validate_bake_target runtime-base-arm64 runtime-base '["linux/arm64"]'
+validate_bake_target materializer-amd64 materializer '["linux/amd64"]'
+validate_bake_target materializer-arm64 materializer '["linux/arm64"]'
+validate_bake_target frontend frontend '["linux/amd64","linux/arm64"]'
 
 runtime_base_amd64=$(jq -er '.target["runtime-base-amd64"].args.RUNTIME_BASE' <<<"$bake")
 runtime_base_arm64=$(jq -er '.target["runtime-base-arm64"].args.RUNTIME_BASE' <<<"$bake")
 materializer_base_amd64=$(jq -er '.target["materializer-amd64"].args.RUNTIME_BASE' <<<"$bake")
 materializer_base_arm64=$(jq -er '.target["materializer-arm64"].args.RUNTIME_BASE' <<<"$bake")
-[[ "$materializer_base_amd64" == "$runtime_base_amd64" ]] || {
-  echo "materializer-amd64 Ubuntu base differs from runtime-base-amd64" >&2
-  exit 1
-}
-[[ "$materializer_base_arm64" == "$runtime_base_arm64" ]] || {
-  echo "materializer-arm64 Ubuntu base differs from runtime-base-arm64" >&2
-  exit 1
-}
+[[ "$materializer_base_amd64" == "$runtime_base_amd64" ]] || fail \
+  "materializer-amd64 Ubuntu base differs from runtime-base-amd64"
+[[ "$materializer_base_arm64" == "$runtime_base_arm64" ]] || fail \
+  "materializer-arm64 Ubuntu base differs from runtime-base-arm64"
 for ref in "$runtime_base_amd64" "$runtime_base_arm64"; do
-  [[ "$ref" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || {
-    echo "runtime base is not digest pinned: $ref" >&2
-    exit 1
-  }
+  [[ "$ref" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || fail "runtime base is not digest pinned: $ref"
 done
-[[ "$runtime_base_amd64" != "$runtime_base_arm64" ]] || {
-  echo "amd64 and arm64 runtime bases unexpectedly use the same manifest" >&2
-  exit 1
-}
-
-homebrew_commit=$(jq -er '.target.frontend.args.HOMEBREW_COMMIT' <<<"$bake")
-portable_ruby_version=$(jq -er '.target.frontend.args.HOMEBREW_RUBY_VERSION' <<<"$bake")
-verification_keys_digest=$(jq -er '.target.frontend.args.HOMEBREW_KEYS_DIGEST' <<<"$bake")
-
-[[ "$homebrew_commit" =~ ^[0-9a-f]{40}$ ]] || {
-  echo "invalid Homebrew commit: $homebrew_commit" >&2
-  exit 1
-}
-[[ -n "$portable_ruby_version" ]] || {
-  echo "portable Ruby version is empty" >&2
-  exit 1
-}
-[[ "$verification_keys_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-  echo "invalid verification key digest: $verification_keys_digest" >&2
-  exit 1
-}
+[[ "$runtime_base_amd64" != "$runtime_base_arm64" ]] || fail \
+  "amd64 and arm64 runtime bases unexpectedly use the same manifest"
 
 dockerfile_frontend=$(sed -n '1s/^# syntax=//p' Dockerfile)
-[[ "$dockerfile_frontend" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || {
-  echo "Dockerfile frontend is not digest pinned: $dockerfile_frontend" >&2
-  exit 1
-}
+[[ "$dockerfile_frontend" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || fail \
+  "Dockerfile frontend is not digest pinned: $dockerfile_frontend"
 
 go_image=$(dockerfile_arg GO_IMAGE)
 chisel_version=$(dockerfile_arg CHISEL_VERSION)
@@ -177,79 +119,51 @@ chisel_releases_sha256=$(dockerfile_arg CHISEL_RELEASES_SHA256)
 chisel_amd64_sha256=$(dockerfile_arg CHISEL_AMD64_SHA256)
 chisel_arm64_sha256=$(dockerfile_arg CHISEL_ARM64_SHA256)
 homebrew_archive_sha256=$(dockerfile_arg HOMEBREW_ARCHIVE_SHA256)
-dockerfile_homebrew_commit=$(dockerfile_arg HOMEBREW_COMMIT)
-dockerfile_ruby_version=$(dockerfile_arg HOMEBREW_RUBY_VERSION)
-dockerfile_keys_digest=$(dockerfile_arg HOMEBREW_KEYS_DIGEST)
+homebrew_commit=$(dockerfile_arg HOMEBREW_COMMIT)
+portable_ruby_version=$(dockerfile_arg HOMEBREW_RUBY_VERSION)
+verification_keys_digest=$(dockerfile_arg HOMEBREW_KEYS_DIGEST)
 
-validate_target_arg() {
-  local target=$1 name=$2 expected=$3 actual
-  actual=$(jq -r --arg target "$target" --arg name "$name" --arg expected "$expected" '
-    .target[$target].args[$name] // $expected
-  ' <<<"$bake")
-  [[ "$actual" == "$expected" ]] || {
-    echo "$target overrides $name with an unrecorded release value" >&2
-    exit 1
-  }
-}
-for target in "${targets[@]}"; do
-  validate_target_arg "$target" GO_IMAGE "$go_image"
-  validate_target_arg "$target" UBUNTU_SNAPSHOT "$ubuntu_snapshot"
-  validate_target_arg "$target" CHISEL_VERSION "$chisel_version"
-  validate_target_arg "$target" CHISEL_RELEASES_COMMIT "$chisel_releases_commit"
-  validate_target_arg "$target" CHISEL_RELEASES_SHA256 "$chisel_releases_sha256"
-  validate_target_arg "$target" CHISEL_AMD64_SHA256 "$chisel_amd64_sha256"
-  validate_target_arg "$target" CHISEL_ARM64_SHA256 "$chisel_arm64_sha256"
-  validate_target_arg "$target" HOMEBREW_ARCHIVE_SHA256 "$homebrew_archive_sha256"
-  validate_target_arg "$target" HOMEBREW_COMMIT "$dockerfile_homebrew_commit"
-  validate_target_arg "$target" HOMEBREW_RUBY_VERSION "$dockerfile_ruby_version"
-  validate_target_arg "$target" HOMEBREW_KEYS_DIGEST "$dockerfile_keys_digest"
-done
-
-[[ "$go_image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || {
-  echo "GO_IMAGE is not digest pinned: $go_image" >&2
-  exit 1
-}
-[[ -n "$chisel_version" ]] || { echo "CHISEL_VERSION is empty" >&2; exit 1; }
-[[ "$chisel_releases_commit" =~ ^[0-9a-f]{40}$ ]] || {
-  echo "invalid chisel-releases commit: $chisel_releases_commit" >&2
-  exit 1
-}
+[[ "$go_image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || fail "GO_IMAGE is not digest pinned: $go_image"
+[[ -n "$chisel_version" ]] || fail "CHISEL_VERSION is empty"
+[[ "$chisel_releases_commit" =~ ^[0-9a-f]{40}$ ]] || fail \
+  "invalid chisel-releases commit: $chisel_releases_commit"
 for name in chisel_releases_sha256 chisel_amd64_sha256 chisel_arm64_sha256 homebrew_archive_sha256; do
   value=${!name}
-  [[ "$value" =~ ^[0-9a-f]{64}$ ]] || {
-    echo "invalid $name: $value" >&2
-    exit 1
-  }
+  [[ "$value" =~ ^[0-9a-f]{64}$ ]] || fail "invalid $name: $value"
 done
-[[ "$dockerfile_homebrew_commit" == "$homebrew_commit" ]] || {
-  echo "Dockerfile Homebrew commit differs from docker-bake.hcl" >&2
-  exit 1
-}
-[[ "$dockerfile_ruby_version" == "$portable_ruby_version" ]] || {
-  echo "Dockerfile portable Ruby version differs from docker-bake.hcl" >&2
-  exit 1
-}
-[[ "$dockerfile_keys_digest" == "$verification_keys_digest" ]] || {
-  echo "Dockerfile verification key digest differs from docker-bake.hcl" >&2
-  exit 1
-}
+[[ "$homebrew_commit" =~ ^[0-9a-f]{40}$ ]] || fail "invalid Homebrew commit: $homebrew_commit"
+[[ -n "$portable_ruby_version" ]] || fail "portable Ruby version is empty"
+[[ "$verification_keys_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail \
+  "invalid verification key digest: $verification_keys_digest"
 
-for target in materializer-amd64 materializer-arm64; do
-  target_commit=$(jq -er --arg target "$target" '.target[$target].args.HOMEBREW_COMMIT' <<<"$bake")
-  target_ruby=$(jq -er --arg target "$target" '.target[$target].args.HOMEBREW_RUBY_VERSION' <<<"$bake")
-  [[ "$target_commit" == "$homebrew_commit" ]] || {
-    echo "$target Homebrew commit differs from frontend" >&2
-    exit 1
-  }
-  [[ "$target_ruby" == "$portable_ruby_version" ]] || {
-    echo "$target portable Ruby version differs from frontend" >&2
-    exit 1
-  }
-done
+expected_args=$(jq -n \
+  --arg GO_IMAGE "$go_image" \
+  --arg UBUNTU_SNAPSHOT "$ubuntu_snapshot" \
+  --arg CHISEL_VERSION "$chisel_version" \
+  --arg CHISEL_RELEASES_COMMIT "$chisel_releases_commit" \
+  --arg CHISEL_RELEASES_SHA256 "$chisel_releases_sha256" \
+  --arg CHISEL_AMD64_SHA256 "$chisel_amd64_sha256" \
+  --arg CHISEL_ARM64_SHA256 "$chisel_arm64_sha256" \
+  --arg HOMEBREW_ARCHIVE_SHA256 "$homebrew_archive_sha256" \
+  --arg HOMEBREW_COMMIT "$homebrew_commit" \
+  --arg HOMEBREW_RUBY_VERSION "$portable_ruby_version" \
+  --arg HOMEBREW_KEYS_DIGEST "$verification_keys_digest" \
+  '$ARGS.named')
+override=$(jq -r --argjson targets "$targets_json" --argjson expected "$expected_args" '
+  . as $bake
+  | first(
+      $targets[] as $target
+      | $expected | to_entries[]
+      | . as $entry
+      | select(($bake.target[$target].args[$entry.key] // $entry.value) != $entry.value)
+      | "\($target) overrides \($entry.key) with an unrecorded release value"
+    ) // ""
+' <<<"$bake")
+[[ -z "$override" ]] || fail "$override"
 
 module_version() {
   local module=$1 metadata
-  metadata=$(go list -m -json "$module")
+  metadata=$(GOWORK=off GOFLAGS='' go list -m -json "$module")
   jq -e --arg module "$module" '
     .Path == $module and ((.Replace // null) == null)
   ' <<<"$metadata" >/dev/null || {
@@ -261,10 +175,6 @@ module_version() {
 
 dalec_module=$(module_version github.com/project-dalec/dalec)
 buildkit_module=$(module_version github.com/moby/buildkit)
-[[ -n "$dalec_module" && -n "$buildkit_module" ]] || {
-  echo "failed to resolve release module versions" >&2
-  exit 1
-}
 
 jq -n \
   --arg source_date_epoch "$source_date_epoch" \

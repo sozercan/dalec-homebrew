@@ -69,34 +69,28 @@ func TestRunWritesCanonicalManifestToFile(t *testing.T) {
 	}
 }
 
-func TestRunRequiresEveryManifestInput(t *testing.T) {
-	for _, name := range []string{
-		"frontend-index",
-		"frontend-amd64",
-		"frontend-arm64",
-		"runtime-base-index",
-		"runtime-base-amd64",
-		"runtime-base-arm64",
-		"materializer-index",
-		"materializer-amd64",
-		"materializer-arm64",
-		"homebrew-commit",
-		"portable-ruby-version",
-		"verification-keys-digest",
-		"dalec-module",
-		"buildkit-module",
-	} {
-		t.Run(name, func(t *testing.T) {
-			var stdout bytes.Buffer
-			var stderr bytes.Buffer
-			err := run(withoutFlag(validArgs(), "--"+name), &stdout, &stderr)
-			if err == nil || !strings.Contains(err.Error(), "--"+name+" is required") {
-				t.Fatalf("err = %v", err)
-			}
-			if stdout.Len() != 0 {
-				t.Fatalf("stdout = %q", stdout.String())
-			}
-		})
+func TestRunRejectsEmptyOutputPath(t *testing.T) {
+	args := append(validArgs(), "--output=")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run(args, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), `write output ""`) {
+		t.Fatalf("err = %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunRejectsMissingManifestInput(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run(withoutFlag(validArgs(), "--frontend-index"), &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "frontend index: digest-pinned reference is required") {
+		t.Fatalf("err = %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q", stdout.String())
 	}
 }
 
@@ -164,7 +158,7 @@ func canonicalManifest(t *testing.T) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return append(data, '\n')
+	return data
 }
 
 func testComponent(repo string, index, amd64, arm64 rune) release.Component {

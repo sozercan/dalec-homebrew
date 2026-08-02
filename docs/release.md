@@ -21,10 +21,12 @@ These options are not general overrides. Runtime-base, materializer, and Homebre
 
 The frontend cannot bind its own final digest before it is published. `DALEC_HOMEBREW_FRONTEND_REF` therefore normally comes from BuildKit's digest-pinned gateway `source` option and must match it when explicitly supplied. Mutable tags are rejected. The platform child digests returned by BuildKit are recorded in every resolution record.
 
-See [`../release/components.example.json`](../release/components.example.json) for the canonical manifest shape. The checked-in file contains placeholders and is illustrative. Release automation generates a canonical manifest with `cmd/release-manifest`, then validates it with:
+See [`../release/components.example.json`](../release/components.example.json)
+for the canonical manifest shape. The checked-in file contains placeholders
+and is illustrative. Release automation generates the manifest with
+`cmd/release-manifest`. Validate a populated manifest with:
 
 ```console
-go run ./cmd/release-manifest --help
 go run ./cmd/release-verify path/to/components.json
 ```
 
@@ -57,9 +59,12 @@ The repository currently pins:
 
 The exact image and archive digests live beside the build instructions in [`../Dockerfile`](../Dockerfile). These values are release inputs, not update channels. Update, test, review, and sign the complete tuple together.
 
-## Release procedure
+## Release requirements
 
-A production release pipeline must:
+An end-to-end production release must satisfy the following requirements. The
+repository workflow automates steps 1-5 for a reusable component tuple;
+downstream product releases consume that signed tuple and complete steps 6-9.
+The example runtimes are integration fixtures and are not promoted.
 
 1. Build `amd64` and `arm64` runtime-base children from the pinned Chisel binary, immutable `chisel-releases` commit, and Ubuntu snapshot with `SOURCE_DATE_EPOCH` fixed.
 2. Build materializer children from the corresponding pinned full Ubuntu child images and copy only the matching Chisel runtime-base package and artifact evidence into them.
@@ -79,40 +84,63 @@ Release CI must reject:
 - changed Chisel, release-definition, snapshot, or Ubuntu pins without review
 - unsigned or mixed component tuples
 - exporter settings that differ between test and promotion
-- any existing draft or published GitHub release for the target tag
 
 ## Automated component release
 
-[`.github/workflows/release.yml`](../.github/workflows/release.yml) publishes an existing v-prefixed SemVer tag, including supported pre-releases. The workflow is manual-only so write and signing privileges come from the trusted `main` branch workflow rather than from the tagged commit. Start it from `main` and provide a tag whose commit is reachable from `main`.
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) publishes an
+existing v-prefixed SemVer tag, including supported pre-releases. Dispatch it
+from `main` with a tag whose commit is reachable from `main`; this keeps write
+and signing privileges in the trusted workflow rather than the tagged source.
 
-Release runs are serialized repository-wide. Before construction, the workflow requires the target tag to have no existing draft or published GitHub release. It does not inspect earlier releases, derive a predecessor, or carry a metadata rollback floor across releases. An incomplete draft from a failed attempt must be deleted explicitly before retrying; release automation never deletes or overwrites it.
+Runs are serialized repository-wide, and an existing published release is
+rejected. With no target release, the workflow builds a new tuple and stages a
+draft. With an existing draft, it skips rebuilding and resumes only after the
+draft's complete signed bundle has been verified. An incomplete or mismatched
+draft fails closed and must be removed explicitly before a new build; the
+workflow never deletes a draft or replaces release assets.
 
-The workflow separates construction from promotion:
+For a new tuple, the workflow:
 
-1. Reuse normal CI against the tagged commit, validate the release inputs with [`../scripts/release-inputs.sh`](../scripts/release-inputs.sh), and reject any existing draft or published GitHub release for the target tag before building.
-2. Build the `amd64` and `arm64` runtime-base and materializer children with pinned Dockerfile frontend, Buildx, BuildKit, and QEMU inputs. BuildKit attestations are disabled during construction so the image-manifest digests remain unambiguous.
-3. Smoke-test the exact children, assemble the runtime-base and materializer indexes, and build the frontend against those digest-pinned indexes.
-4. Run every focused live spec on native `amd64` and `arm64` workers, retain deterministic runtime evidence archives, and require every spec and platform to use the same authenticated Homebrew metadata snapshot. The frontend still enforces JWS verification, future-skew checks, and a release-bound maximum age of no more than seven days.
-5. Generate SPDX SBOMs and reject fixed critical vulnerabilities for every platform child.
-6. Generate `components.json`, sign every child and index with keyless Cosign, attach SLSA provenance and SPDX attestations, and sign the exact tested metadata snapshot, release records, and checksums.
-7. Reverify the tag, signatures, attestations, and release bundle, then stage all signed assets in a new draft GitHub release before adding immutable version tags to the already tested index digests. Verify those promoted tags resolve to the recorded digests, then publish the staged draft. The workflow never publishes `latest`, rebuilds during promotion, or overwrites an existing release. If staging or promotion leaves an incomplete draft, an operator must delete it explicitly before retrying.
+1. Runs normal CI and validates the tagged release inputs.
+2. Builds and smoke-tests the `amd64` and `arm64` component children and indexes,
+   then builds the frontend against the exact runtime-base and materializer
+   indexes.
+3. Runs every focused integration spec on native `amd64` and `arm64` workers,
+   requires one authenticated Homebrew metadata snapshot across every spec and
+   platform, and produces deterministic runtime evidence, SPDX SBOMs, and
+   vulnerability reports.
+4. Generates the component manifest and provenance, signs every component child
+   and index with keyless Cosign, attaches the exact SLSA and SPDX predicates,
+   and signs the component manifest, metadata snapshot, and checksum set.
 
-Release CI intentionally does not compare the accepted metadata snapshot with snapshots from earlier releases. Its release-time guarantee is JWS-authenticated, sufficiently fresh metadata with one exact snapshot identity shared by all tested specs and platforms and recorded in signed evidence. `metadata-snapshot.json` is evidence of what was tested, not a cross-release anti-rollback floor. Callers that require monotonic metadata anti-rollback may continue to use the optional rollback-floor capability outside this workflow.
+Promotion revalidates the tag and signed bundle, creates or resumes the draft,
+and verifies its exact asset inventory. Each component version tag must be
+absent or already resolve to the tested index digest; the workflow creates only
+missing tags, verifies them, rechecks the draft, and then publishes it. It never
+rebuilds during promotion or publishes a `latest` tag.
 
-The GitHub `release` environment gates signing and promotion. Configure it with required reviewers, protect release-critical paths through branch rules, and configure a tag ruleset that restricts creation and blocks updates or deletion of `v*.*.*` release tags. GHCR and GitHub Release writes use the scoped `GITHUB_TOKEN`; keyless Cosign uses GitHub Actions OIDC, so no private signing-key secret is required.
+The workflow records the accepted metadata snapshot but does not compare it
+with earlier releases. See [`../SECURITY.md`](../SECURITY.md) for the resulting
+cross-release anti-rollback limitation.
+
+The GitHub `release` environment gates signing and promotion. Configure required
+reviewers, protect release-critical paths with branch rules, and prevent updates
+or deletion of `v*.*.*` tags. GHCR and GitHub Release writes use the scoped
+`GITHUB_TOKEN`; keyless Cosign uses GitHub Actions OIDC.
 
 Release assets include:
 
-- `components.json`, `components.digest`, and the component Sigstore bundle
-- `digests.json` and `inputs.json`, binding the source and immutable release inputs
+- `components.json`, `components.digest`, and `components.json.bundle`
+- `digests.json`, `inputs.json`, `metadata-snapshot.json`, its Sigstore bundle,
+  and the SLSA provenance predicate
 - per-platform SPDX SBOMs and vulnerability reports
-- runtime evidence archives from the `amd64` and `arm64` integration images
-- `metadata-snapshot.json` and its Sigstore bundle, recording the exact authenticated snapshot shared by every tested spec and platform
-- the SLSA provenance predicate
-- `SHA256SUMS` and its Sigstore bundle
+- deterministic runtime evidence archives for `amd64` and `arm64`
+- `SHA256SUMS` and `SHA256SUMS.bundle`
 
-The automated workflow releases the reusable component tuple. The images built from example Dalec specs are integration fixtures, not promoted product runtimes. A downstream product release remains responsible for retaining the signed Homebrew envelopes, mirroring selected bottle layers, publishing its final runtime index, and attaching product-specific VEX and promotion evidence.
+The signed component images and their SLSA and SPDX attestations remain in the
+registry. The GitHub release contains the records needed to identify and verify
+that tuple; it does not publish the example runtime images.
 
 ## Rollback
 
-Rollback selects an earlier signed component, index, and resolution tuple together with its mirrored blobs. It must not reconstruct an old release from current Homebrew metadata. This immutable artifact rollback is independent of the optional metadata rollback floor used while resolving a new build.
+Rollback selects an earlier signed component, index, and resolution tuple together with its mirrored blobs. It must not reconstruct an old release from current Homebrew metadata.

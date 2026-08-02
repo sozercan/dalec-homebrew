@@ -7,15 +7,14 @@ Contributions are welcome. This guide covers the local workflow; the [architectu
 For Go development:
 
 - Go 1.25.9 or newer
-- Bash and Make
+- Bash, Make, and `jq`
 
 For component and integration work:
 
-- Docker Buildx or `buildctl` backed by BuildKit 0.31.2 or newer
-- `jq`
+- Docker Buildx backed by BuildKit 0.31.2 or newer
 - For component rebuild mode, a writable OCI registry reachable from the selected BuildKit daemon
 - For published-tuple mode, pull access from the selected BuildKit daemon to each digest-pinned component reference
-- Outbound access to GitHub and the pinned Ubuntu snapshot while rebuilding components
+- Builder access to authenticated Homebrew metadata, selected bottle layers, component registries, and the pinned Ubuntu inputs used by the selected mode
 
 Additional reporting and VM validation tools are listed in their sections below.
 
@@ -51,16 +50,16 @@ Cross-compiled binaries are written to `/tmp`; validation should not modify the 
 
 ## Run the live BuildKit test
 
-The live helper performs one complete, single-platform build. By default it:
+The live helper builds and tests one final, single-platform runtime image in either mode:
 
-1. builds and pushes a runtime-base component,
-2. builds and pushes a materializer component,
-3. builds and pushes a frontend bound to those component digests,
-4. replaces the example's syntax line with the frontend digest,
-5. builds and tests the final runtime image, and
-6. loads or pushes the result and prints the immutable component references.
+| Mode | Required variables | Behavior |
+| --- | --- | --- |
+| Component rebuild | `DALEC_HOMEBREW_LIVE_BUILDER`, `DALEC_HOMEBREW_LIVE_REGISTRY`, and `DALEC_HOMEBREW_LIVE_PLATFORM` | Builds and pushes the runtime base, materializer, and frontend with one fixed source-date epoch, then consumes their reported digests. |
+| Published tuple | Builder and platform plus all three `DALEC_HOMEBREW_LIVE_*_REF` variables | Skips component builds and passes the immutable tuple to the release-bound frontend. |
 
-To test an already published release tuple, supply all three digest-pinned component reference variables listed below. In that mode the helper skips the component builds and forwards the tuple to the final build so the release-bound frontend verifies it.
+Leave all three component-reference variables unset to rebuild, or set all three to replay a published tuple. Partial sets and mutable or malformed references are rejected before the builder is inspected. The input spec must start with a `# syntax=` directive; the helper replaces that first line with the selected frontend digest before the final build.
+
+Example component rebuild:
 
 ```console
 DALEC_HOMEBREW_LIVE_BUILDER=dalec-homebrew-live-builder \
@@ -70,11 +69,11 @@ DALEC_HOMEBREW_LIVE_IMAGE=dalec-homebrew-live:arm64 \
 ./scripts/live-test.sh
 ```
 
-The repository does not provision the builder or registry. In component rebuild mode, the writable registry must be reachable from the BuildKit daemon, not only from the host. An HTTP registry is fine for local development when it is configured as insecure in that daemon. Published-tuple mode does not push components, but the daemon must be able to pull all three digest references.
+The repository does not provision the builder or registry. Rebuild mode needs a writable staging registry reachable from the builder; an HTTP registry is acceptable only when that daemon is explicitly configured for it. Published mode needs pull access to the supplied component references. `DALEC_HOMEBREW_LIVE_OUTPUT=push` additionally requires write access for the final image.
 
-In component rebuild mode, the helper uses temporary mutable tags for publication but consumes every component by digest. It disables provenance and does not sign, scan, promote, or clean up registry artifacts.
+All helper builds disable provenance. The helper does not verify release signatures or attestations, sign, scan, promote, or clean up registry artifacts; use the release workflow for those guarantees.
 
-Optional variables:
+Common options:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -82,17 +81,13 @@ Optional variables:
 | `DALEC_HOMEBREW_LIVE_IMAGE` | `dalec-homebrew-live:dev` | Final local or registry tag |
 | `DALEC_HOMEBREW_LIVE_OUTPUT` | `load` | `load` the final image or `push` it |
 | `DALEC_HOMEBREW_LIVE_PROGRESS` | `plain` | Buildx progress output |
-| `DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH` | `1781049600` | Reproducible component timestamp (rebuild mode) |
-| `DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE` | unset | RFC3339 rollback floor for authenticated Homebrew metadata |
-| `DALEC_HOMEBREW_LIVE_RUN_ID` | timestamp and architecture | Temporary component tag suffix (rebuild mode) |
-| `DALEC_HOMEBREW_LIVE_UBUNTU_BASE` | pinned platform child | Runtime base override for local rebuilding |
-| `DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF` | unset | Published runtime-base index reference (`image@sha256:...`) |
-| `DALEC_HOMEBREW_LIVE_MATERIALIZER_REF` | unset | Published materializer index reference (`image@sha256:...`) |
-| `DALEC_HOMEBREW_LIVE_FRONTEND_REF` | unset | Published frontend platform-child reference (`image@sha256:...`) |
+| `DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE` | unset | RFC3339 lower bound for authenticated Homebrew metadata |
 
-The three published component references must be supplied together and must use `@sha256:` digests. Runtime-base and materializer references identify their multi-platform indexes; the frontend reference identifies the child for `DALEC_HOMEBREW_LIVE_PLATFORM`.
+Rebuild-only options are `DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH` (default `1781049600`), `DALEC_HOMEBREW_LIVE_RUN_ID` (timestamp and architecture), and `DALEC_HOMEBREW_LIVE_UBUNTU_BASE` (the pinned platform child by default).
 
-When `DALEC_HOMEBREW_LIVE_OUTPUT=push`, the helper prints `DALEC_HOMEBREW_LIVE_FINAL_REF` with the immutable final manifest digest.
+Published mode requires digest-pinned `DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF`, `DALEC_HOMEBREW_LIVE_MATERIALIZER_REF`, and `DALEC_HOMEBREW_LIVE_FRONTEND_REF`. Runtime-base and materializer inputs identify release indexes; the frontend input identifies the selected platform child. References printed after a rebuild identify that run's single-platform staging outputs, not release indexes.
+
+The helper always prints the final image digest and immutable `DALEC_HOMEBREW_LIVE_FINAL_REF`; after `push`, that reference is pullable from the final image repository.
 
 ## Exercise focused runtime closures
 

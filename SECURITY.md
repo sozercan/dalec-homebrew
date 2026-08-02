@@ -20,7 +20,17 @@ The V1 implementation is expected to preserve these properties:
 
 ## Upstream trust limitations
 
-Homebrew's public `formula.jws.json` authenticates Formula metadata and bottle checksums but does not provide a signed timestamp. The implementation records whether freshness came from signed payload data or HTTP `Last-Modified`. The optional metadata rollback-floor policy remains available to callers that maintain an external floor. The repository release workflow does not carry a floor across releases or scan release history; it enforces maximum-age (at most seven days for release-bound frontends) and future-skew checks, requires every integration spec and platform to use the same authenticated snapshot, and signs the exact accepted snapshot identity as release evidence. Release CI therefore does not provide cross-release metadata anti-rollback beyond freshness: an older but still-fresh signed snapshot can be accepted when it is the consistent snapshot tested for that release.
+Homebrew's public JWS documents authenticate metadata and bottle checksums,
+but do not always include an authenticated generation timestamp. When absent,
+freshness relies on the unsigned HTTP `Last-Modified` value.
+
+Callers may supply a metadata rollback floor, but the repository release
+workflow does not persist one across releases. It limits metadata age to seven
+days for release-bound frontends, rejects future timestamps, requires every
+release integration to use the same authenticated snapshot, and records that
+snapshot in signed evidence. This is not cross-release anti-rollback: a
+previously superseded but still-fresh signed snapshot may be accepted by a
+later release.
 
 The Formula JWS authenticates the compressed bottle checksum, but it does not bind the OCI index annotations containing `sh.brew.tab`. This implementation:
 

@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-bash -n \
-  scripts/check.sh \
-  scripts/live-test.sh \
-  scripts/live-test-test.sh \
-  scripts/release-inputs.sh \
-  scripts/image-size-report.sh \
-  scripts/vm-live-validate.sh
+for script in scripts/*.sh; do
+  bash -n "$script"
+done
 ./scripts/live-test-test.sh
 go test -trimpath ./...
 go vet ./...

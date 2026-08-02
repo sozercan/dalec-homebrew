@@ -10,19 +10,19 @@ cleanup() {
 trap cleanup EXIT
 
 FAKE_BIN="$TEST_ROOT/bin"
+DOCKER_LOG="$TEST_ROOT/docker.log"
 mkdir -p "$FAKE_BIN"
 cat > "$FAKE_BIN/docker" <<'DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
 
-printf '%s\n' "$*" >> "$DOCKER_LOG"
-if [[ "$1 $2" == "buildx inspect" ]]; then
-  exit 0
-fi
-if [[ "$1 $2" != "buildx build" ]]; then
-  echo "unexpected docker command: $*" >&2
-  exit 1
-fi
+printf '%q ' "$@" >> "$DOCKER_LOG"
+printf '\n' >> "$DOCKER_LOG"
+case "$1 $2" in
+  "buildx inspect") exit 0 ;;
+  "buildx build") ;;
+  *) echo "unexpected docker command: $*" >&2; exit 1 ;;
+esac
 
 metadata_file=
 target=final
@@ -41,9 +41,7 @@ while (( $# > 0 )); do
       spec_file=$2
       shift 2
       ;;
-    *)
-      shift
-      ;;
+    *) shift ;;
   esac
 done
 
@@ -65,9 +63,20 @@ ORIGINAL_PATH=$PATH
 DIGEST_A=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 DIGEST_B=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 DIGEST_C=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+DIGEST_D=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 BASE_REF=ghcr.io/example/runtime-base@$DIGEST_A
 MATERIALIZER_REF=ghcr.io/example/materializer@$DIGEST_B
 FRONTEND_REF=ghcr.io/example/frontend@$DIGEST_C
+COMMON_ENV=(
+  DALEC_HOMEBREW_LIVE_BUILDER=test-builder
+  DALEC_HOMEBREW_LIVE_PLATFORM=linux/amd64
+)
+PUBLISHED_ENV=(
+  "${COMMON_ENV[@]}"
+  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF"
+  "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF"
+  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"
+)
 
 fail() {
   echo "FAIL: $*" >&2
@@ -91,113 +100,114 @@ assert_not_contains() {
 run_live_test() {
   local output=$1
   shift
-  (
-    unset \
-      DALEC_HOMEBREW_LIVE_BUILDER \
-      DALEC_HOMEBREW_LIVE_REGISTRY \
-      DALEC_HOMEBREW_LIVE_PLATFORM \
-      DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF \
-      DALEC_HOMEBREW_LIVE_MATERIALIZER_REF \
-      DALEC_HOMEBREW_LIVE_FRONTEND_REF \
-      DALEC_HOMEBREW_LIVE_RUN_ID \
-      DALEC_HOMEBREW_LIVE_SPEC \
-      DALEC_HOMEBREW_LIVE_IMAGE \
-      DALEC_HOMEBREW_LIVE_OUTPUT \
-      DALEC_HOMEBREW_LIVE_PROGRESS \
-      DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH \
-      DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE \
-      DALEC_HOMEBREW_LIVE_UBUNTU_BASE
-    export PATH="$FAKE_BIN:$ORIGINAL_PATH"
-    export TMPDIR="$TEST_ROOT"
-    export DOCKER_LOG="$TEST_ROOT/docker.log"
-    : > "$DOCKER_LOG"
-    for assignment in "$@"; do
-      export "${assignment?}"
-    done
-    "$LIVE_TEST"
-  ) > "$output" 2>&1
+  : > "$DOCKER_LOG"
+  env -i \
+    PATH="$FAKE_BIN:$ORIGINAL_PATH" \
+    TMPDIR="$TEST_ROOT" \
+    DOCKER_LOG="$DOCKER_LOG" \
+    "$@" \
+    "$LIVE_TEST" > "$output" 2>&1
 }
 
-partial_output="$TEST_ROOT/partial.out"
-if run_live_test "$partial_output" \
-  DALEC_HOMEBREW_LIVE_BUILDER=test-builder \
-  DALEC_HOMEBREW_LIVE_REGISTRY=registry.example \
-  DALEC_HOMEBREW_LIVE_PLATFORM=linux/amd64 \
-  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF"; then
-  fail "a partial component tuple was accepted"
-else
-  status=$?
-fi
-[[ $status -eq 64 ]] || fail "partial tuple exited with $status instead of 64"
-assert_contains "$partial_output" "must be set together"
+expect_rejected() {
+  local name=$1
+  local expected=$2
+  shift 2
+  local output="$TEST_ROOT/$name.out"
+  local rc
 
-mutable_output="$TEST_ROOT/mutable.out"
-if run_live_test "$mutable_output" \
-  DALEC_HOMEBREW_LIVE_BUILDER=test-builder \
-  DALEC_HOMEBREW_LIVE_PLATFORM=linux/amd64 \
+  if run_live_test "$output" "$@"; then
+    fail "$name was accepted"
+  else
+    rc=$?
+  fi
+  [[ $rc -eq 64 ]] || fail "$name exited with $rc instead of 64"
+  assert_contains "$output" "$expected"
+  [[ ! -s "$DOCKER_LOG" ]] || fail "$name invoked Docker before rejecting invalid input"
+}
+
+expect_rejected partial-one "must be set together" \
+  "${COMMON_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF"
+
+expect_rejected partial-two "must be set together" \
+  "${COMMON_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
+  "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF"
+
+expect_rejected mutable-base "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF must be a digest-pinned OCI reference" \
+  "${COMMON_ENV[@]}" \
   DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=ghcr.io/example/runtime-base:latest \
   "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
-  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"; then
-  fail "a mutable component reference was accepted"
-else
-  status=$?
-fi
-[[ $status -eq 64 ]] || fail "mutable reference exited with $status instead of 64"
-assert_contains "$mutable_output" "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF must be a digest-pinned OCI reference"
+  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"
 
-malformed_output="$TEST_ROOT/malformed.out"
-if run_live_test "$malformed_output" \
-  DALEC_HOMEBREW_LIVE_BUILDER=test-builder \
-  DALEC_HOMEBREW_LIVE_PLATFORM=linux/amd64 \
+expect_rejected invalid-materializer "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF must be a digest-pinned OCI reference" \
+  "${COMMON_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
+  DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=ghcr.io/example/materializer@sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"
+
+expect_rejected malformed-frontend "DALEC_HOMEBREW_LIVE_FRONTEND_REF must be a digest-pinned OCI reference" \
+  "${COMMON_ENV[@]}" \
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
   "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
-  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=ghcr.io/example/front|end@$DIGEST_C"; then
-  fail "a malformed component reference was accepted"
-else
-  status=$?
-fi
-[[ $status -eq 64 ]] || fail "malformed reference exited with $status instead of 64"
-assert_contains "$malformed_output" "DALEC_HOMEBREW_LIVE_FRONTEND_REF must be a digest-pinned OCI reference"
+  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=ghcr.io/example/front|end@$DIGEST_C"
+
+printf 'name: missing-syntax\n' > "$TEST_ROOT/missing-syntax.yaml"
+expect_rejected missing-syntax "DALEC_HOMEBREW_LIVE_SPEC must start with a # syntax= directive" \
+  "${PUBLISHED_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_SPEC=$TEST_ROOT/missing-syntax.yaml"
 
 published_output="$TEST_ROOT/published.out"
 CAPTURED_SPEC="$TEST_ROOT/published-spec.yaml"
-export CAPTURED_SPEC
 run_live_test "$published_output" \
-  DALEC_HOMEBREW_LIVE_BUILDER=test-builder \
-  DALEC_HOMEBREW_LIVE_PLATFORM=linux/amd64 \
+  CAPTURED_SPEC="$CAPTURED_SPEC" \
+  "${PUBLISHED_ENV[@]}" \
+  DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z
+[[ $(grep -c '^buildx build ' "$DOCKER_LOG") -eq 1 ]] || fail "published mode did not build only the final image"
+assert_not_contains "$DOCKER_LOG" "--target "
+for argument in \
+  "DALEC_HOMEBREW_RUNTIME_BASE=$BASE_REF" \
+  "DALEC_HOMEBREW_MATERIALIZER=$MATERIALIZER_REF" \
+  "DALEC_HOMEBREW_FRONTEND_REF=$FRONTEND_REF" \
+  "DALEC_HOMEBREW_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z"; do
+  assert_contains "$DOCKER_LOG" "--build-arg $argument"
+done
+[[ $(head -n 1 "$CAPTURED_SPEC") == "# syntax=$FRONTEND_REF" ]] || fail "published frontend reference was not written to the live spec"
+diff -u <(tail -n +2 "$ROOT/examples/live-test.yaml") <(tail -n +2 "$CAPTURED_SPEC")
+for result in \
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
   "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
   "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF" \
-  DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z
-[[ $(grep -c '^buildx build ' "$TEST_ROOT/docker.log") -eq 1 ]] || fail "published mode did not build only the final image"
-assert_not_contains "$TEST_ROOT/docker.log" "--target runtime-base"
-assert_not_contains "$TEST_ROOT/docker.log" "--target materializer"
-assert_not_contains "$TEST_ROOT/docker.log" "--target frontend"
-assert_contains "$TEST_ROOT/docker.log" "--build-arg DALEC_HOMEBREW_RUNTIME_BASE=$BASE_REF"
-assert_contains "$TEST_ROOT/docker.log" "--build-arg DALEC_HOMEBREW_MATERIALIZER=$MATERIALIZER_REF"
-assert_contains "$TEST_ROOT/docker.log" "--build-arg DALEC_HOMEBREW_FRONTEND_REF=$FRONTEND_REF"
-assert_contains "$TEST_ROOT/docker.log" "--build-arg DALEC_HOMEBREW_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z"
-[[ $(head -n 1 "$CAPTURED_SPEC") == "# syntax=$FRONTEND_REF" ]] || fail "published frontend reference was not written to the live spec"
-assert_contains "$published_output" "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF"
-assert_contains "$published_output" "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF"
-assert_contains "$published_output" "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"
-assert_contains "$published_output" "DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z"
+  "DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z" \
+  "DALEC_HOMEBREW_LIVE_FINAL_REF=dalec-homebrew-live@$DIGEST_D"; do
+  assert_contains "$published_output" "$result"
+done
 
 rebuild_output="$TEST_ROOT/rebuild.out"
-unset CAPTURED_SPEC
 run_live_test "$rebuild_output" \
   DALEC_HOMEBREW_LIVE_BUILDER=test-builder \
   DALEC_HOMEBREW_LIVE_REGISTRY=registry.example \
   DALEC_HOMEBREW_LIVE_PLATFORM=linux/arm64 \
-  DALEC_HOMEBREW_LIVE_RUN_ID=test-run
-[[ $(grep -c '^buildx build ' "$TEST_ROOT/docker.log") -eq 4 ]] || fail "rebuild mode did not retain all four builds"
-assert_contains "$TEST_ROOT/docker.log" "--target runtime-base"
-assert_contains "$TEST_ROOT/docker.log" "--target materializer"
-assert_contains "$TEST_ROOT/docker.log" "--target frontend"
-assert_not_contains "$TEST_ROOT/docker.log" "--build-arg DALEC_HOMEBREW_RUNTIME_BASE="
-assert_not_contains "$TEST_ROOT/docker.log" "--build-arg DALEC_HOMEBREW_METADATA_NOT_BEFORE="
-assert_contains "$rebuild_output" "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=registry.example/dalec-homebrew-runtime-base@$DIGEST_A"
-assert_contains "$rebuild_output" "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=registry.example/dalec-homebrew-materializer@$DIGEST_B"
-assert_contains "$rebuild_output" "DALEC_HOMEBREW_LIVE_FRONTEND_REF=registry.example/dalec-homebrew@$DIGEST_C"
+  DALEC_HOMEBREW_LIVE_RUN_ID=test-run \
+  DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH=1700000000
+[[ $(grep -c '^buildx build ' "$DOCKER_LOG") -eq 4 ]] || fail "rebuild mode did not retain all four builds"
+for target in runtime-base materializer frontend; do
+  assert_contains "$DOCKER_LOG" "--target $target"
+done
+[[ $(grep -Fc -- "--build-arg SOURCE_DATE_EPOCH=1700000000" "$DOCKER_LOG") -eq 3 ]] || fail "rebuild mode did not use one deterministic source date epoch for all components"
+for argument in \
+  "DALEC_HOMEBREW_RUNTIME_BASE=registry.example/dalec-homebrew-runtime-base@$DIGEST_A" \
+  "DALEC_HOMEBREW_MATERIALIZER=registry.example/dalec-homebrew-materializer@$DIGEST_B" \
+  "DALEC_HOMEBREW_FRONTEND_REF=registry.example/dalec-homebrew@$DIGEST_C"; do
+  assert_contains "$DOCKER_LOG" "--build-arg $argument"
+done
+assert_not_contains "$DOCKER_LOG" "--build-arg DALEC_HOMEBREW_METADATA_NOT_BEFORE="
+for result in \
+  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=registry.example/dalec-homebrew-runtime-base@$DIGEST_A" \
+  "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=registry.example/dalec-homebrew-materializer@$DIGEST_B" \
+  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=registry.example/dalec-homebrew@$DIGEST_C"; do
+  assert_contains "$rebuild_output" "$result"
+done
 
 echo "live-test shell tests passed"
