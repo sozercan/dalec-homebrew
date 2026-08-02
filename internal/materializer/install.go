@@ -2383,6 +2383,9 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 			}
 		}
 		if entry.Type == bottle.EntrySymlink {
+			if entry.PrefixTarget != "" && actual.Link != entry.SymlinkTarget {
+				return fmt.Errorf("verified bottle external symlink %s target changed", rel)
+			}
 			nodeNPMRewrite := actual.Link != entry.SymlinkTarget && isValidatedNodeNPMKegLink(prefix, node, verified, after, rel)
 			if !mayChange && actual.Link != entry.SymlinkTarget && !nodeNPMRewrite {
 				return fmt.Errorf("verified bottle symlink %s target changed", rel)

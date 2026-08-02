@@ -320,6 +320,13 @@ func TestReconcileInstalledKegAllowsSignedDependencyOptSymlink(t *testing.T) {
 	if err := reconcileInstalledKeg("/prefix", node, verified, after, reconcileKegOptions{closure: []resolution.Node{node, python}}); err != nil {
 		t.Fatal(err)
 	}
+	changed := node
+	changed.Bottle.Tab.ChangedFiles = []string{"libexec/bin/python3.14"}
+	rewritten := maps.Clone(after)
+	rewritten["Cellar/hello/1/libexec/bin/python3.14"] = fileState{Type: "symlink", Link: "/prefix/opt/python@3.14/bin/python3.14"}
+	if err := reconcileInstalledKeg("/prefix", changed, verified, rewritten, reconcileKegOptions{closure: []resolution.Node{changed, python}}); err == nil {
+		t.Fatal("rewritten dependency opt symlink accepted as a changed file")
+	}
 	if err := reconcileInstalledKeg("/prefix", node, verified, after); err == nil {
 		t.Fatal("dependency opt symlink accepted without resolved closure")
 	}
