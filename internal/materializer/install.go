@@ -1018,8 +1018,7 @@ func validateNodeNPMRuntime(prefix string, node resolution.Node, before, after m
 	npmrcPath := path.Join(nodeNPMRuntimeRoot, "npmrc")
 	allowed := map[string]struct{}{nodeNPMRuntimeParent: {}, nodeNPMRuntimeRoot: {}}
 	expected := map[string]struct{}{nodeNPMRuntimeRoot: {}}
-	entries := 0
-	var totalBytes int64
+	sourceEntries := 0
 	for sourcePath, source := range after {
 		if !snapshotPathWithin(sourcePath, sourceRoot) {
 			continue
@@ -1037,18 +1036,12 @@ func validateNodeNPMRuntime(prefix string, node resolution.Node, before, after m
 		}
 		expected[destinationPath] = struct{}{}
 		allowed[destinationPath] = struct{}{}
-		entries++
-		if entries > nodeNPMRuntimeMaxEntries {
+		sourceEntries++
+		if sourceEntries > nodeNPMRuntimeMaxEntries {
 			return nil, fmt.Errorf("Node npm runtime exceeds %d entries", nodeNPMRuntimeMaxEntries)
 		}
-		if source.Type == "regular" {
-			if source.Size < 0 || totalBytes > nodeNPMRuntimeMaxBytes-source.Size {
-				return nil, fmt.Errorf("Node npm runtime exceeds %d bytes", nodeNPMRuntimeMaxBytes)
-			}
-			totalBytes += source.Size
-		}
 	}
-	if entries <= 1 {
+	if sourceEntries <= 1 {
 		return nil, fmt.Errorf("verified Node npm source tree is empty")
 	}
 
@@ -1060,6 +1053,21 @@ func validateNodeNPMRuntime(prefix string, node resolution.Node, before, after m
 	}
 	allowed[npmrcPath] = struct{}{}
 	expected[npmrcPath] = struct{}{}
+
+	if len(expected) > nodeNPMRuntimeMaxEntries {
+		return nil, fmt.Errorf("Node npm runtime exceeds %d entries", nodeNPMRuntimeMaxEntries)
+	}
+	var totalBytes int64
+	for destinationPath := range expected {
+		destination := after[destinationPath]
+		if destination.Type != "regular" {
+			continue
+		}
+		if destination.Size < 0 || totalBytes > nodeNPMRuntimeMaxBytes-destination.Size {
+			return nil, fmt.Errorf("Node npm runtime exceeds %d bytes", nodeNPMRuntimeMaxBytes)
+		}
+		totalBytes += destination.Size
+	}
 
 	for destinationPath := range after {
 		if !snapshotPathWithin(destinationPath, nodeNPMRuntimeRoot) {

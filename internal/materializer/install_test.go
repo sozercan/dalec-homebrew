@@ -652,7 +652,7 @@ func TestValidateNodeNPMRuntimeEntryLimit(t *testing.T) {
 	const prefix = "/prefix"
 	node, after, options, sourceRoot := nodeNPMRuntimeLimitFixture(prefix)
 	state := nodeNPMRuntimeLimitRegular(0)
-	for i := 0; i < nodeNPMRuntimeMaxEntries-1; i++ {
+	for i := 0; i < nodeNPMRuntimeMaxEntries-2; i++ {
 		name := fmt.Sprintf("entry-%05d", i)
 		after[path.Join(sourceRoot, name)] = state
 		after[path.Join(nodeNPMRuntimeRoot, name)] = state
@@ -662,7 +662,7 @@ func TestValidateNodeNPMRuntimeEntryLimit(t *testing.T) {
 	}
 
 	overLimit := maps.Clone(after)
-	name := fmt.Sprintf("entry-%05d", nodeNPMRuntimeMaxEntries-1)
+	name := fmt.Sprintf("entry-%05d", nodeNPMRuntimeMaxEntries-2)
 	overLimit[path.Join(sourceRoot, name)] = state
 	overLimit[path.Join(nodeNPMRuntimeRoot, name)] = state
 	_, err := validateNodeNPMRuntime(prefix, node, nil, overLimit, options)
@@ -677,7 +677,9 @@ func TestValidateNodeNPMRuntimeByteLimit(t *testing.T) {
 	node, after, options, sourceRoot := nodeNPMRuntimeLimitFixture(prefix)
 	payloadPath := path.Join(sourceRoot, "payload")
 	runtimePayloadPath := path.Join(nodeNPMRuntimeRoot, "payload")
-	state := nodeNPMRuntimeLimitRegular(nodeNPMRuntimeMaxBytes)
+	npmrcSize := after[path.Join(nodeNPMRuntimeRoot, "npmrc")].Size
+	payloadLimit := nodeNPMRuntimeMaxBytes - npmrcSize
+	state := nodeNPMRuntimeLimitRegular(payloadLimit)
 	after[payloadPath] = state
 	after[runtimePayloadPath] = state
 	if _, err := validateNodeNPMRuntime(prefix, node, nil, after, options); err != nil {
@@ -685,7 +687,7 @@ func TestValidateNodeNPMRuntimeByteLimit(t *testing.T) {
 	}
 
 	overLimit := maps.Clone(after)
-	state = nodeNPMRuntimeLimitRegular(nodeNPMRuntimeMaxBytes + 1)
+	state = nodeNPMRuntimeLimitRegular(payloadLimit + 1)
 	overLimit[payloadPath] = state
 	overLimit[runtimePayloadPath] = state
 	_, err := validateNodeNPMRuntime(prefix, node, nil, overLimit, options)
