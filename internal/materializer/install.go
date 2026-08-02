@@ -237,6 +237,10 @@ func Install(ctx context.Context, cfg Config) (*Evidence, error) {
 			cancel()
 			return nil, fmt.Errorf("validate prefix before %q: %w", name, err)
 		}
+		if err := validateExternalBottleSymlinkTargets(cfg.Prefix, before, node, verifiedByName[name], cfg.Record.Nodes); err != nil {
+			cancel()
+			return nil, fmt.Errorf("validate bottle dependency links before %q: %w", name, err)
+		}
 		var priorGdkPixbufCache []byte
 		if state, ok := before[gdkPixbufLoadersCachePath]; ok {
 			if state.Type != "regular" {
@@ -300,7 +304,7 @@ func Install(ctx context.Context, cfg Config) (*Evidence, error) {
 		}); err != nil {
 			return nil, fmt.Errorf("contain install %q: %w", name, err)
 		}
-		if err := reconcileInstalledKeg(cfg.Prefix, node, verifiedByName[name], after); err != nil {
+		if err := reconcileInstalledKeg(cfg.Prefix, node, verifiedByName[name], after, reconcileKegOptions{closure: cfg.Record.Nodes}); err != nil {
 			return nil, fmt.Errorf("reconcile installed keg %q: %w", name, err)
 		}
 		evidence.InstallDeltas = append(evidence.InstallDeltas, InstallDelta{Formula: name, Changes: changes})
@@ -761,6 +765,15 @@ func classify(prefix string, node resolution.Node, before, after map[string]file
 			return fmt.Errorf("validate shared MIME database: %w", err)
 		}
 	}
+	nodeNPMGenerated := map[string]struct{}{}
+	if node.Name == nodeFormula {
+		nodeNPMGenerated, err = validateNodeNPMRuntime(prefix, node, before, after, options)
+		if err != nil {
+			return fmt.Errorf("validate Node npm runtime: %w", err)
+		}
+	} else if changesContainPathRoot(changes, nodeNPMRuntimeRoot) {
+		return fmt.Errorf("formula %q changed the Node npm runtime tree", node.Name)
+	}
 	gdkPixbufCacheValidated := false
 	if changesContainPathRoot(changes, gdkPixbufLoadersDirectoryPath) || changesContainExactPath(changes, gdkPixbufLoadersCachePath) {
 		kind, ok := changeKind(changes, gdkPixbufLoadersCachePath)
@@ -843,6 +856,8 @@ func classify(prefix string, node resolution.Node, before, after map[string]file
 			if a, ok := after[p]; ok && a.Type == "regular" && a.Mode.Perm()&0o111 != 0 {
 				return fmt.Errorf("package-manager state contains unexpected executable at %s", p)
 			}
+		case hasPath(nodeNPMGenerated, p):
+			c.Classification = "node-npm-runtime"
 		case p == "var":
 			if a, ok := after[p]; !ok || a.Type != "directory" {
 				return fmt.Errorf("var root is not a real directory")
@@ -887,8 +902,12 @@ func classify(prefix string, node resolution.Node, before, after map[string]file
 			if a, ok := after[p]; ok && a.Type == "symlink" {
 				resolved, err := resolveSnapshotPath(prefix, after, p)
 				_, preservedByExpansion := expandedSharedPaths[p]
-				if err != nil || (!snapshotPathWithin(resolved, keg) && !preservedByExpansion) {
+				nodeNPMLink := err == nil && isNodeNPMGlobalLink(prefix, node, keg, p, resolved, after, nodeNPMGenerated)
+				if err != nil || (!snapshotPathWithin(resolved, keg) && !preservedByExpansion && !nodeNPMLink) {
 					return fmt.Errorf("global link %s does not resolve into current keg", p)
+				}
+				if nodeNPMLink {
+					c.Classification = "node-npm-link"
 				}
 			}
 		default:
@@ -928,6 +947,13 @@ const (
 	gdkPixbufLoadersDirectoryPath  = "lib/gdk-pixbuf-2.0/2.10.0/loaders"
 	gdkPixbufLoadersCacheMaxBytes  = int64(1 << 20)
 	gdkPixbufLoadersCacheMaxModule = 256
+
+	nodeFormula                    = "node"
+	nodeNPMSourceRoot              = "libexec/lib/node_modules/npm"
+	nodeNPMRuntimeParent           = "lib/node_modules"
+	nodeNPMRuntimeRoot             = "lib/node_modules/npm"
+	nodeNPMRuntimeMaxEntries       = 10_000
+	nodeNPMRuntimeMaxBytes   int64 = 256 << 20
 )
 
 var sharedMimeFixedOutputs = map[string]struct{}{
@@ -959,6 +985,167 @@ var sharedMimeGeneratedTypes = map[string]struct{}{
 	"video":       {},
 	"x-content":   {},
 	"x-epoc":      {},
+}
+
+func validateNodeNPMRuntime(prefix string, node resolution.Node, before, after map[string]fileState, options classifyOptions) (map[string]struct{}, error) {
+	if node.Name != nodeFormula || !verifiedBottleMatchesNode(node, options.verified) {
+		return nil, fmt.Errorf("verified Node bottle identity is absent")
+	}
+	if options.runtimeUID == 0 || options.runtimeGID == 0 {
+		return nil, fmt.Errorf("authenticated runtime identity is absent")
+	}
+	for rel := range before {
+		if snapshotPathWithin(rel, nodeNPMRuntimeRoot) {
+			return nil, fmt.Errorf("Node npm runtime root existed before Node installation")
+		}
+	}
+
+	keg := path.Join("Cellar", node.Name, node.PkgVersion)
+	sourceRoot := path.Join(keg, nodeNPMSourceRoot)
+	sourceRootState, ok := after[sourceRoot]
+	if !ok || sourceRootState.Type != "directory" {
+		return nil, fmt.Errorf("verified Node npm source root is absent")
+	}
+	parent, ok := after[nodeNPMRuntimeParent]
+	if !ok || !sameDirectorySecurity(sourceRootState, parent) {
+		return nil, fmt.Errorf("Node npm runtime parent does not match the verified source directory")
+	}
+	runtimeRoot, ok := after[nodeNPMRuntimeRoot]
+	if !ok || !sameDirectorySecurity(sourceRootState, runtimeRoot) {
+		return nil, fmt.Errorf("Node npm runtime root does not match the verified source directory")
+	}
+
+	npmrcPath := path.Join(nodeNPMRuntimeRoot, "npmrc")
+	allowed := map[string]struct{}{nodeNPMRuntimeParent: {}, nodeNPMRuntimeRoot: {}}
+	expected := map[string]struct{}{nodeNPMRuntimeRoot: {}}
+	entries := 0
+	var totalBytes int64
+	for sourcePath, source := range after {
+		if !snapshotPathWithin(sourcePath, sourceRoot) {
+			continue
+		}
+		suffix := strings.TrimPrefix(sourcePath, sourceRoot)
+		destinationPath := nodeNPMRuntimeRoot + suffix
+		destination, ok := after[destinationPath]
+		if !ok {
+			return nil, fmt.Errorf("Node npm runtime copy is missing %s", destinationPath)
+		}
+		if destinationPath != npmrcPath {
+			if err := validateNodeNPMCopiedEntry(prefix, after, sourceRoot, nodeNPMRuntimeRoot, sourcePath, destinationPath, source, destination); err != nil {
+				return nil, err
+			}
+		}
+		expected[destinationPath] = struct{}{}
+		allowed[destinationPath] = struct{}{}
+		entries++
+		if entries > nodeNPMRuntimeMaxEntries {
+			return nil, fmt.Errorf("Node npm runtime exceeds %d entries", nodeNPMRuntimeMaxEntries)
+		}
+		if source.Type == "regular" {
+			if source.Size < 0 || totalBytes > nodeNPMRuntimeMaxBytes-source.Size {
+				return nil, fmt.Errorf("Node npm runtime exceeds %d bytes", nodeNPMRuntimeMaxBytes)
+			}
+			totalBytes += source.Size
+		}
+	}
+	if entries == 0 {
+		return nil, fmt.Errorf("verified Node npm source tree is empty")
+	}
+
+	npmrc, ok := after[npmrcPath]
+	expectedNPMRC := []byte("prefix = " + filepath.ToSlash(prefix) + "\n")
+	npmrcDigest := sha256.Sum256(expectedNPMRC)
+	if !ok || npmrc.Type != "regular" || npmrc.Mode.Perm() != 0o644 || npmrc.Mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || npmrc.Size != int64(len(expectedNPMRC)) || npmrc.Digest != hex.EncodeToString(npmrcDigest[:]) || npmrc.Links != 1 || !npmrc.OwnershipKnown || npmrc.UID != options.runtimeUID || npmrc.GID != options.runtimeGID {
+		return nil, fmt.Errorf("generated Node npmrc is missing or invalid")
+	}
+	allowed[npmrcPath] = struct{}{}
+	expected[npmrcPath] = struct{}{}
+
+	for destinationPath := range after {
+		if !snapshotPathWithin(destinationPath, nodeNPMRuntimeRoot) {
+			continue
+		}
+		if _, ok := expected[destinationPath]; !ok {
+			return nil, fmt.Errorf("Node npm runtime contains unverified path %s", destinationPath)
+		}
+	}
+	return allowed, nil
+}
+
+func validateNodeNPMCopiedEntry(prefix string, snapshot map[string]fileState, sourceRoot, destinationRoot, sourcePath, destinationPath string, source, destination fileState) error {
+	if source.Type != destination.Type || source.Mode != destination.Mode || !sameSnapshotOwnership(source, destination) {
+		return fmt.Errorf("Node npm runtime path %s differs from verified source metadata", destinationPath)
+	}
+	switch source.Type {
+	case "directory":
+		if !sameDirectorySecurity(source, destination) {
+			return fmt.Errorf("Node npm runtime directory %s differs from verified source", destinationPath)
+		}
+	case "regular":
+		if source.Size != destination.Size || source.Digest != destination.Digest || source.Links != 1 || destination.Links != 1 {
+			return fmt.Errorf("Node npm runtime file %s differs from verified source", destinationPath)
+		}
+	case "symlink":
+		if source.Link != destination.Link {
+			return fmt.Errorf("Node npm runtime symlink %s differs from verified source", destinationPath)
+		}
+		sourceResolved, err := resolveSnapshotPath(prefix, snapshot, sourcePath)
+		if err != nil || !snapshotPathWithin(sourceResolved, sourceRoot) {
+			return fmt.Errorf("verified Node npm source symlink %s escapes its source tree", sourcePath)
+		}
+		destinationResolved, err := resolveSnapshotPath(prefix, snapshot, destinationPath)
+		if err != nil || !snapshotPathWithin(destinationResolved, destinationRoot) {
+			return fmt.Errorf("Node npm runtime symlink %s escapes its runtime tree", destinationPath)
+		}
+		if strings.TrimPrefix(sourceResolved, sourceRoot) != strings.TrimPrefix(destinationResolved, destinationRoot) {
+			return fmt.Errorf("Node npm runtime symlink %s resolves differently from verified source", destinationPath)
+		}
+	default:
+		return fmt.Errorf("Node npm runtime path %s has unsafe type %s", destinationPath, source.Type)
+	}
+	return nil
+}
+
+func isNodeNPMGlobalLink(prefix string, node resolution.Node, keg, rel, resolved string, snapshot map[string]fileState, generated map[string]struct{}) bool {
+	if node.Name != nodeFormula || len(generated) == 0 {
+		return false
+	}
+	commands := map[string]string{
+		"bin/npm": path.Join(nodeNPMRuntimeRoot, "bin/npm-cli.js"),
+		"bin/npx": path.Join(nodeNPMRuntimeRoot, "bin/npx-cli.js"),
+	}
+	if target, ok := commands[rel]; ok {
+		sourcePath := path.Join(keg, rel)
+		direct, err := directSnapshotSymlinkTarget(prefix, snapshot, rel)
+		if err != nil || direct != sourcePath {
+			return false
+		}
+		sourceResolved, err := resolveSnapshotPath(prefix, snapshot, sourcePath)
+		if err != nil || sourceResolved != target || resolved != target {
+			return false
+		}
+		state, ok := snapshot[target]
+		_, generatedTarget := generated[target]
+		return ok && generatedTarget && state.Type == "regular" && state.Mode.Perm()&0o111 != 0
+	}
+
+	parts := strings.Split(rel, "/")
+	if len(parts) != 4 || parts[0] != "share" || parts[1] != "man" || (parts[2] != "man1" && parts[2] != "man5" && parts[2] != "man7") {
+		return false
+	}
+	target := path.Join(nodeNPMRuntimeRoot, "man", parts[2], parts[3])
+	direct, err := directSnapshotSymlinkTarget(prefix, snapshot, rel)
+	if err != nil || direct != target || resolved != target {
+		return false
+	}
+	state, ok := snapshot[target]
+	_, generatedTarget := generated[target]
+	return ok && generatedTarget && state.Type == "regular" && state.Mode.Perm()&0o111 == 0
+}
+
+func hasPath(values map[string]struct{}, value string) bool {
+	_, ok := values[value]
+	return ok
 }
 
 func changesContainPathRoot(changes []Change, root string) bool {
@@ -1986,6 +2173,108 @@ func snapshotPathWithin(candidate, root string) bool {
 	return candidate == root || strings.HasPrefix(candidate, root+"/")
 }
 
+func isValidatedNodeNPMKegLink(prefix string, node resolution.Node, verified bottle.Result, snapshot map[string]fileState, rel string) bool {
+	if node.Name != nodeFormula || !verifiedBottleMatchesNode(node, verified) {
+		return false
+	}
+	base := path.Join("Cellar", node.Name, node.PkgVersion)
+	kegPath := strings.TrimPrefix(rel, base+"/")
+	targets := map[string]string{
+		"bin/npm": path.Join(nodeNPMRuntimeRoot, "bin/npm-cli.js"),
+		"bin/npx": path.Join(nodeNPMRuntimeRoot, "bin/npx-cli.js"),
+	}
+	target, ok := targets[kegPath]
+	if !ok {
+		return false
+	}
+	direct, err := directSnapshotSymlinkTarget(prefix, snapshot, rel)
+	if err != nil || direct != target {
+		return false
+	}
+	resolved, err := resolveSnapshotPath(prefix, snapshot, rel)
+	if err != nil || resolved != target {
+		return false
+	}
+	global, ok := snapshot[target]
+	if !ok || global.Type != "regular" || global.Mode.Perm()&0o111 == 0 || global.Links != 1 {
+		return false
+	}
+	sourceKegPath := path.Join(nodeNPMSourceRoot, "bin", path.Base(target))
+	var sourceInventory *bottle.InventoryEntry
+	for index := range verified.Inventory {
+		entry := &verified.Inventory[index]
+		if entry.KegPath == sourceKegPath && entry.Type == bottle.EntryRegular {
+			sourceInventory = entry
+			break
+		}
+	}
+	if sourceInventory == nil || sourceInventory.SHA256 != "sha256:"+global.Digest || os.FileMode(sourceInventory.Mode&0o777) != global.Mode.Perm() {
+		return false
+	}
+	sourcePath := path.Join(base, sourceKegPath)
+	source, ok := snapshot[sourcePath]
+	return ok && source.Type == "regular" && source.Digest == global.Digest && source.Size == global.Size && source.Mode == global.Mode && sameSnapshotOwnership(source, global)
+}
+
+func validateExternalBottleSymlinkTargets(prefix string, snapshot map[string]fileState, node resolution.Node, verified bottle.Result, closure []resolution.Node) error {
+	seen := map[string]struct{}{}
+	for _, entry := range verified.Inventory {
+		if entry.PrefixTarget == "" {
+			continue
+		}
+		if _, ok := seen[entry.PrefixTarget]; ok {
+			continue
+		}
+		seen[entry.PrefixTarget] = struct{}{}
+		dependencyKeg, err := externalSymlinkDependencyKeg(node, closure, entry.PrefixTarget)
+		if err != nil {
+			return fmt.Errorf("%s: %w", entry.Path, err)
+		}
+		resolved, err := resolveSnapshotPath(prefix, snapshot, entry.PrefixTarget)
+		if err != nil {
+			return fmt.Errorf("%s: resolve dependency target: %w", entry.Path, err)
+		}
+		if !snapshotPathWithin(resolved, dependencyKeg) {
+			return fmt.Errorf("%s: dependency target resolves outside %s", entry.Path, dependencyKeg)
+		}
+	}
+	return nil
+}
+
+func externalSymlinkDependencyKeg(node resolution.Node, closure []resolution.Node, target string) (string, error) {
+	if target == "" || path.IsAbs(target) || path.Clean(target) != target || target == "." || strings.HasPrefix(target, "../") {
+		return "", fmt.Errorf("invalid dependency opt target %q", target)
+	}
+	parts := strings.Split(target, "/")
+	if len(parts) < 2 || parts[0] != "opt" || parts[1] == "" {
+		return "", fmt.Errorf("dependency target %q is outside opt", target)
+	}
+	dependencyName := parts[1]
+	optRoot := path.Join("opt", dependencyName)
+	if !snapshotPathWithin(target, optRoot) {
+		return "", fmt.Errorf("dependency target %q is outside %s", target, optRoot)
+	}
+	allowed := false
+	for _, dependency := range node.Dependencies {
+		if dependency.Name == dependencyName && dependency.Direct {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return "", fmt.Errorf("dependency target %q is not a signed dependency of %q", target, node.Name)
+	}
+	for _, dependency := range closure {
+		if dependency.Name == dependencyName {
+			if dependency.PkgVersion == "" {
+				return "", fmt.Errorf("dependency %q has no selected package version", dependencyName)
+			}
+			return path.Join("Cellar", dependency.Name, dependency.PkgVersion), nil
+		}
+	}
+	return "", fmt.Errorf("dependency target %q is absent from the resolved closure", target)
+}
+
 func isCurrentKegBashCompletionLink(prefix string, snapshot map[string]fileState, linkPath, resolved, keg string) bool {
 	const completionRoot = "etc/bash_completion.d"
 	if !strings.HasPrefix(linkPath, completionRoot+"/") {
@@ -2036,7 +2325,18 @@ func isGlobalRoot(p string) bool {
 	return p == "bin" || p == "sbin" || p == "lib" || p == "share" || p == "include"
 }
 
-func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.Result, after map[string]fileState) error {
+type reconcileKegOptions struct {
+	closure []resolution.Node
+}
+
+func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.Result, after map[string]fileState, optional ...reconcileKegOptions) error {
+	if len(optional) > 1 {
+		return fmt.Errorf("multiple reconcile keg options")
+	}
+	var options reconcileKegOptions
+	if len(optional) == 1 {
+		options = optional[0]
+	}
 	base := filepath.ToSlash(filepath.Join("Cellar", node.Name, node.PkgVersion))
 	expected := map[string]bottle.InventoryEntry{}
 	allowedDirs := map[string]struct{}{base: {}}
@@ -2083,12 +2383,30 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 			}
 		}
 		if entry.Type == bottle.EntrySymlink {
-			if !mayChange && actual.Link != entry.SymlinkTarget {
+			nodeNPMRewrite := actual.Link != entry.SymlinkTarget && isValidatedNodeNPMKegLink(prefix, node, verified, after, rel)
+			if !mayChange && actual.Link != entry.SymlinkTarget && !nodeNPMRewrite {
 				return fmt.Errorf("verified bottle symlink %s target changed", rel)
 			}
 			resolved, err := resolveSnapshotPath(prefix, after, rel)
-			if err != nil || !snapshotPathWithin(resolved, base) {
-				return fmt.Errorf("verified bottle symlink %s escapes installed keg", rel)
+			if err != nil {
+				return fmt.Errorf("resolve verified bottle symlink %s: %w", rel, err)
+			}
+			if entry.PrefixTarget == "" {
+				if !snapshotPathWithin(resolved, base) && !nodeNPMRewrite {
+					return fmt.Errorf("verified bottle symlink %s escapes installed keg", rel)
+				}
+			} else {
+				dependencyKeg, err := externalSymlinkDependencyKeg(node, options.closure, entry.PrefixTarget)
+				if err != nil {
+					return fmt.Errorf("verified bottle symlink %s: %w", rel, err)
+				}
+				expectedResolved, err := resolveSnapshotPath(prefix, after, entry.PrefixTarget)
+				if err != nil {
+					return fmt.Errorf("resolve verified bottle symlink %s dependency target: %w", rel, err)
+				}
+				if resolved != expectedResolved || !snapshotPathWithin(resolved, dependencyKeg) {
+					return fmt.Errorf("verified bottle symlink %s does not resolve inside dependency keg %s", rel, dependencyKeg)
+				}
 			}
 		}
 		if entry.Type != bottle.EntrySymlink {

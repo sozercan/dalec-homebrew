@@ -26,5 +26,18 @@
     "file_bytes": 4294967296,
     "metadata_bytes": 1048576
   },
-  "writable_path_template": "/home/linuxbrew/.linuxbrew/var/<canonical-formula>"
+  "writable_path_template": "/home/linuxbrew/.linuxbrew/var/<canonical-formula>",
+  "archive_links": {
+    "hardlinks": "keg-local-only",
+    "external_symlink_target": "opt/<signed-direct-dependency>/...",
+    "external_symlink_source": "libexec/..."
+  },
+  "generated_runtime": {
+    "node_npm": {
+      "source": "libexec/lib/node_modules/npm",
+      "destination": "lib/node_modules/npm",
+      "max_entries": 10000,
+      "max_bytes": 268435456
+    }
+  }
 }

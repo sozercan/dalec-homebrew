@@ -89,6 +89,7 @@ When `DALEC_HOMEBREW_LIVE_OUTPUT=push`, the helper prints `DALEC_HOMEBREW_LIVE_F
 
 Use `DALEC_HOMEBREW_LIVE_SPEC` to run the same helper with a focused example:
 
+- [`examples/live-toolchain.yaml`](examples/live-toolchain.yaml) — Azure CLI, OpenTofu, Go, Node/npm, jq, ripgrep, kubectl, and Helm in one closure
 - [`examples/live-python.yaml`](examples/live-python.yaml) — extensions, TLS and CA data, SQLite, compression, and time zones
 - [`examples/live-glibc.yaml`](examples/live-glibc.yaml) — the brewed loader, locale archive, and conversion modules
 - [`examples/live-redis.yaml`](examples/live-redis.yaml) — a stateful non-root lifecycle

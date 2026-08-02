@@ -982,6 +982,106 @@ func sha256Hex(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func TestExpectationFromNodeAllowsOnlyDirectExternalSymlinkFormulae(t *testing.T) {
+	expected := ExpectationFromNode(resolution.Node{Dependencies: []resolution.Requirement{
+		{Name: "direct", Direct: true},
+		{Name: "indirect", Direct: false},
+	}})
+	if !slices.Equal(expected.AllowedExternalSymlinkFormulae, []string{"direct"}) {
+		t.Fatalf("allowed external symlink Formulae = %#v", expected.AllowedExternalSymlinkFormulae)
+	}
+}
+
+func TestVerifyAllowsDirectDependencyOptSymlink(t *testing.T) {
+	t.Parallel()
+
+	members := validMembers(false)
+	members = append(members,
+		symlinkMember("hello/1.0/libexec/bin/python3.14", "../../../../../opt/python@3.14/bin/python3.14"),
+		symlinkMember("hello/1.0/libexec/bin/python", "python3.14"),
+	)
+	blob := makeArchive(t, members)
+	expected := expectationFor(blob)
+	expected.AllowedExternalSymlinkFormulae = []string{"python@3.14"}
+	result, err := Verify(bytes.NewReader(blob), expected, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"hello/1.0/libexec/bin/python",
+		"hello/1.0/libexec/bin/python3.14",
+	} {
+		entry := findInventoryEntry(t, result.Inventory, name)
+		if entry.PrefixTarget != "opt/python@3.14/bin/python3.14" {
+			t.Fatalf("entry %q prefix target = %q", name, entry.PrefixTarget)
+		}
+	}
+}
+
+func TestVerifyRejectsUnboundOptSymlink(t *testing.T) {
+	t.Parallel()
+
+	members := append(validMembers(false), symlinkMember("hello/1.0/libexec/bin/python3.14", "../../../../../opt/python@3.14/bin/python3.14"))
+	blob := makeArchive(t, members)
+	_, err := Verify(bytes.NewReader(blob), expectationFor(blob), Options{})
+	assertErrorCode(t, err, CodeUnsafeLink)
+}
+
+func TestVerifyRejectsExternalDependencyAliasOutsideLibexec(t *testing.T) {
+	t.Parallel()
+
+	members := validMembers(false)
+	members = append(members,
+		symlinkMember("hello/1.0/libexec/bin/python3.14", "../../../../../opt/python@3.14/bin/python3.14"),
+		symlinkMember("hello/1.0/bin/python", "../libexec/bin/python3.14"),
+	)
+	blob := makeArchive(t, members)
+	expected := expectationFor(blob)
+	expected.AllowedExternalSymlinkFormulae = []string{"python@3.14"}
+	_, err := Verify(bytes.NewReader(blob), expected, Options{})
+	assertErrorCode(t, err, CodeUnsafeLink)
+}
+
+func TestVerifyRejectsExternalDependencySymlinkOutsideLibexec(t *testing.T) {
+	t.Parallel()
+
+	members := append(validMembers(false), symlinkMember("hello/1.0/bin/python3.14", "../../../../opt/python@3.14/bin/python3.14"))
+	blob := makeArchive(t, members)
+	expected := expectationFor(blob)
+	expected.AllowedExternalSymlinkFormulae = []string{"python@3.14"}
+	_, err := Verify(bytes.NewReader(blob), expected, Options{})
+	assertErrorCode(t, err, CodeUnsafeLink)
+}
+
+func TestVerifyRejectsDotTraversalWithinDependencyOptTarget(t *testing.T) {
+	t.Parallel()
+
+	for _, target := range []string{
+		"../../../../../opt/python@3.14/a/../bin/python3.14",
+		"../../../../../opt/python@3.14/./bin/python3.14",
+		"../../../../../../opt/python@3.14/bin/python3.14",
+		"nested/../../../../../../opt/python@3.14/bin/python3.14",
+	} {
+		members := append(validMembers(false), symlinkMember("hello/1.0/libexec/bin/python3.14", target))
+		blob := makeArchive(t, members)
+		expected := expectationFor(blob)
+		expected.AllowedExternalSymlinkFormulae = []string{"python@3.14"}
+		_, err := Verify(bytes.NewReader(blob), expected, Options{})
+		assertErrorCode(t, err, CodeUnsafeLink)
+	}
+}
+
+func TestVerifyRejectsOptSymlinkTraversalOutsideDependency(t *testing.T) {
+	t.Parallel()
+
+	members := append(validMembers(false), symlinkMember("hello/1.0/libexec/bin/python3.14", "../../../../../opt/python@3.14/../../etc/shadow"))
+	blob := makeArchive(t, members)
+	expected := expectationFor(blob)
+	expected.AllowedExternalSymlinkFormulae = []string{"python@3.14"}
+	_, err := Verify(bytes.NewReader(blob), expected, Options{})
+	assertErrorCode(t, err, CodeUnsafeLink)
+}
+
 func TestRejectsSymlinkEscapeThroughIntermediateSymlink(t *testing.T) {
 	members := validMembers(false)
 	members = append(members,

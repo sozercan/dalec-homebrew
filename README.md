@@ -79,7 +79,7 @@ See the [usage reference](docs/usage.md) for image settings, tests, dependency r
 
 ## Examples
 
-More examples: [Python](examples/live-python.yaml), [Redis](examples/live-redis.yaml), [Graphviz](examples/live-graphviz.yaml), and [glibc](examples/live-glibc.yaml).
+More examples: [multi-package toolchain](examples/live-toolchain.yaml), [Python](examples/live-python.yaml), [Redis](examples/live-redis.yaml), [Graphviz](examples/live-graphviz.yaml), and [glibc](examples/live-glibc.yaml).
 
 ## Learn more
 

@@ -6,6 +6,7 @@ package bottle
 import (
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 )
@@ -69,23 +70,24 @@ type Options struct {
 // OCI layer digest, while HomebrewSHA256 comes from authenticated Homebrew
 // metadata. Both are checked against the fetched bytes.
 type Expectation struct {
-	Name             string
-	FullName         string
-	FormulaVersion   string
-	FormulaRevision  int
-	PkgVersion       string
-	VersionScheme    int
-	BottleRebuild    int
-	BottleTag        string
-	CompressedSHA256 string
-	CompressedSize   int64
-	HomebrewSHA256   string
-	HomebrewVersion  string
-	Arch             string
-	Compiler         string
-	ExpectedTap      string
-	Dependencies     []ReceiptDependency
-	FormulaIdentity  string
+	Name                           string
+	FullName                       string
+	FormulaVersion                 string
+	FormulaRevision                int
+	PkgVersion                     string
+	VersionScheme                  int
+	BottleRebuild                  int
+	BottleTag                      string
+	CompressedSHA256               string
+	CompressedSize                 int64
+	HomebrewSHA256                 string
+	HomebrewVersion                string
+	Arch                           string
+	Compiler                       string
+	ExpectedTap                    string
+	Dependencies                   []ReceiptDependency
+	FormulaIdentity                string
+	AllowedExternalSymlinkFormulae []string
 }
 
 // ReceiptDependency is the subset of bottle receipt dependency identity that
@@ -113,24 +115,32 @@ func ExpectationFromNode(node resolution.Node) Expectation {
 			DeclaredDirectly: dep.DeclaredDirectly,
 		})
 	}
+	allowedExternalSymlinkFormulae := make([]string, 0, len(node.Dependencies))
+	for _, dependency := range node.Dependencies {
+		if dependency.Direct {
+			allowedExternalSymlinkFormulae = append(allowedExternalSymlinkFormulae, dependency.Name)
+		}
+	}
+	slices.Sort(allowedExternalSymlinkFormulae)
 	return Expectation{
-		Name:             node.Name,
-		FullName:         node.FullName,
-		FormulaVersion:   node.FormulaVersion,
-		FormulaRevision:  node.FormulaRevision,
-		PkgVersion:       node.PkgVersion,
-		VersionScheme:    node.VersionScheme,
-		BottleRebuild:    node.BottleRebuild,
-		BottleTag:        node.Bottle.Tag,
-		CompressedSHA256: node.Bottle.Layer.Digest,
-		CompressedSize:   node.Bottle.Layer.Size,
-		HomebrewSHA256:   node.Bottle.HomebrewSHA256,
-		HomebrewVersion:  node.Bottle.Tab.HomebrewVersion,
-		Arch:             node.Bottle.Tab.Arch,
-		Compiler:         node.Bottle.Tab.Compiler,
-		ExpectedTap:      tapFromFullName(node.FullName),
-		Dependencies:     deps,
-		FormulaIdentity:  node.UpstreamFormulaID,
+		Name:                           node.Name,
+		FullName:                       node.FullName,
+		FormulaVersion:                 node.FormulaVersion,
+		FormulaRevision:                node.FormulaRevision,
+		PkgVersion:                     node.PkgVersion,
+		VersionScheme:                  node.VersionScheme,
+		BottleRebuild:                  node.BottleRebuild,
+		BottleTag:                      node.Bottle.Tag,
+		CompressedSHA256:               node.Bottle.Layer.Digest,
+		CompressedSize:                 node.Bottle.Layer.Size,
+		HomebrewSHA256:                 node.Bottle.HomebrewSHA256,
+		HomebrewVersion:                node.Bottle.Tab.HomebrewVersion,
+		Arch:                           node.Bottle.Tab.Arch,
+		Compiler:                       node.Bottle.Tab.Compiler,
+		ExpectedTap:                    tapFromFullName(node.FullName),
+		Dependencies:                   deps,
+		FormulaIdentity:                node.UpstreamFormulaID,
+		AllowedExternalSymlinkFormulae: allowedExternalSymlinkFormulae,
 	}
 }
 
@@ -158,8 +168,9 @@ type Xattr struct {
 
 // InventoryEntry is a deterministic description of one safe archive member.
 // Path and HardlinkTarget are archive-root-relative. SymlinkTarget preserves
-// the link text that the materializer must create; ResolvedTarget records the
-// containment-checked archive path.
+// the link text that the materializer must create. ResolvedTarget records a
+// containment-checked in-keg archive path; PrefixTarget records a narrowly
+// allowed prefix-relative opt path for a signed dependency.
 type InventoryEntry struct {
 	Path           string    `json:"path"`
 	KegPath        string    `json:"keg_path"`
@@ -170,6 +181,7 @@ type InventoryEntry struct {
 	SymlinkTarget  string    `json:"symlink_target,omitempty"`
 	HardlinkTarget string    `json:"hardlink_target,omitempty"`
 	ResolvedTarget string    `json:"resolved_target,omitempty"`
+	PrefixTarget   string    `json:"prefix_target,omitempty"`
 	UID            int       `json:"uid"`
 	GID            int       `json:"gid"`
 	Xattrs         []Xattr   `json:"xattrs,omitempty"`

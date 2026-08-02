@@ -64,7 +64,9 @@ A record is immutable once passed to the materializer. Replaying the same record
 
 ## Bottle verification and installation
 
-The compressed bottle digest must match both the selected OCI layer and the checksum authenticated by the Formula JWS. Before installation, the archive verifier rejects traversal, escaping links, special files, setid bits, security capabilities and xattrs, collisions, and unbounded expansion.
+The compressed bottle digest must match both the selected OCI layer and the checksum authenticated by the Formula JWS. Before installation, the archive verifier rejects traversal, special files, setid bits, security capabilities and xattrs, collisions, and unbounded expansion. Hardlinks remain keg-local. Relative symlinks under the source keg's `libexec/` tree may leave the keg only for `opt/<signed-direct-dependency>/...` targets using only canonical leading traversal to the prefix and no dot segments after the dependency root inside the Homebrew prefix; the materializer verifies the exact dependency keg before pouring the owner and again after installation. All other escaping links remain rejected.
+
+Historical bottle tabs created before Homebrew emitted `pkg_version` are accepted only when that field is absent. The resolver derives the canonical value from the tab's version and revision while retaining the exact raw annotation; explicit empty, null, non-string, or inconsistent values remain invalid.
 
 The materializer uses a small read-only Ruby adapter around the pinned Homebrew `FormulaInstaller`. This avoids the public `brew install` command's mutable tap and writable-repository preflight while preserving Homebrew's normal bottle pour, relocation, linking, and post-install behavior.
 
@@ -103,6 +105,7 @@ Generated global runtime indexes have explicit, versioned handling:
 - The `gdk-pixbuf` loader cache is accepted only at `lib/gdk-pixbuf-2.0/2.10.0/loaders.cache`. Its grammar, ownership, mode, size, module count, and exact module set are checked, and every module must resolve to a verified loader in the bottle closure.
 - The `shared-mime-info` database under `share/mime` is accepted only from its verified generator, with fixed required outputs, bounded file, count, and size totals, safe path grammar, and parsed generated XML.
 - Fontconfig's verified shared `etc/fonts` configuration is retained explicitly.
+- Node's post-install npm runtime is accepted only at `lib/node_modules/npm`. Every entry must match the verified private tree under the Node keg, except for an exact generated `npmrc`; `npm`, `npx`, and manpage links must terminate in that validated runtime.
 
 All generated files are re-hashed in runtime inventory and normalized to root-owned, non-writable output. Ordinary global copies retain their original bottle attribution.
 

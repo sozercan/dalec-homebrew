@@ -1,0 +1,89 @@
+# syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
+name: homebrew-live-toolchain
+version: 0.1.0
+revision: 1
+description: Multi-package CLI and language runtime validation
+website: https://brew.sh/
+license: Apache-2.0
+
+dependencies:
+  runtime:
+    azure-cli: {}
+    opentofu: {}
+    go: {}
+    node: {}
+    jq: {}
+    ripgrep: {}
+    kubernetes-cli: {}
+    helm: {}
+
+image:
+  entrypoint: /bin/bash
+  user: linuxbrew
+  env:
+    - AZURE_CONFIG_DIR=/tmp/azure
+    - AZURE_CORE_COLLECT_TELEMETRY=no
+    - AZURE_EXTENSION_USE_DYNAMIC_INSTALL=no
+    - CHECKPOINT_DISABLE=1
+    - GOCACHE=/tmp/go-cache
+    - GOPATH=/tmp/go
+    - KUBECONFIG=/dev/null
+
+tests:
+  - name: cli-toolchain
+    env:
+      GO111MODULE: "off"
+    steps:
+      - command: az version --output json
+        stdout:
+          contains: [azure-cli]
+      - command: tofu version -json
+        stdout:
+          contains: [terraform_version]
+      - command: go version
+        stdout:
+          starts_with: "go version go"
+      - command: |
+          set -eu
+          cat >/tmp/hello.go <<'EOF'
+          package main
+          import "fmt"
+          func main() { fmt.Println("go-runtime-ok") }
+          EOF
+          go run /tmp/hello.go
+        stdout:
+          equals: "go-runtime-ok\n"
+      - command: node -e 'process.stdout.write(String(6 * 7))'
+        stdout:
+          equals: "42"
+      - command: npm --version | grep -Eq '^[0-9]+(\.[0-9]+)+' && echo npm-ok
+        stdout:
+          equals: "npm-ok\n"
+      - command: npx --version | grep -Eq '^[0-9]+(\.[0-9]+)+' && echo npx-ok
+        stdout:
+          equals: "npx-ok\n"
+      - command: printf '{"answer":42}' | jq -r .answer
+        stdout:
+          equals: "42\n"
+      - command: printf 'alpha\nbeta\n' | rg '^beta$'
+        stdout:
+          equals: "beta\n"
+      - command: kubectl version --client=true
+        stdout:
+          contains: ["Client Version:"]
+      - command: helm version --short
+        stdout:
+          starts_with: "v"
+    files:
+      /home/linuxbrew/.linuxbrew/bin/az: {}
+      /home/linuxbrew/.linuxbrew/bin/tofu: {}
+      /home/linuxbrew/.linuxbrew/bin/go: {}
+      /home/linuxbrew/.linuxbrew/bin/node: {}
+      /home/linuxbrew/.linuxbrew/bin/npm: {}
+      /home/linuxbrew/.linuxbrew/bin/npx: {}
+      /home/linuxbrew/.linuxbrew/bin/jq: {}
+      /home/linuxbrew/.linuxbrew/bin/rg: {}
+      /home/linuxbrew/.linuxbrew/bin/kubectl: {}
+      /home/linuxbrew/.linuxbrew/bin/helm: {}
+      /home/linuxbrew/.linuxbrew/bin/brew:
+        not_exist: true

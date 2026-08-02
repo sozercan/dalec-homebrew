@@ -530,17 +530,13 @@ func attributeEntries(scan *sourceScan, policy *normalizedPolicy) error {
 		byRelative[sub][pkg] = globalCandidate{digest: entry.sha256, executable: entry.mode.Perm()&0o111 != 0}
 	}
 
+	// Attribute regular files before symlinks so a retained link may inherit
+	// ownership from a generated global target that is bound by an owner rule.
 	for _, entry := range scan.entries {
-		if !entry.retain || entry.typeName == TypeDirectory || entry.packageName != "" {
+		if !entry.retain || entry.typeName == TypeDirectory || entry.typeName == TypeSymlink || entry.packageName != "" {
 			continue
 		}
-		if entry.typeName == TypeSymlink {
-			final, err := finalLinkTarget(scan.byPath, entry.rel, map[string]bool{})
-			if err != nil {
-				return err
-			}
-			entry.packageName = scan.byPath[final].packageName
-		} else if entry.inode != "" {
+		if entry.inode != "" {
 			entry.packageName = onePackage(byInode[entry.inode])
 		}
 		if entry.packageName == "" && entry.typeName == TypeRegular {
@@ -551,7 +547,19 @@ func attributeEntries(scan *sourceScan, policy *normalizedPolicy) error {
 				entry.packageName = rule.Package
 			}
 		}
-		if entry.packageName == "" {
+	}
+	for _, entry := range scan.entries {
+		if !entry.retain || entry.typeName != TypeSymlink || entry.packageName != "" {
+			continue
+		}
+		final, err := finalLinkTarget(scan.byPath, entry.rel, map[string]bool{})
+		if err != nil {
+			return err
+		}
+		entry.packageName = scan.byPath[final].packageName
+	}
+	for _, entry := range scan.entries {
+		if entry.retain && entry.typeName != TypeDirectory && entry.packageName == "" {
 			return runtimeError(CodeUnattributed, entry.rel, "retained non-directory path cannot be attributed to the resolution closure")
 		}
 	}
