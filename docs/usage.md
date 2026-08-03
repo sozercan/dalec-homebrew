@@ -37,11 +37,11 @@ docker buildx build \
   .
 ```
 
-The complete example is available at [`../examples/hello.yaml`](../examples/hello.yaml). Use `linux/arm64` for an Arm target.
+The complete example is available at [`../examples/hello.yaml`](../examples/hello.yaml). Use `linux/arm64` for an Arm target. BuildKit-normalized default-variant spellings such as `linux/amd64/v1` and `linux/arm64/v8` are equivalent; non-default variants and other operating systems or architectures are unsupported.
 
 ## Declare runtime dependencies
 
-The map form supports per-Formula options:
+The map form supports the V1 per-Formula options:
 
 ```yaml
 dependencies:
@@ -61,18 +61,39 @@ dependencies:
 
 Dependency rules:
 
-- Empty version constraints select the current Formula in the authenticated Homebrew snapshot.
-- Canonical versioned Formula names such as `python@3.14` are supported.
-- `arch` may contain `amd64`, `arm64`, or both.
-- Formula names containing tap or path syntax are rejected before metadata access.
-- Historical versions and version ranges are not supported.
-- Dependencies may be declared globally and on the selected Dalec target.
-- Every selected platform must have at least one applicable runtime dependency.
-- A multi-platform build fails if a requested root resolves to different package versions across platforms.
+- An omitted or empty `version` list selects the current stable Formula in the authenticated Homebrew snapshot. Any non-empty version constraint is rejected; historical versions and version ranges are not supported.
+- Explicit canonical versioned Formula names such as `python@3.14` are supported. Version-looking requests must be exact canonical names; they do not select arbitrary historical releases.
+- Authenticated `homebrew/core` aliases, old names, and in-core migrations may resolve to the current canonical Formula. Cask or third-party migration targets are rejected.
+- Formula names must start with a lowercase letter or digit and contain only lowercase letters, digits, `+`, `_`, `.`, `@`, or `-`. Whitespace, uppercase characters, tap/path syntax, colons, and malformed `@` syntax are rejected before metadata access.
+- `arch` may contain `amd64`, `arm64`, or both. Duplicate or unsupported entries are rejected. A root omitted by `arch` is not part of that platform's closure.
+- A non-empty selected-target `dependencies.runtime` map replaces the global runtime map as a group; it is not merged per Formula. If the target omits runtime dependencies, the global map is inherited. Both scopes are still validated fail-closed.
+- Every selected platform must have at least one applicable runtime root.
+- Root declaration order is preserved for resolution records and the default generated `PATH`. Requested Formulae that expose the same executable basename fail instead of silently shadowing one another.
+- A multi-platform build fails if the same canonical requested root resolves to different package versions on different platforms. Architecture-filtered roots that appear on only one platform are independent.
+
+A target-specific declaration is selected with Buildx `--target`:
+
+```yaml
+targets:
+  production:
+    dependencies:
+      runtime:
+        hello: {}
+```
+
+```console
+docker buildx build \
+  --target production \
+  --platform linux/amd64 \
+  --file spec.yaml \
+  --tag hello-runtime:production \
+  --load \
+  .
+```
 
 ## Configure the image
 
-The supported Dalec image fields are:
+The supported global and selected-target Dalec image fields are:
 
 - `entrypoint`
 - `cmd`
@@ -83,37 +104,87 @@ The supported Dalec image fields are:
 - `stop_signal`
 - `user`
 
-The default runtime user is `linuxbrew` (`1000:1000`) and the default working directory is `/home/linuxbrew`. The frontend rejects `root`, UID or GID zero, malformed identities, and unknown named users. Explicit numeric non-root identities must include both UID and GID.
+Selected-target image settings overlay the global image configuration: non-empty scalar fields override, `env` entries are appended and resolved by variable name, and `labels` and `volumes` are merged by key.
 
-Volumes may not overlap protected runtime paths.
+`entrypoint` and `cmd` are strings split with shell-style quoting into OCI argument arrays; they are not implicitly wrapped in a shell. `env` entries use `NAME=value` form. The frontend generates a deterministic Homebrew-aware `PATH`; an explicit image `PATH` overrides it and must not be empty.
+
+The default runtime user is `linuxbrew` (`1000:1000`) and the default working directory is `/home/linuxbrew`. The accepted named identities are `linuxbrew` and `linuxbrew:linuxbrew`. The frontend rejects `root`, UID or GID zero, malformed identities, and other named users. An explicit numeric non-root identity must include both UID and GID, for example `1234:1235`.
+
+Volume paths must be absolute and clean. A volume may not equal, contain, or be contained by any protected runtime path:
+
+- `/home/linuxbrew/.linuxbrew`
+- `/usr/share/dalec-homebrew`
+- `/etc/passwd`
+- `/etc/group`
+
+Runtime code and configuration are normalized to root ownership and non-writable modes. For every Formula in the verified closure, the policy creates one Homebrew-prefix writable state subtree for the final runtime identity: `/home/linuxbrew/.linuxbrew/var/<canonical-formula>`. Broader writable Homebrew-prefix paths are not supported.
 
 ## Add runtime tests
 
-Global and selected-target Dalec command and file tests are supported when they do not use mounts. Tests run during the image build against the final pruned filesystem with the final image user, environment, and working directory. Test execution has no network access.
+Global tests and selected-target tests are appended and run during the image build. Each Dalec test supports:
 
-See the files under [`../examples/`](../examples/) for command output, filesystem, plugin, locale, and stateful workload checks.
+```yaml
+tests:
+  - name: example
+    dir: /home/linuxbrew
+    env:
+      TEST_SCOPE: test
+    steps:
+      - command: printf '%s' "$TEST_SCOPE"
+        env:
+          TEST_SCOPE: step
+        stdin: ""
+        stdout:
+          equals: step
+          contains: [te]
+          matches: ['^step$']
+          starts_with: st
+          ends_with: ep
+        stderr:
+          empty: true
+    files:
+      /home/linuxbrew/.linuxbrew/bin/hello:
+        permissions: 0o555
+      /home/linuxbrew:
+        is_dir: true
+      /path/that/must/not/exist:
+        not_exist: true
+```
+
+Supported test fields are `name`, `dir`, `env`, `steps`, and `files`. Each step supports `command`, `env`, `stdin`, `stdout`, and `stderr`. Output and file-content checks support `equals`, `contains`, `matches`, `starts_with`, `ends_with`, and `empty`; every configured assertion is evaluated. File checks additionally support `permissions`, `is_dir`, `not_exist`, `no_follow`, and `link_target`. Use `empty: true` to assert empty output. `not_exist` cannot be combined with positive file assertions.
+
+Tests have these execution semantics:
+
+- Each test starts from its own isolated copy of the final pruned filesystem. Steps within one test run sequentially and share their mutations; test mutations never enter the exported image or another test.
+- Commands run as `/bin/sh -c`, must exit zero, and stop that test on the first failure. File checks run after all steps.
+- Commands use the final image user and image environment. Test-level environment entries override image values, and step-level entries override test values. `dir` overrides the final image working directory for commands.
+- Networking is disabled. Test mounts and source fetching are rejected rather than ignored.
+- Each step has a 10-minute timeout, command output is bounded to 16 MiB per stream, and file-content assertions are bounded to 16 MiB per file. The frontend requests a 2 GiB memory limit and two-CPU quota for each test execution.
+
+See the files under [`../examples/`](../examples/) for command output, filesystem, plugin, locale, generated-data, and stateful workload checks.
 
 ## Supported Dalec contract
 
-Package metadata fields such as `name`, `description`, `website`, `version`, `revision`, and `license` may be supplied, but they are optional for this dependency-only runtime frontend.
+Package metadata fields such as `name`, `description`, `website`, `version`, `revision`, and `license` may be supplied, but they are optional and do not drive dependency resolution for this runtime-only frontend.
 
-V1 accepts global and selected-target `dependencies.runtime`, the image fields listed above, and tests without mounts.
-
-The following are rejected:
+V1 behavior is limited to global and selected-target `dependencies.runtime`, the image fields listed above, and tests without mounts. Unknown non-extension Dalec fields are rejected by the strict decoder. The following known Dalec features are also rejected:
 
 - build, recommended, test, or sysext dependencies
 - extra package repositories
 - sources and patches
-- build steps, build mounts, caches, or build network configuration
+- build steps, build environment, build mounts, caches, or build network configuration
 - package artifacts or package configuration
 - `provides`, `replaces`, or `conflicts`
+- target frontend forwarding
 - image base overrides or post-install image steps
 - casks, third-party taps, source builds, historical versions, and version ranges
 - test mounts or networked tests
 
+Unsupported or malformed Dalec document fields are rejected before Homebrew metadata or bottle registry access.
+
 ## Runtime contents and evidence
 
-The output contains the selected Formulae, their verified runtime closure, a conservative Ubuntu Noble runtime base, and machine-readable evidence under `/usr/share/dalec-homebrew`:
+The output contains the selected Formulae, their verified runtime closure, a conservative Ubuntu Noble runtime base, and these machine-readable evidence files under `/usr/share/dalec-homebrew`:
 
 | File | Purpose |
 | --- | --- |
@@ -123,9 +194,11 @@ The output contains the selected Formulae, their verified runtime closure, a con
 | `prune-manifest.json` | Versioned record of the runtime pruning decision |
 | `sbom.spdx.json` | SPDX 2.3 software bill of materials |
 | `materialization.json` | Offline installation and verified-bottle results |
-| `runtime-base-packages.tsv` | Chisel package versions, architectures, selected bytes, and source package digests |
+| `runtime-base-packages.tsv` | Chisel package versions, architectures, selected regular payload bytes, and verified source `.deb` SHA-256 values |
 | `runtime-base-artifacts.tsv` | Deliberate non-package files included in the runtime base |
 | `runtime-base-chisel.manifest.wall` | Chisel's authoritative path and slice manifest |
+
+These nine files are embedded in each platform image; they are not signed OCI attestations. The release workflow signs the reusable component tuple, publishes component SBOM, provenance, and vulnerability evidence, and preserves each integration image's resolution, inventory, prune, materialization, base, and embedded SBOM files in checksum-authenticated runtime-evidence archives.
 
 The base retains common runtime facilities such as CA trust, Bash and Dash, core command-line utilities, NSS and DNS support, timezone data, glibc conversion data, and common C and C++ libraries.
 

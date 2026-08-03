@@ -1,5 +1,6 @@
 {
   "schema_version": "dalec-homebrew-policy/v1",
+  "canonical_security_contract": "SECURITY.md",
   "resolver_policy_version": "homebrew-runtime-v1",
   "platforms": {
     "linux/amd64": {
@@ -17,27 +18,70 @@
     "prefix": "/home/linuxbrew/.linuxbrew"
   },
   "metadata_max_age_seconds": 604800,
+  "metadata_max_future_skew_seconds": 900,
+  "metadata_document_limits": {
+    "formula_bytes": 67108864,
+    "migrations_bytes": 2097152
+  },
   "archive_limits": {
     "compressed_bytes": 1073741824,
     "expanded_bytes": 8589934592,
     "entries": 250000,
     "path_depth": 64,
     "path_bytes": 4096,
+    "link_bytes": 4096,
     "file_bytes": 4294967296,
-    "metadata_bytes": 1048576
+    "metadata_bytes": 1048576,
+    "tar_padding_bytes": 1048576,
+    "pax_records": 128,
+    "xattrs": 64,
+    "xattr_bytes": 1048576,
+    "formula_bytes": 4194304,
+    "receipt_bytes": 4194304
+  },
+  "archive_xattrs": {
+    "allowed_namespace": "user.*",
+    "security_trusted_or_capability": "reject"
   },
   "writable_path_template": "/home/linuxbrew/.linuxbrew/var/<canonical-formula>",
   "archive_links": {
     "hardlinks": "keg-local-only",
     "external_symlink_target": "opt/<signed-direct-dependency>/...",
-    "external_symlink_source": "libexec/..."
+    "external_symlink_source": "libexec/...",
+    "external_symlink_target_text": "exact-preservation-required"
   },
   "generated_runtime": {
+    "glibc_locale": {
+      "destination": "Cellar/glibc/<pkg-version>/lib/locale",
+      "max_entries": 4096,
+      "max_file_bytes": 67108864,
+      "max_bytes": 134217728
+    },
+    "gdk_pixbuf_loaders_cache": {
+      "destination": "lib/gdk-pixbuf-2.0/2.10.0/loaders.cache",
+      "max_bytes": 1048576,
+      "max_modules": 256
+    },
+    "shared_mime_info": {
+      "destination": "share/mime",
+      "verified_source": "share/mime/packages/freedesktop.org.xml",
+      "max_entries": 4096,
+      "max_files": 2048,
+      "max_bytes": 33554432,
+      "max_file_bytes": 8388608
+    },
     "node_npm": {
       "source": "libexec/lib/node_modules/npm",
       "destination": "lib/node_modules/npm",
       "max_entries": 10000,
       "max_bytes": 268435456
+    }
+  },
+  "shared_runtime_configuration": {
+    "fontconfig": {
+      "destination": "etc/fonts",
+      "source": "verified-bottle",
+      "writable": false
     }
   }
 }
