@@ -1,12 +1,8 @@
 name: release
 
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing v-prefixed OCI-compatible SemVer tag to publish
-        required: true
-        type: string
+  repository_dispatch:
+    types: [release]
 
 concurrency:
   group: release-${{ github.repository }}
@@ -33,26 +29,18 @@ jobs:
     permissions:
       contents: read
     outputs:
-      tag: ${{ steps.release.outputs.tag }}
+      tag: ${{ steps.request.outputs.tag }}
       sha: ${{ steps.release.outputs.sha }}
-      stable: ${{ steps.release.outputs.stable }}
+      stable: ${{ steps.request.outputs.stable }}
     steps:
-      - name: Check out tagged source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.tag }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Verify tag and main reachability
-        id: release
+      - name: Validate release request
+        id: request
         env:
-          INPUT_TAG: ${{ inputs.tag }}
-          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ github.event.client_payload.tag }}
         run: |
           set -euo pipefail
 
-          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+          if [[ "$GITHUB_EVENT_NAME" != repository_dispatch || "$GITHUB_REF" != refs/heads/main ]]; then
             echo "release dispatches must use the trusted main branch workflow" >&2
             exit 1
           fi
@@ -79,30 +67,46 @@ jobs:
             done
           fi
 
-          git show-ref --verify --quiet "refs/tags/$tag" || {
-            echo "release tag does not exist: $tag" >&2
+          stable=true
+          [[ "$tag" == *-* ]] && stable=false
+          {
+            echo "tag=$tag"
+            echo "stable=$stable"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.request.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag and main reachability
+        id: release
+        env:
+          RELEASE_TAG: ${{ steps.request.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG" || {
+            echo "release tag does not exist: $RELEASE_TAG" >&2
             exit 1
           }
-          tag_sha=$(git rev-parse "$tag^{commit}")
+          tag_sha=$(git rev-parse "$RELEASE_TAG^{commit}")
           head_sha=$(git rev-parse HEAD)
           if [[ "$tag_sha" != "$head_sha" ]]; then
-            echo "checked-out HEAD $head_sha does not match $tag ($tag_sha)" >&2
+            echo "checked-out HEAD $head_sha does not match $RELEASE_TAG ($tag_sha)" >&2
             exit 1
           fi
 
           comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$tag_sha...main" --jq .status)
           if [[ "$comparison" != ahead && "$comparison" != identical ]]; then
-            echo "$tag is not reachable from origin/main (comparison: $comparison)" >&2
+            echo "$RELEASE_TAG is not reachable from origin/main (comparison: $comparison)" >&2
             exit 1
           fi
 
-          stable=true
-          [[ "$tag" == *-* ]] && stable=false
-          {
-            echo "tag=$tag"
-            echo "sha=$tag_sha"
-            echo "stable=$stable"
-          } >> "$GITHUB_OUTPUT"
+          echo "sha=$tag_sha" >> "$GITHUB_OUTPUT"
 
   release_target:
     name: Inspect target release
@@ -1283,7 +1287,7 @@ jobs:
             --argjson run_attempt "$run_attempt" '
             .id == $run_id and
             .run_attempt == $run_attempt and
-            .event == "workflow_dispatch" and
+            .event == "repository_dispatch" and
             .head_branch == "main" and
             .head_sha == $workflow_sha and
             (.path == ".github/workflows/release.yml" or
