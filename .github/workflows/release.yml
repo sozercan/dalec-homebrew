@@ -799,6 +799,23 @@ jobs:
       - name: Verify integration metadata snapshots match across platforms
         run: |
           set -euo pipefail
+          verify_resolution_epoch() {
+            python3 - "$1" <<'PYEPOCH'
+          from datetime import datetime
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              record = json.load(source)
+          generated_at = record["metadata"]["generated_at"]
+          parsed = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+          if parsed.tzinfo is None:
+              raise SystemExit("resolution metadata generated_at has no timezone")
+          if record["source_date_epoch"] != int(parsed.timestamp()):
+              raise SystemExit("resolution source_date_epoch does not match metadata generated_at")
+          PYEPOCH
+          }
+
           for spec in live-test live-python live-glibc live-redis live-graphviz; do
             amd64="dist/release/runtime-evidence/runtime-evidence-linux-amd64-${spec}.tar.gz"
             arm64="dist/release/runtime-evidence/runtime-evidence-linux-arm64-${spec}.tar.gz"
@@ -811,24 +828,25 @@ jobs:
               frontend_ref=$(jq -er --arg platform "$platform" '.components.frontend.repository + "@" + .components.frontend.platforms[$platform]' dist/release/digests.json)
               runtime_base_ref=$(jq -er --arg platform "$platform" '.components["runtime-base"].repository + "@" + .components["runtime-base"].platforms[$platform]' dist/release/digests.json)
               materializer_ref=$(jq -er --arg platform "$platform" '.components.materializer.repository + "@" + .components.materializer.platforms[$platform]' dist/release/digests.json)
-              tar -xOf "$archive" ./resolution.json \
-                | jq -e \
-                    --arg frontend "$frontend_ref" \
-                    --arg runtime_base "$runtime_base_ref" \
-                    --arg materializer "$materializer_ref" \
-                    --slurpfile manifest dist/release/components.json \
-                    --slurpfile inputs dist/release/inputs.json '
-                      .policy_version == $manifest[0].policy_version and
-                      .source_date_epoch == ($inputs[0].source_date_epoch | tonumber) and
-                      .components.frontend_ref == $frontend and
-                      .components.runtime_base_ref == $runtime_base and
-                      .components.materializer_ref == $materializer and
-                      .components.homebrew_commit == $inputs[0].homebrew_commit and
-                      .components.ruby_runtime == $inputs[0].portable_ruby_version and
-                      .components.verification_keys_digest == $inputs[0].verification_keys_digest and
-                      .components.dalec_module == $inputs[0].dalec_module and
-                      .components.buildkit_module == $inputs[0].buildkit_module
-                    ' >/dev/null
+              resolution="$RUNNER_TEMP/${spec}-${platform_slug}-resolution.json"
+              tar -xOf "$archive" ./resolution.json > "$resolution"
+              jq -e \
+                --arg frontend "$frontend_ref" \
+                --arg runtime_base "$runtime_base_ref" \
+                --arg materializer "$materializer_ref" \
+                --slurpfile manifest dist/release/components.json \
+                --slurpfile inputs dist/release/inputs.json '
+                  .policy_version == $manifest[0].policy_version and
+                  .components.frontend_ref == $frontend and
+                  .components.runtime_base_ref == $runtime_base and
+                  .components.materializer_ref == $materializer and
+                  .components.homebrew_commit == $inputs[0].homebrew_commit and
+                  .components.ruby_runtime == $inputs[0].portable_ruby_version and
+                  .components.verification_keys_digest == $inputs[0].verification_keys_digest and
+                  .components.dalec_module == $inputs[0].dalec_module and
+                  .components.buildkit_module == $inputs[0].buildkit_module
+                ' "$resolution" >/dev/null
+              verify_resolution_epoch "$resolution"
             done
             metadata_filter='
               def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
@@ -850,11 +868,11 @@ jobs:
                 {metadata: {digest: .metadata.digest, formula_digest: .metadata.formula_digest, migration_digest: .metadata.migration_digest, formula_envelope_digest: .metadata.formula_envelope_digest, migration_envelope_digest: .metadata.migration_envelope_digest, generated_at: .metadata.generated_at, formula_freshness_source: .metadata.formula_freshness_source, migration_freshness_source: .metadata.migration_freshness_source, formula_url: .metadata.formula_url, migration_url: .metadata.migration_url}}
               end
             '
-            tar -xOf "$amd64" ./resolution.json \
-              | jq -S -e "$metadata_filter" \
+            jq -S -e "$metadata_filter" \
+              "$RUNNER_TEMP/${spec}-linux-amd64-resolution.json" \
               > "$RUNNER_TEMP/${spec}-amd64-metadata.json"
-            tar -xOf "$arm64" ./resolution.json \
-              | jq -S -e "$metadata_filter" \
+            jq -S -e "$metadata_filter" \
+              "$RUNNER_TEMP/${spec}-linux-arm64-resolution.json" \
               > "$RUNNER_TEMP/${spec}-arm64-metadata.json"
             diff -u \
               "$RUNNER_TEMP/${spec}-amd64-metadata.json" \
