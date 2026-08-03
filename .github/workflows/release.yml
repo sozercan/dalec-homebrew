@@ -815,10 +815,19 @@ jobs:
                 | jq -e \
                     --arg frontend "$frontend_ref" \
                     --arg runtime_base "$runtime_base_ref" \
-                    --arg materializer "$materializer_ref" '
+                    --arg materializer "$materializer_ref" \
+                    --slurpfile manifest dist/release/components.json \
+                    --slurpfile inputs dist/release/inputs.json '
+                      .policy_version == $manifest[0].policy_version and
+                      .source_date_epoch == ($inputs[0].source_date_epoch | tonumber) and
                       .components.frontend_ref == $frontend and
                       .components.runtime_base_ref == $runtime_base and
-                      .components.materializer_ref == $materializer
+                      .components.materializer_ref == $materializer and
+                      .components.homebrew_commit == $inputs[0].homebrew_commit and
+                      .components.ruby_runtime == $inputs[0].portable_ruby_version and
+                      .components.verification_keys_digest == $inputs[0].verification_keys_digest and
+                      .components.dalec_module == $inputs[0].dalec_module and
+                      .components.buildkit_module == $inputs[0].buildkit_module
                     ' >/dev/null
             done
             metadata_filter='
@@ -1154,11 +1163,100 @@ jobs:
             (.accepted_snapshot.formula_url | type == "string" and length > 0) and
             (.accepted_snapshot.migration_url | type == "string" and length > 0)
           ' dist/release/metadata-snapshot.json >/dev/null
+          python3 - dist/release/metadata-snapshot.json <<'PYTIME'
+          from datetime import datetime
+          import json
+          import re
+          import sys
+
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON member {key!r}")
+                  result[key] = value
+              return result
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              document = json.load(source, object_pairs_hook=unique_object)
+          value = document["accepted_snapshot"]["generated_at"]
+          if not isinstance(value, str):
+              raise SystemExit("metadata generated_at is not a string")
+          match = re.fullmatch(
+              r"([0-9]{4})-([0-9]{2})-([0-9]{2})T"
+              r"([0-9]{2}):([0-9]{2}):([0-9]{2})"
+              r"(?:\.[0-9]+)?(Z|[+-]([0-9]{2}):([0-9]{2}))",
+              value,
+          )
+          if match is None:
+              raise SystemExit("metadata generated_at is not RFC3339")
+          year, month, day, hour, minute, second = map(int, match.groups()[:6])
+          if hour > 23 or minute > 59 or second > 59:
+              raise SystemExit("metadata generated_at has an invalid time")
+          datetime(year, month, day, hour, minute, second)
+          if match.group(7) != "Z":
+              if int(match.group(8)) > 23 or int(match.group(9)) > 59:
+                  raise SystemExit("metadata generated_at has an invalid offset")
+          PYTIME
           jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
             .invocation.parameters.tag == $tag and
             .metadata.completeness.parameters == false and
             any(.materials[]; (.uri | endswith("@refs/tags/" + $tag)) and .digest.sha1 == $sha)
           ' dist/release/provenance.json >/dev/null
+
+      - name: Validate release tags before signing
+        run: |
+          set -euo pipefail
+          read_registry_digest() {
+            local ref=$1 descriptor digest attempt error_file errors_file all_missing
+            errors_file=$(mktemp "$RUNNER_TEMP/registry-inspect.XXXXXX")
+            all_missing=true
+            for attempt in $(seq 1 5); do
+              error_file=$(mktemp "$RUNNER_TEMP/registry-inspect-attempt.XXXXXX")
+              if descriptor=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' 2>"$error_file"); then
+                if digest=$(jq -er 'select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<<"$descriptor" 2>>"$errors_file"); then
+                  rm -f "$error_file" "$errors_file"
+                  printf '%s\n' "$digest"
+                  return 0
+                fi
+                all_missing=false
+                printf 'malformed manifest descriptor for %s:\n%s\n' "$ref" "$descriptor" >> "$errors_file"
+              else
+                {
+                  printf 'attempt %s for %s:\n' "$attempt" "$ref"
+                  cat "$error_file"
+                } >> "$errors_file"
+                if ! cmp -s "$error_file" <(printf 'ERROR: %s: not found\n' "$ref"); then
+                  all_missing=false
+                fi
+              fi
+              rm -f "$error_file"
+              sleep $((attempt * 2))
+            done
+            if [[ "$all_missing" == true ]]; then
+              rm -f "$errors_file"
+              return 3
+            fi
+            cat "$errors_file" >&2
+            rm -f "$errors_file"
+            return 1
+          }
+          for component in runtime-base materializer frontend; do
+            repository=$(jq -er --arg component "$component" '.components[$component].repository' dist/release/digests.json)
+            digest=$(jq -er --arg component "$component" '.components[$component].index' dist/release/digests.json)
+            if existing=$(read_registry_digest "$repository:$RELEASE_TAG"); then
+              [[ "$existing" == "$digest" ]] || {
+                echo "immutable release tag $repository:$RELEASE_TAG already points to $existing, not $digest" >&2
+                exit 1
+              }
+            else
+              status=$?
+              (( status == 3 )) || {
+                echo "could not safely inspect immutable release tag $repository:$RELEASE_TAG" >&2
+                exit "$status"
+              }
+            fi
+          done
 
       - name: Sign images and attach provenance and SBOM attestations
         run: |
@@ -1540,7 +1638,7 @@ jobs:
                   printf 'attempt %s for %s:\n' "$attempt" "$ref"
                   cat "$error_file"
                 } >> "$errors_file"
-                if ! grep -Eiq '(404 Not Found|status code 404|manifest unknown|MANIFEST_UNKNOWN|: not found([[:space:]]|$))' "$error_file"; then
+                if ! cmp -s "$error_file" <(printf 'ERROR: %s: not found\n' "$ref"); then
                   all_missing=false
                 fi
               fi
