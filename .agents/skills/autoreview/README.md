@@ -8,15 +8,16 @@ This directory vendors the OpenClaw `autoreview` skill with downstream hardening
 - Source snapshot: [`skills/autoreview` at commit `3300b1086017741ad9bb5f00b9cceae4e7354f89`](https://github.com/openclaw/agent-skills/tree/3300b1086017741ad9bb5f00b9cceae4e7354f89/skills/autoreview)
 - Commit: [`3300b1086017741ad9bb5f00b9cceae4e7354f89`](https://github.com/openclaw/agent-skills/commit/3300b1086017741ad9bb5f00b9cceae4e7354f89) (`fix(autoreview): restrict quoted credential keys (#99)`, July 14, 2026)
 
-OpenClaw's work is used under the MIT License. The full notice is included below so single-skill installations retain it; the repository root also has [`LICENSE`](../../LICENSE).
+OpenClaw's work is used under the MIT License. The full notice is included below so single-skill installations retain it; the repository root also has [`LICENSE`](../../../LICENSE).
 
 ## Local differences
 
 Compared with the upstream snapshot above:
 
 - Codex defaults to `gpt-5.6-sol` with `max` reasoning instead of upstream's `high` reasoning.
-- Non-runtime tests live in [`tests/autoreview`](../../tests/autoreview) so the installed skill payload contains only its documentation and runtime helpers; JVM-specific hardening tests skip when a Java launcher exists but no usable runtime is available.
-- Native Windows CI and a PowerShell review-harness launcher are included.
+- The helper carries an embedded self-test suite, and the portable smoke harness is vendored under [`scripts/`](scripts/); the upstream repository's broader non-runtime test tree is not included.
+- A PowerShell review-harness launcher is included for native Windows use.
+- Claude Code can discover the same vendored skill through the repository's `.claude/skills/autoreview` alias.
 - Bootstrap requires Python 3.9+ and refuses Python, Git, GitHub CLI, reviewer, or PowerShell executables resolved from the reviewed checkout.
 - Git reads neutralize repository-controlled filters, replacement refs, hooks, signing, color, submodule ignore settings, diff formatting, and excludes.
 - Review-input hardening includes canonical `a/` and `b/` paths, broader secret aliases, escaped untracked paths, combined-diff handling, stable ref snapshots, unambiguous bundle serialization, empty-diff rejection, and cross-platform UTF-8 handling.

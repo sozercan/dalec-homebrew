@@ -6,9 +6,9 @@
 
 ```text
 raw Dalec preflight
-  -> signed Formula and migration metadata
+  -> separately verified Formula and migration metadata
   -> per-platform OCI descriptor resolution
-  -> canonical resolution.json and independent verification
+  -> canonical resolution.json and independent structural verification
   -> exact bottle layers through llb.ImageBlob
   -> static archive verification
   -> offline Homebrew install in deterministic topological order
@@ -16,15 +16,15 @@ raw Dalec preflight
   -> verified reconciliation of approved generated runtime data
   -> allowlist overlay onto a snapshot-pinned Chisel runtime base
   -> static ELF, shebang, and link verification
-  -> final-user, final-environment Dalec tests
+  -> declared Dalec tests on final-user runtime branches
   -> OCI image configuration with resolution source_date_epoch
 ```
 
 The network boundary sits between resolution and materialization:
 
-- Resolution authenticates Homebrew metadata, discovers registry objects, and records exact descriptors.
-- Materialization receives only the immutable record and exact bottle blobs.
-- BuildKit disables networking for bottle installation and runtime tests.
+- Resolution authenticates Homebrew metadata, discovers registry objects, and records exact descriptor identities and selected annotations.
+- Materialization receives the internally generated record and exact bottle blobs through read-only mounts, with a private scratch output.
+- The materialization and runtime-test LLB execs use `NetModeNone` and declare no secret, SSH, shared-cache, socket, or device mounts.
 - The full materializer filesystem is never exported into the final image.
 
 See [`../SECURITY.md`](../SECURITY.md) for the properties enforced at each boundary.
@@ -32,17 +32,28 @@ See [`../SECURITY.md`](../SECURITY.md) for the properties enforced at each bound
 ## Package layout
 
 - `internal/spec`: raw dependency-order extraction and typed V1 Dalec validation.
+- `internal/config`: gateway build-option parsing, immutable component bindings,
+  and release-bound metadata policy.
 - `internal/homebrew/metadata`: bounded HTTP fetch, RFC 7797/PS512 JWS verification, freshness and rollback policy, and canonical alias, rename, and migration lookup.
 - `internal/homebrew/oci`: Distribution authentication and exact descriptor-chain validation.
+- `internal/homebrew/version`: Homebrew version, revision, and minimum-version
+  comparison.
 - `internal/resolver`: fixed-point current-Formula closure resolution and deterministic topological ordering.
-- `internal/resolution`: canonical replay record and independent verifier.
+- `internal/resolution`: canonical replay record and structural self-consistency verifier.
 - `internal/bottle`: pre-install compressed-byte and tar security verification.
-- `internal/materializer`: deterministic offline installs, prefix snapshots, containment, generated-receipt, and closure checks.
+- `internal/materializer`: verified Formula staging, deterministic offline installs, prefix snapshots, containment, generated-receipt, and closure checks.
+- `internal/llbutil`: deterministic LLB state construction and read-only
+  resolution, bottle, and evidence transport.
+- `internal/policy`: V1 runtime allowlist, writable-state rules, and pruning-policy binding.
+- `internal/runtime`: final image environment, PATH, working-directory, and non-root identity construction.
 - `internal/runtimebase`: build-only Ubuntu snapshot transport and Chisel manifest and package evidence conversion.
 - `internal/runtimefs`: allowlist assembly, ownership and mode normalization, inventory, pruning evidence, runtime manifest, and SPDX output.
 - `internal/runtimecheck`: static ELF, loader, library, shebang, and link checks.
 - `internal/testplan` and `internal/testrunner`: conversion and execution for the supported public Dalec test subset.
 - `internal/frontend`: DockerUI fan-out, shared snapshot orchestration, image configuration, test dependencies, and exporter epoch.
+- `internal/release`: canonical component-manifest and platform-reference validation; online registry, signing, and promotion checks remain release-workflow responsibilities.
+- `internal/buildfiles`: source-level contract tests for Dockerfile, pin
+  inventory, Bake, and release workflow definitions.
 
 Command entrypoints live under `cmd/`; component image recipes live in [`../Dockerfile`](../Dockerfile) and [`../docker-bake.hcl`](../docker-bake.hcl).
 
@@ -50,27 +61,31 @@ Command entrypoints live under `cmd/`; component image recipes live in [`../Dock
 
 A resolution record binds:
 
-- the effective Dalec input and target platform
-- authenticated Formula and migration metadata
-- exact OCI index, manifest, config, and layer descriptors
+- the effective Dalec input digest and target platform
+- Formula and migration payload and envelope digests, freshness sources, timestamps, URLs, and recorded signature-verification evidence
+- exact OCI index, manifest, config, and layer descriptor identities plus selected annotations
 - requested roots and the resolved dependency closure
 - deterministic installation order
 - frontend, runtime-base, and materializer component identities
-- runtime, attestation, and pruning policy inputs
+- runtime, attestation-waiver, and pruning-policy inputs
 
-A record is immutable once passed to the materializer. Replaying the same record and component tuple never reads a mutable Formula tag; BuildKit fetches the exact recorded layer digest.
+Formula and migration documents are fetched and verified separately because upstream does not provide a signed common snapshot identifier. The combined snapshot digest commits to the exact accepted payload pair, but does not prove that Homebrew published the pair atomically. An authenticated `generated_date` takes precedence over HTTP metadata for each document; otherwise freshness uses `Last-Modified`. The record's `generated_at` and `source_date_epoch` use the earlier accepted document timestamp.
+
+A record is immutable once passed to the materializer. Replaying the same authenticated record and component tuple never reads a mutable Formula tag; BuildKit fetches the exact recorded layer digest.
+
+The record contains digests and verification evidence, not the source JWS envelopes or OCI index, manifest, and config bodies. The independent materializer verifier therefore rechecks schema, graph reachability and order, descriptor and checksum relationships, component references, runtime identity, policy bindings, and the presence of recorded verified signatures; it does not re-run JWS or registry verification. A persisted record is a trust artifact and must be authenticated with its release evidence before replay.
 
 `dockerui.Client.Build` may run platform callbacks concurrently. The verified metadata snapshot is immutable and shared, registry clients synchronize token state, and resolution and materialization records remain invocation-local. Root Formula `PkgVersion` values are compared after all platform callbacks and before exporter finalization.
 
 ## Bottle verification and installation
 
-The compressed bottle digest must match both the selected OCI layer and the checksum authenticated by the Formula JWS. Before installation, the archive verifier rejects traversal, special files, setid bits, security capabilities and xattrs, collisions, and unbounded expansion. Hardlinks remain keg-local. Relative symlinks under the source keg's `libexec/` tree may leave the keg only for `opt/<signed-direct-dependency>/...` targets using only canonical leading traversal to the prefix and no dot segments after the dependency root inside the Homebrew prefix; the materializer verifies the exact dependency keg before pouring the owner and again after installation. All other escaping links remain rejected.
+The compressed bottle digest must match both the selected OCI layer and the checksum authenticated by the Formula JWS. Before installation, the archive verifier rejects traversal, special files, setid bits, ACL and sparse metadata, security, trusted, and capability xattrs, collisions, and unbounded expansion. Bounded `user.*` xattrs are retained in verification inventory. Hardlinks remain keg-local. Relative symlinks under the source keg's `libexec/` tree may leave the keg only for `opt/<signed-direct-dependency>/...` targets using only canonical leading traversal to the prefix and no dot segments after the dependency root inside the Homebrew prefix. The installed link must retain the exact verified archive target text, and the materializer verifies that it resolves inside the exact dependency keg before pouring the owner and again after installation. All other escaping links remain rejected.
 
-Historical bottle tabs created before Homebrew emitted `pkg_version` are accepted only when that field is absent. The resolver derives the canonical value from the tab's version and revision while retaining the exact raw annotation; explicit empty, null, non-string, or inconsistent values remain invalid.
+Historical bottle tabs created before Homebrew emitted `pkg_version` are accepted only when that field is absent. The resolver derives the canonical value from the tab's version and revision while retaining the exact raw annotation; explicit empty, null, non-string, or inconsistent values remain invalid. Installed or pre-install receipt dependency entries receive the same omission-only compatibility derivation. A receipt's top-level `pkg_version` may be absent, but when present it must match the resolved node; receipt source version, version scheme, and dependency closure remain independently checked.
 
 The materializer uses a small read-only Ruby adapter around the pinned Homebrew `FormulaInstaller`. This avoids the public `brew install` command's mutable tap and writable-repository preflight while preserving Homebrew's normal bottle pour, relocation, linking, and post-install behavior.
 
-The Go materializer verifies each local bottle first, passes one immutable bottle at a time, disables networking in the enclosing LLB exec, and validates every resulting prefix mutation. Dependency selection and source fallback remain outside the installer.
+The Go materializer copies every input bottle through a no-follow descriptor into a private directory and verifies the complete closure before Homebrew executes. It then stages the exact verified embedded Formula sources into an empty, root-owned tap with `0555` directories and `0444` files. Installation passes one immutable bottle at a time, with dependency selection and source fallback outside the installer, and validates every resulting prefix mutation.
 
 ## Runtime base and materializer separation
 
@@ -78,7 +93,7 @@ The final runtime base is a conservative Ubuntu Chisel Noble root filesystem cop
 
 The selected slices preserve release identity, passwd and group data, NSS state, glibc loaders and complete conversion data, C.UTF-8, timezone data, CA trust, Bash and Dash, core command-line tools, Perl base, procps, selected util-linux commands, `libgcc_s`, and `libstdc++`.
 
-The materializer deliberately derives from the pinned full Ubuntu child image instead of the Chisel runtime. It installs pouring and relocation tools from the same Ubuntu snapshot, creates the matching `linuxbrew` identity and loader link, and receives only the Chisel base's compact package and artifact evidence through a read-only build mount.
+The materializer deliberately derives from the pinned full Ubuntu child image instead of the Chisel runtime. It installs pouring and relocation tools from the same Ubuntu snapshot, creates the matching `linuxbrew` identity and loader link, and copies the matching CA bundle, CA copyright, and compact package and artifact evidence from the Chisel root through a read-only build mount.
 
 The generated Homebrew runtime is overlaid onto the independent Chisel base, so materializer tooling cannot leak into the final image.
 
@@ -96,9 +111,9 @@ The proxy and evidence converter are build-only tools and are not copied into an
 
 ## Verified post-install data
 
-Bottle inventory remains authoritative after pouring. The only extra keg subtree currently accepted is `glibc/lib/locale`, which the authenticated Homebrew `glibc` Formula deterministically generates with its brewed `localedef`.
+Bottle paths and types remain authoritative after pouring. Content or link-target changes are accepted only for paths listed in the recorded OCI tab's `changed_files`, entries in which the verifier detected Homebrew relocation placeholders, the keg-root receipt and SPDX document, and the exact validated Node npm link rewrite. The OCI tab is bound into the resolution record but is not authenticated by the Formula JWS. The permitted external dependency-link exception never allows its verified target text to change. Mode changes are limited to adding the owner-write bit on declared changed files and authenticated Python virtual-environment templates; setid, group or other write, execute, and sticky-bit changes remain rejected.
 
-Reconciliation bounds its entry count, per-file and aggregate size, requires known ownership and non-writable, non-executable ordinary files or directories, and rejects links and special modes. Every other unexpected keg path still fails closed.
+The only extra keg subtree currently accepted is `glibc/lib/locale`, which the verified Homebrew `glibc` Formula generates with its brewed `localedef`. Reconciliation bounds its entry count, per-file and aggregate size, requires known ownership and non-writable, non-executable ordinary files or directories, and rejects links and special modes. Every other unexpected keg path still fails closed.
 
 Generated global runtime indexes have explicit, versioned handling:
 
@@ -109,10 +124,12 @@ Generated global runtime indexes have explicit, versioned handling:
 
 All generated files are re-hashed in runtime inventory and normalized to root-owned, non-writable output. Ordinary global copies retain their original bottle attribution.
 
-Runtime ELF verification treats a private `.a` file containing a raw `ET_REL` object as linker data, matching Homebrew glibc's `libmcheck.a`. Such an object is still rejected if exposed as a command; shared-object, plugin, and arbitrary executable relocatable-object paths remain invalid.
+Runtime ELF verification treats non-exposed inventory files with object-data extensions `.a`, `.o`, `.lo`, and `.syso` containing `ET_REL` as linker or object data, including Homebrew glibc's raw `libmcheck.a` and foreign-architecture Go objects. Such objects remain invalid when exposed as commands or stored as shared objects, plugins, or arbitrary helpers. Executable scripts require a usable interpreter unless an exact record-derived package, path, and shebang exception classifies the file as auxiliary data; exposed and requested scripts never receive that exception.
 
 ## Runtime assembly and tests
 
-The installed prefix is scanned into an inventory. Only inventory-selected files are copied into the final state, where ownership and modes are normalized before static runtime checks and Dalec tests run.
+The installed prefix is scanned into an inventory. Only allowlist-selected prefix entries are copied into the materialized overlay; the materializer then adds the explicit resolution, inventory, prune, manifest, SPDX, base, and installation evidence files under `/usr/share/dalec-homebrew`. Ownership and modes are normalized before static runtime checks and Dalec tests run.
 
-Tests execute against the final pruned filesystem with the configured user, environment, and working directory. The image contents and evidence files are listed in the [usage reference](usage.md).
+Each declared Dalec test runs on an independent branch derived from the final pruned state. The frontend injects an ephemeral test runner and plan under `/__dalec_homebrew`; those files are not exported. Commands inherit the final image user, environment, and working directory, after which the supported test-level directory, test environment, and step environment overrides apply. BuildKit disables networking for each branch. Development frontends may set `DALEC_SKIP_TESTS`; release-bound frontends reject that bypass.
+
+The image contents and evidence files are listed in the [usage reference](usage.md).

@@ -21,7 +21,7 @@ Do not trade them for convenience or silently broaden the supported contract.
 
 ## Before editing
 
-1. Read `README.md` for the public contract and development workflow.
+1. Read `README.md` for the public contract and `CONTRIBUTING.md` for the development workflow.
 2. Read `docs/architecture.md` before changing package boundaries or BuildKit
    orchestration.
 3. Read `SECURITY.md` before changing validation, resolution, archive handling,
@@ -41,6 +41,8 @@ reset, discard, or rewrite them.
 ## Architecture map
 
 - `internal/spec`: dependency-order extraction and the supported Dalec contract.
+- `internal/config` and `internal/runtime`: release-bound build options, final
+  image configuration, generated `PATH`, and runtime identity validation.
 - `internal/homebrew/metadata`: bounded fetches, JWS verification, freshness,
   rollback policy, aliases, renames, and migrations.
 - `internal/homebrew/oci`: registry authentication and exact OCI descriptor
@@ -49,6 +51,8 @@ reset, discard, or rewrite them.
   resolution, canonical replay records, and independent verification.
 - `internal/bottle`: compressed bottle and hostile archive verification.
 - `internal/materializer`: deterministic offline installation and containment.
+- `internal/llbutil`: deterministic LLB state wiring and read-only input
+  transport.
 - `internal/runtimebase`: pinned Ubuntu snapshot transport and Chisel evidence.
 - `internal/runtimefs` and `internal/runtimecheck`: allowlisted runtime assembly,
   ownership/mode normalization, evidence, and static runtime checks.
@@ -58,6 +62,8 @@ reset, discard, or rewrite them.
   tests, and exporter epoch handling.
 - `internal/policy`, `policy/v1`, `internal/release`, and `release/`: versioned
   runtime policy and release tuple validation.
+- `internal/buildfiles`: source-level contract tests for Dockerfile, Bake,
+  pins, and release workflows.
 - `cmd/*`: thin executable entry points; reusable behavior belongs in
   `internal/*`.
 

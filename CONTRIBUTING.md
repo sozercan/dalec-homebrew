@@ -6,12 +6,15 @@ Contributions are welcome. This guide covers the local workflow; the [architectu
 
 For Go development:
 
-- Go 1.25.9 or newer
+- Go 1.25.9 for CI and release parity; newer local toolchains are not the
+  release-tested toolchain
 - Bash, Make, `jq`, and Python 3
 
 For component and integration work:
 
-- Docker Buildx backed by BuildKit 0.31.2 or newer
+- Docker Buildx `v0.36.0` backed by BuildKit `v0.32.0` for parity with CI
+  and release automation; these are the release-tested executor pins, while
+  `github.com/moby/buildkit v0.31.2` is the Go module version
 - For component rebuild mode, a writable OCI registry reachable from the selected BuildKit daemon
 - For published-tuple mode, pull access from the selected BuildKit daemon to each digest-pinned component reference
 - Builder access to authenticated Homebrew metadata, selected bottle layers, component registries, and the pinned Ubuntu inputs used by the selected mode
@@ -31,7 +34,8 @@ make build
 
 ## Run validation
 
-Use focused commands while iterating, then run the complete suite before opening a pull request.
+Use focused commands while iterating, then run the relevant CI-parity checks
+before opening a pull request.
 
 | Command | Runs |
 | --- | --- |
@@ -40,13 +44,28 @@ Use focused commands while iterating, then run the complete suite before opening
 | `make build` | Host builds for the primary command binaries, including `dalec-homebrew-release-manifest` |
 | `make check` | Shell syntax checks, tests, vet, selected race tests, and Linux cross-builds for every command on `amd64` and `arm64` |
 
-The full validation entrypoint is also available directly:
+The canonical repository check is also available directly:
 
 ```console
 ./scripts/check.sh
 ```
 
 Cross-compiled binaries are written to `/tmp`; validation should not modify the repository.
+
+CI also runs dependency tidiness, host builds, and whitespace checks:
+
+```console
+go mod tidy
+git diff --exit-code -- go.mod go.sum
+make build
+git diff --check
+```
+
+For workflow, Dockerfile, or Bake changes, CI additionally lints the workflows
+with its pinned `actionlint` image, validates `./scripts/release-inputs.sh`,
+prints the `release-children` and `frontend` Bake graph, and builds the `amd64`
+frontend with the pinned Buildx and BuildKit executor. Run the applicable Docker
+checks from [Build component images](#build-component-images) locally.
 
 ## Run the live BuildKit test
 
@@ -87,7 +106,10 @@ Rebuild-only options are `DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH` (default `17810
 
 Published mode requires digest-pinned `DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF`, `DALEC_HOMEBREW_LIVE_MATERIALIZER_REF`, and `DALEC_HOMEBREW_LIVE_FRONTEND_REF`. Runtime-base and materializer inputs identify release indexes; the frontend input identifies the selected platform child. References printed after a rebuild identify that run's single-platform staging outputs, not release indexes.
 
-The helper always prints the final image digest and immutable `DALEC_HOMEBREW_LIVE_FINAL_REF`; after `push`, that reference is pullable from the final image repository.
+The helper prints the selected component references, metadata floor, final
+image name, final digest, and immutable `DALEC_HOMEBREW_LIVE_FINAL_REF` as shell
+assignments. After `push`, the final reference is pullable from the final image
+repository.
 
 ## Exercise focused runtime closures
 
@@ -101,7 +123,10 @@ Use `DALEC_HOMEBREW_LIVE_SPEC` to run the same helper with a focused example:
 
 ## Validate a published image on a VM
 
-For a pushed image using the default `linuxbrew` identity (`1000:1000`), the VM helper pulls it over SSH and runs the image with networking disabled, a read-only root filesystem, all capabilities dropped, and `no-new-privileges`:
+For a pushed image using the default `linuxbrew` identity (`1000:1000`), pass
+the exact digest-pinned image to the VM helper. It pulls the image over SSH and
+runs it with networking disabled, a read-only root filesystem, all capabilities
+dropped, and `no-new-privileges`:
 
 ```console
 ./scripts/vm-live-validate.sh \
@@ -112,7 +137,14 @@ Requirements:
 
 - `ssh` on the local machine
 - Docker on the SSH target
+- registry connectivity and credentials on the SSH target to pull the image
 - an SSH target named `vm`, or `DALEC_HOMEBREW_VM_SSH_TARGET` set to another host
+
+The helper also checks Linux `amd64` or `arm64`, Ubuntu 24.04 Noble, the
+`1000:1000` runtime identity, required runtime evidence, root-owned non-writable
+code, and the absence of build and package-management tooling. It is a runtime
+hardening check only: it does not verify Cosign signatures, attestations, or the
+signed release bundle.
 
 ## Generate an image-size report
 
@@ -129,7 +161,12 @@ The size reporter emits JSON for registry or local images:
   localhost:5000/IMAGE:tag
 ```
 
-It requires Docker, `jq`, and Python 3. `crane` or `skopeo` is optional; the script falls back to Docker Buildx metadata and may temporarily pull or copy the image when necessary.
+It requires Docker, `jq`, and Python 3. `crane` or `skopeo` is optional; the
+script falls back to Docker Buildx metadata and may temporarily pull or copy the
+image when necessary. Private images require credentials for the selected
+resolver. `--insecure` permits an HTTP registry for `crane` or `skopeo`; it does
+not provide authentication, and Docker or Buildx fallback paths still depend on
+the daemon's registry configuration.
 
 ## Developer utilities
 
@@ -148,6 +185,11 @@ The standalone resolver is a diagnostic tool. It authenticates Homebrew metadata
 go run ./cmd/record-verify path/to/release-bound-resolution.json
 ```
 
+`record-verify` checks schema and internal relationships recorded in the file; it
+does not re-fetch or cryptographically reverify the source JWS envelopes or OCI
+documents. Authenticate a persisted record through its signed release evidence
+before relying on that structural verification.
+
 Generate a canonical component manifest from immutable index and child references with `cmd/release-manifest` (run it with `--help` for the complete flag list), then validate and digest the result:
 
 ```console
@@ -164,15 +206,33 @@ go run ./cmd/release-verify path/to/components.json
 ```console
 ./scripts/release-inputs.sh | jq .
 docker buildx bake --print release-children frontend
-docker buildx bake runtime-base-amd64 materializer-amd64
+docker buildx bake --load runtime-base-amd64 materializer-amd64
+docker buildx build \
+  --target frontend \
+  --platform linux/amd64 \
+  --provenance=false \
+  --tag dalec-homebrew:dev \
+  --load \
+  .
+
+REGISTRY=registry.example VERSION=dev \
+  docker buildx bake --push runtime-base-amd64 materializer-amd64
 ```
 
-Local tags are staging references. Release builds must follow the immutable component order, pin review, signing, and promotion requirements in [`docs/release.md`](docs/release.md).
+The two `--load` commands are local single-platform smoke builds. `--load`
+exports their results to the local Docker daemon; the final command demonstrates
+staging Bake output with explicit `REGISTRY`, `VERSION`, and `--push` values.
+With a `docker-container` builder and no export option, results may remain only
+in BuildKit's cache.
+Local and staging tags are mutable discovery references, not released
+identities. Release builds must follow the immutable component order, pin
+review, signing, and promotion requirements in
+[`docs/release.md`](docs/release.md).
 
 ## Pull request checklist
 
 - Add or update tests for behavior changes.
 - Update user documentation when the supported Dalec contract changes.
-- Run `make check`.
+- Run `make check` and the relevant CI-parity checks above.
 - Keep component and snapshot inputs digest-pinned; update the complete release tuple together.
 - Avoid committing generated binaries, local resolution records, or size reports.

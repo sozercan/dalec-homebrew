@@ -16,19 +16,23 @@
 
 ## Build an image
 
-You need Docker Buildx and a digest-pinned `dalec-homebrew` frontend. This repository does not currently publish one; use a digest supplied by your release pipeline or see [Contributing](CONTRIBUTING.md) to build it yourself.
+You need Docker Buildx and a digest-pinned `dalec-homebrew` frontend. Use a digest supplied by a trusted release pipeline, or see [Contributing](CONTRIBUTING.md) to build the component tuple yourself.
 
 ### Build from the command line
 
 Build directly from the command line with `jq`:
 
 ```console
-docker buildx build \
-  --build-arg "BUILDKIT_SYNTAX=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>" \
-  --platform linux/amd64 \
-  --tag hello-runtime:inline \
-  --load \
-  - <<<"$(jq -c '.dependencies.runtime = {"hello": {}} | .image.entrypoint = "/home/linuxbrew/.linuxbrew/bin/hello"' <<<"{}")"
+jq -nc '{
+  dependencies: {runtime: {hello: {}}},
+  image: {entrypoint: "/home/linuxbrew/.linuxbrew/bin/hello"}
+}' |
+  docker buildx build \
+    --build-arg "BUILDKIT_SYNTAX=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>" \
+    --platform linux/amd64 \
+    --tag hello-runtime:inline \
+    --load \
+    -
 
 docker run --rm hello-runtime:inline
 ```
