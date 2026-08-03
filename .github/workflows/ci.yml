@@ -1,6 +1,12 @@
 name: ci
 
 on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref or SHA to validate
+        required: false
+        type: string
   pull_request:
   push:
     branches: [main]
@@ -8,16 +14,24 @@ on:
 permissions:
   contents: read
 
+env:
+  BUILDX_VERSION: v0.36.0
+  BUILDX_SHA256_AMD64: 07823fdfcd82a41be90155a8b16876c1a780a6462de805a9f3f63b3119ccfb99
+  BUILDX_SHA256_ARM64: 70382de03915c07c488ae4ddc4f7e169ee978f953e754ecfce110ba017e0132b
+  BUILDKIT_IMAGE: docker.io/moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2
+  ACTIONLINT_IMAGE: docker.io/rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+
 jobs:
   go:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.25.9
+          go-version-file: go.mod
           cache: true
       - run: go mod download
       - run: go mod tidy
@@ -29,17 +43,75 @@ jobs:
   dockerfile:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
-      - uses: docker/setup-buildx-action@v3
-      - run: docker buildx bake --print
+      - name: Lint GitHub Actions workflows
+        run: docker run --rm -v "$PWD:/repo:ro" -w /repo "$ACTIONLINT_IMAGE"
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install checksum-pinned Buildx
+        run: |
+          set -euo pipefail
+          [[ "$BUILDX_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case "$(uname -m)" in
+            x86_64|amd64)
+              arch=amd64
+              expected=$BUILDX_SHA256_AMD64
+              ;;
+            aarch64|arm64)
+              arch=arm64
+              expected=$BUILDX_SHA256_ARM64
+              ;;
+            *)
+              echo "unsupported Buildx host architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+          asset="buildx-${BUILDX_VERSION}.linux-${arch}"
+          binary="$RUNNER_TEMP/$asset"
+          curl --fail --location --silent --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --max-filesize 134217728 \
+            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/${asset}" \
+            --output "$binary"
+          printf '%s  %s\n' "$expected" "$binary" | sha256sum -c -
+          plugin_dir="${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins"
+          install -d -m 0755 "$plugin_dir"
+          install -m 0755 "$binary" "$plugin_dir/docker-buildx"
+          docker buildx version | grep -F " $BUILDX_VERSION "
+
+      - name: Validate release inputs
+        run: |
+          set -euo pipefail
+          ./scripts/release-inputs.sh > "$RUNNER_TEMP/release-inputs.json"
+          jq -e '.schema_version == "dalec-homebrew-release-inputs/v1"' \
+            "$RUNNER_TEMP/release-inputs.json"
+
+      - name: Set up Docker Buildx
+        run: |
+          set -euo pipefail
+          builder="${GITHUB_JOB//_/-}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx create \
+            --name "$builder" \
+            --driver docker-container \
+            --driver-opt "image=$BUILDKIT_IMAGE" \
+            --use \
+            --bootstrap
+      - run: docker buildx bake --print release-children frontend
       - name: Build gateway frontend image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           target: frontend
           platforms: linux/amd64
           push: false
+          provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max

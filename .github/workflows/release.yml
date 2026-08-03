@@ -1,0 +1,2394 @@
+name: release
+
+on:
+  repository_dispatch:
+    types: [release]
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  REGISTRY_NAMESPACE: ghcr.io/${{ github.repository_owner }}
+  BUILDX_VERSION: v0.36.0
+  BUILDX_SHA256_AMD64: 07823fdfcd82a41be90155a8b16876c1a780a6462de805a9f3f63b3119ccfb99
+  BUILDX_SHA256_ARM64: 70382de03915c07c488ae4ddc4f7e169ee978f953e754ecfce110ba017e0132b
+  BUILDKIT_IMAGE: docker.io/moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2
+  BINFMT_IMAGE: docker.io/tonistiigi/binfmt:latest@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+  SYFT_IMAGE: docker.io/anchore/syft:v1.42.3@sha256:5999d209a342e55e9edf70bf8930fb5b86d8f2a783fa401178372c50e21b1d36
+  TRIVY_IMAGE: docker.io/aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e
+  MAX_RELEASE_ASSET_BYTES: 268435456
+  MAX_RELEASE_TOTAL_BYTES: 1073741824
+  MAX_RUNTIME_EVIDENCE_EXPANDED_BYTES: 268435456
+  RELEASE_SPECS: live-test live-python live-glibc live-redis live-graphviz live-toolchain
+
+jobs:
+  prepare:
+    name: Validate release ref
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.request.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+      stable: ${{ steps.request.outputs.stable }}
+    steps:
+      - name: Validate release request
+        id: request
+        env:
+          INPUT_TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" != repository_dispatch || "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "release dispatches must use the trusted main branch workflow" >&2
+            exit 1
+          fi
+
+          tag=$INPUT_TAG
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "release tag is not supported semver: $tag" >&2
+            exit 1
+          fi
+
+          if (( ${#tag} > 128 )); then
+            echo "release tag exceeds the OCI tag limit: $tag" >&2
+            exit 1
+          fi
+
+          if [[ "$tag" == *-* ]]; then
+            prerelease=${tag#*-}
+            IFS=. read -r -a identifiers <<<"$prerelease"
+            for identifier in "${identifiers[@]}"; do
+              if [[ "$identifier" =~ ^[0-9]+$ && "$identifier" != 0 && "$identifier" == 0* ]]; then
+                echo "numeric prerelease identifier has a leading zero: $identifier" >&2
+                exit 1
+              fi
+            done
+          fi
+
+          stable=true
+          [[ "$tag" == *-* ]] && stable=false
+          {
+            echo "tag=$tag"
+            echo "stable=$stable"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.request.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag and main reachability
+        id: release
+        env:
+          RELEASE_TAG: ${{ steps.request.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG" || {
+            echo "release tag does not exist: $RELEASE_TAG" >&2
+            exit 1
+          }
+          tag_sha=$(git rev-parse "$RELEASE_TAG^{commit}")
+          head_sha=$(git rev-parse HEAD)
+          if [[ "$tag_sha" != "$head_sha" ]]; then
+            echo "checked-out HEAD $head_sha does not match $RELEASE_TAG ($tag_sha)" >&2
+            exit 1
+          fi
+
+          comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$tag_sha...main" --jq .status)
+          if [[ "$comparison" != ahead && "$comparison" != identical ]]; then
+            echo "$RELEASE_TAG is not reachable from origin/main (comparison: $comparison)" >&2
+            exit 1
+          fi
+
+          echo "sha=$tag_sha" >> "$GITHUB_OUTPUT"
+
+  release_target:
+    name: Inspect target release
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      # Draft visibility is required for safe no-rebuild recovery.
+      contents: write
+    outputs:
+      state: ${{ steps.target.outputs.state }}
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - name: Inspect target GitHub release
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          owner=${GITHUB_REPOSITORY%%/*}
+          repository=${GITHUB_REPOSITORY#*/}
+          # GraphQL variables are intentionally literal in the single-quoted query.
+          # shellcheck disable=SC2016
+          release_json=$(gh api graphql \
+            -F owner="$owner" \
+            -F name="$repository" \
+            -F tag="$RELEASE_TAG" \
+            -f query='
+              query TargetRelease($owner: String!, $name: String!, $tag: String!) {
+                repository(owner: $owner, name: $name) {
+                  release(tagName: $tag) {
+                    databaseId
+                    isDraft
+                    isPrerelease
+                    tagName
+                  }
+                }
+              }')
+          state=$(jq -er --arg tag "$RELEASE_TAG" '
+            if (((.errors // []) | length) != 0) or
+               ((.data.repository | type) != "object") then
+              error("malformed target release response")
+            else
+              .data.repository.release as $release
+              | if $release == null then
+                  "absent"
+                elif ($release.tagName != $tag or
+                      ($release.databaseId | type) != "number" or
+                      $release.databaseId <= 0 or
+                      ($release.isDraft | type) != "boolean" or
+                      ($release.isPrerelease | type) != "boolean") then
+                  error("malformed target release response")
+                elif $release.isDraft then
+                  "draft"
+                else
+                  "published"
+                end
+            end
+          ' <<<"$release_json")
+          if [[ "$state" == published ]]; then
+            echo "$RELEASE_TAG already has a published GitHub release; releases are not overwritten" >&2
+            exit 1
+          fi
+          if [[ "$state" == draft ]]; then
+            echo "$RELEASE_TAG has a draft release; this run will verify and resume its signed tuple"
+          fi
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+
+      - name: Authorize new release source
+        if: steps.target.outputs.state == 'absent'
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+          TRUSTED_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_SHA" == "$TRUSTED_WORKFLOW_SHA" ]] || {
+            echo "new releases must tag the trusted workflow commit $TRUSTED_WORKFLOW_SHA, not $RELEASE_SHA" >&2
+            exit 1
+          }
+
+  ci:
+    name: Validate tagged source
+    needs: [prepare, release_target]
+    if: needs.release_target.outputs.state == 'absent'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
+
+  build:
+    name: Build immutable component tuple
+    needs: [prepare, ci, release_target]
+    if: needs.release_target.outputs.state == 'absent'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+      BUILD_TAG: build-${{ needs.prepare.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          image: ${{ env.BINFMT_IMAGE }}
+          platforms: arm64
+          cache-image: false
+
+      - name: Install checksum-pinned Buildx
+        run: &install-buildx |
+          set -euo pipefail
+          [[ "$BUILDX_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case "$(uname -m)" in
+            x86_64|amd64)
+              arch=amd64
+              expected=$BUILDX_SHA256_AMD64
+              ;;
+            aarch64|arm64)
+              arch=arm64
+              expected=$BUILDX_SHA256_ARM64
+              ;;
+            *)
+              echo "unsupported Buildx host architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+          asset="buildx-${BUILDX_VERSION}.linux-${arch}"
+          binary="$RUNNER_TEMP/$asset"
+          curl --fail --location --silent --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --max-filesize 134217728 \
+            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/${asset}" \
+            --output "$binary"
+          printf '%s  %s\n' "$expected" "$binary" | sha256sum -c -
+          plugin_dir="${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins"
+          install -d -m 0755 "$plugin_dir"
+          install -m 0755 "$binary" "$plugin_dir/docker-buildx"
+          docker buildx version | grep -F " $BUILDX_VERSION "
+
+      - name: Set up Docker Buildx
+        run: &setup-buildx |
+          set -euo pipefail
+          builder="${GITHUB_JOB//_/-}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx create \
+            --name "$builder" \
+            --driver docker-container \
+            --driver-opt "image=$BUILDKIT_IMAGE" \
+            --use \
+            --bootstrap
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Capture and validate release inputs
+        run: |
+          mkdir -p dist/release
+          ./scripts/release-inputs.sh > dist/release/inputs.json
+          jq . dist/release/inputs.json
+
+      - name: Build children and assemble component indexes
+        env:
+          REGISTRY: ${{ env.REGISTRY_NAMESPACE }}
+          VERSION: ${{ env.BUILD_TAG }}
+        run: |
+          set -euo pipefail
+
+          runtime_base_repo="$REGISTRY/dalec-homebrew-runtime-base"
+          materializer_repo="$REGISTRY/dalec-homebrew-materializer"
+          frontend_repo="$REGISTRY/dalec-homebrew"
+
+          inspect_digest() {
+            local ref=$1 descriptor digest
+            for attempt in $(seq 1 12); do
+              if descriptor=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' 2>/dev/null) \
+                && digest=$(jq -er 'select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<<"$descriptor"); then
+                printf '%s\n' "$digest"
+                return 0
+              fi
+              sleep $((attempt * 2))
+            done
+            echo "could not resolve registry digest for $ref" >&2
+            return 1
+          }
+
+
+          build_target() {
+            local target=$1 metadata
+            metadata="$RUNNER_TEMP/build-${target}.json"
+            REGISTRY="$REGISTRY" VERSION="$VERSION" docker buildx bake "$target" \
+              --metadata-file "$metadata" \
+              --push \
+              --provenance=false \
+              --sbom=false >&2
+            jq -er --arg target "$target" '
+              .[$target] as $result
+              | $result["containerimage.digest"] as $digest
+              | select($digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+              | select($result["containerimage.descriptor"].digest == $digest)
+              | $digest
+            ' "$metadata"
+          }
+
+          target_tag() {
+            local target=$1
+            REGISTRY="$REGISTRY" VERSION="$VERSION" docker buildx bake --print "$target" \
+              | jq -er --arg target "$target" '.target[$target].tags | if length == 1 then .[0] else error("expected exactly one tag") end'
+          }
+
+          create_index() {
+            local repository=$1 tag=$2 amd64=$3 arm64=$4 metadata digest published
+            metadata="$RUNNER_TEMP/index-${tag}.json"
+            docker buildx imagetools create \
+              --tag "$repository:$tag" \
+              --metadata-file "$metadata" \
+              "$repository@$amd64" \
+              "$repository@$arm64" >&2
+            digest=$(jq -er '
+              .["containerimage.descriptor"].digest
+              | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))
+            ' "$metadata")
+            published=$(inspect_digest "$repository:$tag")
+            [[ "$published" == "$digest" ]] || {
+              echo "created index $repository:$tag resolved to $published, not exporter digest $digest" >&2
+              return 1
+            }
+            printf '%s\n' "$digest"
+          }
+
+          platform_digest() {
+            local ref=$1 platform=$2 os arch
+            os=${platform%/*}
+            arch=${platform#*/}
+            docker buildx imagetools inspect --raw "$ref" \
+              | jq -er --arg os "$os" --arg arch "$arch" '
+                  .manifests as $manifests
+                  | if (($manifests | length) == 2 and
+                        ([$manifests[] | .platform.os + "/" + .platform.architecture] | sort) ==
+                          ["linux/amd64", "linux/arm64"]) then
+                      $manifests
+                    else
+                      error("expected exactly the linux/amd64 and linux/arm64 platform children")
+                    end
+                  | [.[] | select(.platform.os == $os and .platform.architecture == $arch)]
+                  | if length == 1 then .[0].digest else error("expected exactly one platform child") end
+                  | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))
+                '
+          }
+
+          for target in \
+            runtime-base-amd64 runtime-base-arm64 \
+            materializer-amd64 materializer-arm64; do
+            digest=$(build_target "$target")
+            tag=$(target_tag "$target")
+            published=$(inspect_digest "$tag")
+            [[ "$published" == "$digest" ]] || {
+              echo "$target tag $tag resolved to $published, not exporter digest $digest" >&2
+              exit 1
+            }
+            printf '%s=%s\n' "$target" "$digest"
+            printf -v "${target//-/_}" '%s' "$digest"
+          done
+
+          for platform in linux/amd64 linux/arm64; do
+            arch=${platform#*/}
+            runtime_base_var="runtime_base_${arch}"
+            materializer_var="materializer_${arch}"
+            docker run --rm --platform "$platform" \
+              --entrypoint /bin/bash \
+              "$runtime_base_repo@${!runtime_base_var}" \
+              -euc 'test "$(id -u):$(id -g)" = 1000:1000; test ! -e /usr/bin/apt; test -r /usr/share/dalec-homebrew/runtime-base-packages.tsv'
+            docker run --rm --platform "$platform" \
+              --entrypoint /bin/bash \
+              "$materializer_repo@${!materializer_var}" \
+              -euc 'test -x /usr/local/bin/dalec-homebrew-materializer; test -x /home/linuxbrew/.linuxbrew/Homebrew/bin/brew; test -r /usr/share/dalec-homebrew/runtime-base-packages.tsv'
+          done
+
+          runtime_base_index=$(create_index \
+            "$runtime_base_repo" "$VERSION" \
+            "$runtime_base_amd64" "$runtime_base_arm64")
+          materializer_index=$(create_index \
+            "$materializer_repo" "$VERSION" \
+            "$materializer_amd64" "$materializer_arm64")
+
+          [[ $(platform_digest "$runtime_base_repo@$runtime_base_index" linux/amd64) == "$runtime_base_amd64" ]]
+          [[ $(platform_digest "$runtime_base_repo@$runtime_base_index" linux/arm64) == "$runtime_base_arm64" ]]
+          [[ $(platform_digest "$materializer_repo@$materializer_index" linux/amd64) == "$materializer_amd64" ]]
+          [[ $(platform_digest "$materializer_repo@$materializer_index" linux/arm64) == "$materializer_arm64" ]]
+
+          RUNTIME_BASE_REF="$runtime_base_repo@$runtime_base_index" \
+          MATERIALIZER_REF="$materializer_repo@$materializer_index" \
+          FRONTEND_REF='' \
+          REGISTRY="$REGISTRY" \
+          VERSION="$VERSION" \
+            docker buildx bake frontend \
+              --metadata-file "$RUNNER_TEMP/build-frontend.json" \
+              --push \
+              --provenance=false \
+              --sbom=false >&2
+
+          frontend_index=$(jq -er '
+            .frontend as $result
+            | $result["containerimage.digest"] as $digest
+            | select($digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+            | select($result["containerimage.descriptor"].digest == $digest)
+            | $digest
+          ' "$RUNNER_TEMP/build-frontend.json")
+          published=$(inspect_digest "$frontend_repo:$VERSION")
+          [[ "$published" == "$frontend_index" ]] || {
+            echo "frontend tag $frontend_repo:$VERSION resolved to $published, not exporter digest $frontend_index" >&2
+            exit 1
+          }
+          frontend_amd64=$(platform_digest "$frontend_repo@$frontend_index" linux/amd64)
+          frontend_arm64=$(platform_digest "$frontend_repo@$frontend_index" linux/arm64)
+
+          jq -n \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg git_sha "$RELEASE_SHA" \
+            --slurpfile inputs dist/release/inputs.json \
+            --arg build_invocation "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
+            --arg frontend_repo "$frontend_repo" \
+            --arg frontend_index "$frontend_index" \
+            --arg frontend_amd64 "$frontend_amd64" \
+            --arg frontend_arm64 "$frontend_arm64" \
+            --arg runtime_base_repo "$runtime_base_repo" \
+            --arg runtime_base_index "$runtime_base_index" \
+            --arg runtime_base_amd64 "$runtime_base_amd64" \
+            --arg runtime_base_arm64 "$runtime_base_arm64" \
+            --arg materializer_repo "$materializer_repo" \
+            --arg materializer_index "$materializer_index" \
+            --arg materializer_amd64 "$materializer_amd64" \
+            --arg materializer_arm64 "$materializer_arm64" \
+            '{
+              schema_version: "dalec-homebrew-release-digests/v1",
+              source: {
+                tag: $release_tag,
+                git_sha: $git_sha,
+                source_date_epoch: $inputs[0].source_date_epoch,
+                build_invocation: $build_invocation
+              },
+              components: {
+                frontend: {
+                  repository: $frontend_repo,
+                  index: $frontend_index,
+                  platforms: {
+                    "linux/amd64": $frontend_amd64,
+                    "linux/arm64": $frontend_arm64
+                  }
+                },
+                "runtime-base": {
+                  repository: $runtime_base_repo,
+                  index: $runtime_base_index,
+                  platforms: {
+                    "linux/amd64": $runtime_base_amd64,
+                    "linux/arm64": $runtime_base_arm64
+                  }
+                },
+                materializer: {
+                  repository: $materializer_repo,
+                  index: $materializer_index,
+                  platforms: {
+                    "linux/amd64": $materializer_amd64,
+                    "linux/arm64": $materializer_arm64
+                  }
+                }
+              }
+            }' > dist/release/digests.json
+
+          jq . dist/release/digests.json
+
+      - name: Generate and verify component manifest
+        run: |
+          set -euo pipefail
+          ref() {
+            local component=$1 kind=$2 platform=${3:-}
+            if [[ "$kind" == index ]]; then
+              jq -er --arg component "$component" '.components[$component].repository + "@" + .components[$component].index' dist/release/digests.json
+            else
+              jq -er --arg component "$component" --arg platform "$platform" '.components[$component].repository + "@" + .components[$component].platforms[$platform]' dist/release/digests.json
+            fi
+          }
+
+          go run ./cmd/release-manifest \
+            --frontend-index "$(ref frontend index)" \
+            --frontend-amd64 "$(ref frontend child linux/amd64)" \
+            --frontend-arm64 "$(ref frontend child linux/arm64)" \
+            --runtime-base-index "$(ref runtime-base index)" \
+            --runtime-base-amd64 "$(ref runtime-base child linux/amd64)" \
+            --runtime-base-arm64 "$(ref runtime-base child linux/arm64)" \
+            --materializer-index "$(ref materializer index)" \
+            --materializer-amd64 "$(ref materializer child linux/amd64)" \
+            --materializer-arm64 "$(ref materializer child linux/arm64)" \
+            --homebrew-commit "$(jq -er .homebrew_commit dist/release/inputs.json)" \
+            --portable-ruby-version "$(jq -er .portable_ruby_version dist/release/inputs.json)" \
+            --verification-keys-digest "$(jq -er .verification_keys_digest dist/release/inputs.json)" \
+            --dalec-module "$(jq -er .dalec_module dist/release/inputs.json)" \
+            --buildkit-module "$(jq -er .buildkit_module dist/release/inputs.json)" \
+            --output dist/release/components.json
+
+          go run ./cmd/release-verify dist/release/components.json \
+            | tee dist/release/components.digest
+
+      - name: Upload immutable build tuple
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-build
+          path: dist/release
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  integration:
+    name: Integration test (${{ matrix.platform }})
+    needs: [prepare, build]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            slug: linux-amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            slug: linux-arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Download immutable build tuple
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-build
+          path: dist/release
+
+      - name: Install checksum-pinned Buildx
+        run: *install-buildx
+
+      - name: Set up Docker Buildx
+        run: *setup-buildx
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and test a runtime from the released tuple
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          PLATFORM_SLUG: ${{ matrix.slug }}
+        run: |
+          set -euo pipefail
+          builder="${GITHUB_JOB//_/-}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          component_ref() {
+            local component=$1 platform=${2:-}
+            jq -er --arg component "$component" --arg platform "$platform" '
+              .components[$component].repository + "@" +
+              (if $platform == "" then .components[$component].index else .components[$component].platforms[$platform] end)
+            ' dist/release/digests.json
+          }
+
+          runtime_base_ref=$(component_ref runtime-base)
+          materializer_ref=$(component_ref materializer)
+          frontend_ref=$(component_ref frontend "$PLATFORM")
+          source_date_epoch=$(jq -er .source.source_date_epoch dist/release/digests.json)
+
+          read -r -a specs <<< "$RELEASE_SPECS"
+          (( ${#specs[@]} > 0 ))
+          mkdir -p runtime-evidence
+          for spec in "${specs[@]}"; do
+            final_image="dalec-homebrew-live:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${PLATFORM_SLUG}-${spec}"
+            DALEC_HOMEBREW_LIVE_BUILDER="$builder" \
+            DALEC_HOMEBREW_LIVE_PLATFORM="$PLATFORM" \
+            DALEC_HOMEBREW_LIVE_SPEC="examples/${spec}.yaml" \
+            DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF="$runtime_base_ref" \
+            DALEC_HOMEBREW_LIVE_MATERIALIZER_REF="$materializer_ref" \
+            DALEC_HOMEBREW_LIVE_FRONTEND_REF="$frontend_ref" \
+            DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH="$source_date_epoch" \
+            DALEC_HOMEBREW_LIVE_IMAGE="$final_image" \
+            DALEC_HOMEBREW_LIVE_OUTPUT=load \
+            DALEC_HOMEBREW_LIVE_PROGRESS=plain \
+              ./scripts/live-test.sh
+
+            evidence_root="runtime-evidence/${spec}"
+            mkdir -p "$evidence_root"
+            container=$(docker create --platform "$PLATFORM" "$final_image")
+            docker cp "$container:/usr/share/dalec-homebrew/." "$evidence_root/"
+            docker rm -v "$container" >/dev/null
+            tar \
+              --sort=name \
+              --mtime="@${source_date_epoch}" \
+              --owner=0 \
+              --group=0 \
+              --numeric-owner \
+              --format=ustar \
+              -C "$evidence_root" \
+              -cf - . \
+              | gzip -n > "runtime-evidence-${PLATFORM_SLUG}-${spec}.tar.gz"
+          done
+
+      - name: Upload runtime evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-evidence-${{ matrix.slug }}
+          path: runtime-evidence-${{ matrix.slug }}-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  evidence:
+    name: Evidence (${{ matrix.component }}, ${{ matrix.platform }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: frontend
+            platform: linux/amd64
+            slug: frontend-linux-amd64
+          - component: frontend
+            platform: linux/arm64
+            slug: frontend-linux-arm64
+          - component: runtime-base
+            platform: linux/amd64
+            slug: runtime-base-linux-amd64
+          - component: runtime-base
+            platform: linux/arm64
+            slug: runtime-base-linux-arm64
+          - component: materializer
+            platform: linux/amd64
+            slug: materializer-linux-amd64
+          - component: materializer
+            platform: linux/arm64
+            slug: materializer-linux-arm64
+    steps:
+      - name: Download immutable build tuple
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-build
+          path: dist/release
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve immutable subject
+        id: subject
+        env:
+          COMPONENT: ${{ matrix.component }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          repository=$(jq -er --arg component "$COMPONENT" '.components[$component].repository' dist/release/digests.json)
+          digest=$(jq -er --arg component "$COMPONENT" --arg platform "$PLATFORM" '.components[$component].platforms[$platform]' dist/release/digests.json)
+          echo "ref=$repository@$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SPDX SBOM
+        env:
+          SUBJECT: ${{ steps.subject.outputs.ref }}
+          PLATFORM: ${{ matrix.platform }}
+          SLUG: ${{ matrix.slug }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          docker_config=${DOCKER_CONFIG:-$HOME/.docker}
+          test -f "$docker_config/config.json"
+          docker run --rm \
+            --volume "$docker_config:/root/.docker:ro" \
+            --volume "$PWD/evidence:/evidence" \
+            "$SYFT_IMAGE" scan --platform "$PLATFORM" "$SUBJECT" \
+            -o "spdx-json=/evidence/sbom-${SLUG}.spdx.json"
+
+      - name: Scan for fixed critical vulnerabilities
+        env:
+          SUBJECT: ${{ steps.subject.outputs.ref }}
+          PLATFORM: ${{ matrix.platform }}
+          SLUG: ${{ matrix.slug }}
+        run: |
+          set -euo pipefail
+          docker_config=${DOCKER_CONFIG:-$HOME/.docker}
+          test -f "$docker_config/config.json"
+          docker run --rm \
+            --volume "$docker_config:/root/.docker:ro" \
+            --volume "$PWD/evidence:/evidence" \
+            "$TRIVY_IMAGE" image \
+            --platform "$PLATFORM" \
+            --scanners vuln \
+            --format json \
+            --output "/evidence/vulnerability-${SLUG}.json" \
+            --severity CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --no-progress \
+            --skip-version-check \
+            "$SUBJECT"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: evidence-${{ matrix.slug }}
+          path: evidence
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true
+
+  sign:
+    name: Sign and attest immutable tuple
+    needs: [prepare, release_target, build, integration, evidence]
+    if: needs.release_target.outputs.state == 'absent'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+    steps:
+      - name: Install checksum-pinned Buildx
+        run: *install-buildx
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.2
+
+      - name: Download immutable build tuple
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-build
+          path: dist/release
+
+      - name: Download platform evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: evidence-*
+          path: dist/release/evidence
+          merge-multiple: true
+
+      - name: Download runtime evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: runtime-evidence-*
+          path: dist/release/runtime-evidence
+          merge-multiple: true
+
+      - name: Validate runtime evidence and metadata snapshot
+        run: &validate-runtime-evidence |
+          set -euo pipefail
+          read -r -a specs <<< "$RELEASE_SPECS"
+          (( ${#specs[@]} > 0 ))
+          runtime_evidence_dir=dist/release
+          [[ -d dist/release/runtime-evidence ]] && runtime_evidence_dir=dist/release/runtime-evidence
+
+          extract_resolution() {
+            python3 - "$1" "$2" <<'PYARCHIVE'
+          import json
+          import os
+          from pathlib import Path
+          import posixpath
+          import resource
+          import sys
+          import tempfile
+          import unicodedata
+          import zlib
+
+          max_archive_bytes = int(os.environ["MAX_RELEASE_ASSET_BYTES"])
+          max_expanded_bytes = int(os.environ["MAX_RUNTIME_EVIDENCE_EXPANDED_BYTES"])
+          max_members = 100_000
+          max_resolution_bytes = 16 << 20
+          archive_path = Path(sys.argv[1])
+          output_path = Path(sys.argv[2])
+          if sys.platform == "linux":
+              memory_limit = 512 << 20
+              resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
+
+          def read_exact(source, size):
+              chunks = []
+              remaining = size
+              while remaining:
+                  chunk = source.read(remaining)
+                  if not chunk:
+                      raise ValueError("archive is truncated")
+                  chunks.append(chunk)
+                  remaining -= len(chunk)
+              return b"".join(chunks)
+
+          def read_block(source):
+              first = source.read(512)
+              if not first:
+                  return None
+              if len(first) == 512:
+                  return first
+              return first + read_exact(source, 512 - len(first))
+
+          def skip_exact(source, size):
+              remaining = size
+              while remaining:
+                  chunk = source.read(min(1 << 20, remaining))
+                  if not chunk:
+                      raise ValueError("archive is truncated")
+                  remaining -= len(chunk)
+
+          def parse_octal(field, label):
+              if field and field[0] & 0x80:
+                  raise ValueError(f"archive {label} uses an unsupported base-256 value")
+              value = field.strip(b" \0")
+              if not value:
+                  return 0
+              if any(byte < ord("0") or byte > ord("7") for byte in value):
+                  raise ValueError(f"archive {label} is not octal")
+              return int(value, 8)
+
+          def decode_field(field, label):
+              value, separator, padding = field.partition(b"\0")
+              if separator and any(byte not in (0, 32) for byte in padding):
+                  raise ValueError(f"archive {label} has nonzero bytes after NUL")
+              try:
+                  return value.decode("utf-8")
+              except UnicodeDecodeError as exc:
+                  raise ValueError(f"archive {label} is not UTF-8") from exc
+
+          def validate_header(block):
+              stored_checksum = parse_octal(block[148:156], "checksum")
+              checksum_block = bytearray(block)
+              checksum_block[148:156] = b" " * 8
+              if sum(checksum_block) != stored_checksum:
+                  raise ValueError("archive header checksum is invalid")
+              if block[257:263] != b"ustar\0" or block[263:265] != b"00":
+                  raise ValueError("archive member is not POSIX USTAR")
+              if any(block[500:512]):
+                  raise ValueError("archive USTAR reserved header padding is nonzero")
+              name = decode_field(block[0:100], "name")
+              prefix = decode_field(block[345:500], "prefix")
+              path = f"{prefix}/{name}" if prefix else name
+              size = parse_octal(block[124:136], "size")
+              typeflag = block[156:157]
+              linkname = decode_field(block[157:257], "linkname")
+              return path, size, typeflag, linkname
+
+          def validate_member(path, size, typeflag, linkname):
+              if len(path) > 4096 or not path:
+                  raise ValueError("archive member path length is invalid")
+              if any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in path) or "\\" in path:
+                  raise ValueError("archive member name contains unsafe characters")
+              if posixpath.isabs(path):
+                  raise ValueError(f"archive contains absolute member path {path!r}")
+              normalized = posixpath.normpath(path)
+              if normalized == ".." or normalized.startswith("../"):
+                  raise ValueError(f"archive member escapes the root: {path!r}")
+              canonical = "." if normalized == "." else "./" + normalized
+              is_directory = typeflag == b"5"
+              is_regular = typeflag in {b"0", b"\0"}
+              if not (is_directory or is_regular):
+                  raise ValueError(f"archive member has unsafe type {typeflag!r}")
+              if is_directory:
+                  allowed_paths = {canonical, "./"} if canonical == "." else {canonical, canonical + "/"}
+                  if path not in allowed_paths:
+                      raise ValueError(f"archive uses noncanonical member path {path!r}")
+              elif path != canonical:
+                  raise ValueError(f"archive uses noncanonical member path {path!r}")
+              if is_regular and canonical == ".":
+                  raise ValueError("archive root must be a directory")
+              if is_directory and size != 0:
+                  raise ValueError("archive directory has a nonzero size")
+              if linkname:
+                  raise ValueError("archive member has an unexpected link target")
+              return normalized, is_regular
+
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON member {key!r}")
+                  result[key] = value
+              return result
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant {value}")
+
+          try:
+              archive_size = archive_path.stat().st_size
+              if archive_size <= 0 or archive_size > max_archive_bytes:
+                  raise ValueError(f"archive size {archive_size} is outside the allowed range")
+              resolution = None
+              member_count = 0
+              total_size = 0
+              with tempfile.TemporaryFile() as uncompressed:
+                  decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                  expanded_size = 0
+                  with archive_path.open("rb") as compressed:
+                      while True:
+                          chunk = compressed.read(1 << 20)
+                          if not chunk:
+                              break
+                          while chunk:
+                              remaining = max_expanded_bytes - expanded_size
+                              data = decompressor.decompress(chunk, min(1 << 20, remaining + 1))
+                              if data:
+                                  uncompressed.write(data)
+                                  expanded_size += len(data)
+                                  if expanded_size > max_expanded_bytes:
+                                      raise ValueError("archive expansion exceeds the limit")
+                              if decompressor.unused_data:
+                                  raise ValueError("archive contains trailing or concatenated gzip data")
+                              chunk = decompressor.unconsumed_tail
+                              if decompressor.eof:
+                                  if chunk or compressed.read(1):
+                                      raise ValueError("archive contains trailing or concatenated gzip data")
+                                  break
+                          if decompressor.eof:
+                              break
+                  if not decompressor.eof:
+                      raise ValueError("archive gzip stream is truncated")
+                  flushed = decompressor.flush()
+                  if flushed:
+                      uncompressed.write(flushed)
+                      expanded_size += len(flushed)
+                      if expanded_size > max_expanded_bytes:
+                          raise ValueError("archive expansion exceeds the limit")
+                  uncompressed.seek(0)
+                  zero_blocks = 0
+                  while True:
+                      block = read_block(uncompressed)
+                      if block is None:
+                          if zero_blocks < 2:
+                              raise ValueError("archive is missing the canonical two-block end marker")
+                          break
+                      if block == bytes(512):
+                          zero_blocks += 1
+                          continue
+                      if zero_blocks:
+                          raise ValueError("archive contains nonzero data after the tar end marker")
+                      member_count += 1
+                      if member_count > max_members:
+                          raise ValueError("archive contains too many members")
+                      path, size, typeflag, linkname = validate_header(block)
+                      normalized, is_regular = validate_member(path, size, typeflag, linkname)
+                      total_size += size
+                      if total_size > max_expanded_bytes:
+                          raise ValueError("archive expansion exceeds the limit")
+                      if normalized == "resolution.json":
+                          if path != "./resolution.json" or not is_regular:
+                              raise ValueError(f"archive uses noncanonical resolution path {path!r}")
+                          if resolution is not None:
+                              raise ValueError("archive contains duplicate ./resolution.json members")
+                          if size <= 0 or size > max_resolution_bytes:
+                              raise ValueError("archive resolution.json is not a bounded regular file")
+                          resolution = read_exact(uncompressed, size)
+                      else:
+                          skip_exact(uncompressed, size)
+                      padding = (-size) % 512
+                      if padding and any(read_exact(uncompressed, padding)):
+                          raise ValueError("archive member padding is nonzero")
+              if resolution is None:
+                  raise ValueError("archive is missing ./resolution.json")
+              json.loads(
+                  resolution.decode("utf-8"),
+                  object_pairs_hook=unique_object,
+                  parse_constant=reject_constant,
+              )
+              output_path.write_bytes(resolution)
+          except (EOFError, MemoryError, OSError, UnicodeError, ValueError, zlib.error) as exc:
+              raise SystemExit(f"{archive_path}: invalid runtime evidence: {exc}")
+          PYARCHIVE
+          }
+
+          verify_resolution_epoch() {
+            python3 - "$1" <<'PYEPOCH'
+          from datetime import datetime
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              record = json.load(source)
+          generated_at = record["metadata"]["generated_at"]
+          parsed = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+          if parsed.tzinfo is None:
+              raise SystemExit("resolution metadata generated_at has no timezone")
+          if record["source_date_epoch"] != int(parsed.timestamp()):
+              raise SystemExit("resolution source_date_epoch does not match metadata generated_at")
+          PYEPOCH
+          }
+
+          metadata_filter='
+            def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
+            def allowed_metadata_keys: [
+              "digest", "fetched_at", "formula_digest", "formula_envelope_digest",
+              "formula_freshness_source", "formula_signatures", "formula_url",
+              "generated_at", "migration_digest", "migration_envelope_digest",
+              "migration_freshness_source", "migration_signatures", "migration_url",
+              "signatures"
+            ];
+            if .schema_version != "dalec-homebrew-resolution/v1" then
+              error("unexpected resolution schema")
+            elif (.metadata | type) != "object" then
+              error("resolution metadata is missing")
+            elif ((.metadata | keys) - allowed_metadata_keys | length) != 0 then
+              error("resolution metadata has unknown fields")
+            elif ([.metadata.digest, .metadata.formula_digest, .metadata.migration_digest, .metadata.formula_envelope_digest, .metadata.migration_envelope_digest] | all(sha256)) | not then
+              error("resolution metadata digests are missing or invalid")
+            elif (.metadata.generated_at | type) != "string" or (.metadata.generated_at | length) == 0 then
+              error("resolution metadata generated_at is missing")
+            elif (.metadata.fetched_at | type) != "string" or (.metadata.fetched_at | length) == 0 then
+              error("resolution metadata fetched_at is missing")
+            elif ([.metadata.formula_freshness_source, .metadata.migration_freshness_source] | all(. == "signed-payload" or . == "http-last-modified")) | not then
+              error("resolution metadata freshness source is invalid")
+            elif (.metadata.formula_url | type) != "string" or (.metadata.formula_url | length) == 0 then
+              error("resolution Formula URL is missing")
+            elif (.metadata.migration_url | type) != "string" or (.metadata.migration_url | length) == 0 then
+              error("resolution migration URL is missing")
+            elif ([.metadata.signatures, .metadata.formula_signatures, .metadata.migration_signatures] | all(. == null or type == "array")) | not then
+              error("resolution metadata signatures are malformed")
+            else
+              {metadata: (.metadata | del(.fetched_at, .signatures, .formula_signatures, .migration_signatures))}
+            end
+          '
+
+          # jq variables are intentionally literal in the single-quoted filter.
+          # shellcheck disable=SC2016
+          resolution_binding_filter='
+            .schema_version == "dalec-homebrew-resolution/v1" and
+            .input.platform.os == ($platform | split("/")[0]) and
+            .input.platform.architecture == ($platform | split("/")[1]) and
+            (((.input.platform | keys) == ["architecture", "os"]) or
+             (((.input.platform | keys) == ["architecture", "os", "variant"]) and
+              ((.input.platform.variant | type) == "string") and
+              .input.platform.variant == "")) and
+            .policy_version == $manifest[0].policy_version and
+            .components.frontend_ref == $frontend and
+            .components.runtime_base_ref == $runtime_base and
+            .components.materializer_ref == $materializer and
+            .components.homebrew_commit == $inputs[0].homebrew_commit and
+            .components.ruby_runtime == $inputs[0].portable_ruby_version and
+            .components.verification_keys_digest == $inputs[0].verification_keys_digest and
+            .components.dalec_module == $inputs[0].dalec_module and
+            .components.buildkit_module == $inputs[0].buildkit_module
+          '
+
+          for spec in "${specs[@]}"; do
+            for platform in linux/amd64 linux/arm64; do
+              platform_slug=${platform//\//-}
+              archive="$runtime_evidence_dir/runtime-evidence-${platform_slug}-${spec}.tar.gz"
+              test -s "$archive"
+              frontend_ref=$(jq -er --arg platform "$platform" '.components.frontend.repository + "@" + .components.frontend.platforms[$platform]' dist/release/digests.json)
+              runtime_base_ref=$(jq -er --arg platform "$platform" '.components["runtime-base"].repository + "@" + .components["runtime-base"].platforms[$platform]' dist/release/digests.json)
+              materializer_ref=$(jq -er --arg platform "$platform" '.components.materializer.repository + "@" + .components.materializer.platforms[$platform]' dist/release/digests.json)
+              resolution="$RUNNER_TEMP/${spec}-${platform_slug}-resolution.json"
+              extract_resolution "$archive" "$resolution"
+              jq -e \
+                --arg platform "$platform" \
+                --arg frontend "$frontend_ref" \
+                --arg runtime_base "$runtime_base_ref" \
+                --arg materializer "$materializer_ref" \
+                --slurpfile manifest dist/release/components.json \
+                --slurpfile inputs dist/release/inputs.json \
+                "$resolution_binding_filter" "$resolution" >/dev/null
+              verify_resolution_epoch "$resolution"
+              jq -S -e "$metadata_filter" "$resolution" \
+                > "$RUNNER_TEMP/${spec}-${platform_slug#linux-}-metadata.json"
+            done
+            diff -u \
+              "$RUNNER_TEMP/${spec}-amd64-metadata.json" \
+              "$RUNNER_TEMP/${spec}-arm64-metadata.json"
+          done
+
+          reference="$RUNNER_TEMP/${specs[0]}-amd64-metadata.json"
+          for spec in "${specs[@]:1}"; do
+            diff -u "$reference" "$RUNNER_TEMP/${spec}-amd64-metadata.json"
+          done
+          candidate="$RUNNER_TEMP/metadata-snapshot-candidate.json"
+          jq -n \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg release_sha "$RELEASE_SHA" \
+            --slurpfile snapshot "$reference" \
+            '{
+              schema_version: "dalec-homebrew-release-metadata/v1",
+              release: {tag: $release_tag, sha: $release_sha},
+              accepted_snapshot: $snapshot[0].metadata
+            }' > "$candidate"
+          if [[ -e dist/release/metadata-snapshot.json ]]; then
+            diff -u dist/release/metadata-snapshot.json "$candidate"
+          else
+            mv "$candidate" dist/release/metadata-snapshot.json
+          fi
+
+      - name: Validate vulnerability reports
+        run: &validate-vulnerability-reports |
+          set -euo pipefail
+          evidence_dir=dist/release
+          [[ -d dist/release/evidence ]] && evidence_dir=dist/release/evidence
+          report_args=()
+          for component in frontend runtime-base materializer; do
+            for platform in linux/amd64 linux/arm64; do
+              slug=${platform//\//-}
+              report="$evidence_dir/vulnerability-${component}-${slug}.json"
+              test -s "$report"
+              subject=$(jq -er --arg component "$component" --arg platform "$platform" \
+                '.components[$component].repository + "@" + .components[$component].platforms[$platform]' \
+                dist/release/digests.json)
+              report_args+=("$report" "$subject")
+            done
+          done
+          python3 - "${report_args[@]}" <<'PYVULN'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          max_bytes = int(os.environ["MAX_RELEASE_ASSET_BYTES"])
+
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON member {key!r}")
+                  result[key] = value
+              return result
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant {value}")
+
+          if (len(sys.argv) - 1) % 2 != 0:
+              raise SystemExit("vulnerability validator requires report/subject pairs")
+
+          for index in range(1, len(sys.argv), 2):
+              path = Path(sys.argv[index])
+              expected_subject = sys.argv[index + 1]
+              try:
+                  size = path.stat().st_size
+                  if size <= 0 or size > max_bytes:
+                      raise ValueError(f"report size {size} is outside the allowed range")
+                  with path.open("rb") as source:
+                      data = source.read(max_bytes + 1)
+                  if len(data) != size or len(data) > max_bytes:
+                      raise ValueError("report size changed or exceeded the limit while reading")
+                  document = json.loads(
+                      data.decode("utf-8"),
+                      object_pairs_hook=unique_object,
+                      parse_constant=reject_constant,
+                  )
+                  if not isinstance(document, dict) or document.get("SchemaVersion") != 2:
+                      raise ValueError("unexpected Trivy schema")
+                  if document.get("ArtifactName") != expected_subject:
+                      raise ValueError("Trivy ArtifactName does not match the expected subject")
+                  if document.get("ArtifactType") != "container_image":
+                      raise ValueError("Trivy ArtifactType is not container_image")
+                  metadata = document.get("Metadata")
+                  if not isinstance(metadata, dict):
+                      raise ValueError("Trivy Metadata is not an object")
+                  repo_digests = metadata.get("RepoDigests")
+                  if not isinstance(repo_digests, list) or expected_subject not in repo_digests:
+                      raise ValueError("Trivy RepoDigests does not contain the expected subject")
+                  results = document.get("Results")
+                  if not isinstance(results, list) or not results:
+                      raise ValueError("Trivy Results is not a nonempty array")
+                  for result in results:
+                      if not isinstance(result, dict):
+                          raise ValueError("Trivy result is not an object")
+                      if not isinstance(result.get("Target"), str) or not result["Target"]:
+                          raise ValueError("Trivy result Target is missing")
+                      vulnerabilities = result.get("Vulnerabilities")
+                      if vulnerabilities is None:
+                          continue
+                      if not isinstance(vulnerabilities, list):
+                          raise ValueError("Trivy Vulnerabilities is not an array")
+                      if vulnerabilities:
+                          raise ValueError("report contains a fixed critical vulnerability")
+              except (OSError, UnicodeError, ValueError) as exc:
+                  raise SystemExit(f"{path}: invalid vulnerability report: {exc}")
+          PYVULN
+
+      - name: Generate SLSA provenance predicate
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          workflow_git_ref=${WORKFLOW_REF##*@}
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg sha "$RELEASE_SHA" \
+            --arg tag "$RELEASE_TAG" \
+            --arg workflow_ref "$workflow_git_ref" \
+            --arg workflow_sha "$WORKFLOW_SHA" \
+            --slurpfile digests dist/release/digests.json \
+            --slurpfile inputs dist/release/inputs.json \
+            '{
+              builder: {id: "https://github.com/actions/runner"},
+              buildType: "https://github.com/" + $repository + "/.github/workflows/release.yml@v1",
+              invocation: {
+                configSource: {
+                  uri: "git+https://github.com/" + $repository + "@" + $workflow_ref,
+                  digest: {sha1: $workflow_sha},
+                  entryPoint: ".github/workflows/release.yml"
+                },
+                parameters: {
+                  tag: $tag,
+                  source_date_epoch: $inputs[0].source_date_epoch,
+                  buildx_version: env.BUILDX_VERSION,
+                  buildx_sha256_amd64: env.BUILDX_SHA256_AMD64,
+                  buildx_sha256_arm64: env.BUILDX_SHA256_ARM64,
+                  buildkit_image: env.BUILDKIT_IMAGE,
+                  binfmt_image: env.BINFMT_IMAGE,
+                  syft_image: env.SYFT_IMAGE,
+                  trivy_image: env.TRIVY_IMAGE,
+                  workflow_ref: $workflow_ref,
+                  workflow_sha: $workflow_sha
+                },
+                environment: {}
+              },
+              metadata: {
+                buildInvocationId: $digests[0].source.build_invocation,
+                completeness: {parameters: false, environment: false, materials: false},
+                reproducible: false
+              },
+              materials: [{
+                uri: "git+https://github.com/" + $repository + "@refs/tags/" + $tag,
+                digest: {sha1: $sha}
+              }]
+            }' > dist/release/provenance.json
+
+      - name: Validate release tuple before signing
+        run: &validate-release-tuple |
+          set -euo pipefail
+
+          python3 - \
+            dist/release/components.json \
+            dist/release/metadata-snapshot.json \
+            dist/release/inputs.json \
+            dist/release/digests.json \
+            dist/release/provenance.json <<'PYJSON'
+          import json
+          from pathlib import Path
+          import sys
+
+          max_bytes = 4 << 20
+
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON member {key!r}")
+                  result[key] = value
+              return result
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant {value}")
+
+          for raw_path in sys.argv[1:]:
+              path = Path(raw_path)
+              try:
+                  size = path.stat().st_size
+                  if size <= 0 or size > max_bytes:
+                      raise ValueError(f"record size {size} is outside the allowed range")
+                  with path.open("rb") as source:
+                      data = source.read(max_bytes + 1)
+                  if len(data) != size or len(data) > max_bytes:
+                      raise ValueError("record size changed or exceeded the limit while reading")
+                  json.loads(
+                      data.decode("utf-8"),
+                      object_pairs_hook=unique_object,
+                      parse_constant=reject_constant,
+                  )
+              except (OSError, UnicodeError, ValueError) as exc:
+                  raise SystemExit(f"{path}: invalid strict JSON: {exc}")
+          PYJSON
+
+          jq -e '
+            def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
+            def hex256: type == "string" and test("^[0-9a-f]{64}$");
+            def pinned: type == "string" and test("^[^[:space:]@]+@sha256:[0-9a-f]{64}$");
+            (keys == ["builder", "buildkit_module", "dalec_module",
+              "homebrew_archive_sha256", "homebrew_commit", "portable_ruby_version",
+              "schema_version", "source_date_epoch", "ubuntu_base", "ubuntu_snapshot",
+              "verification_keys_digest"]) and
+            .schema_version == "dalec-homebrew-release-inputs/v1" and
+            (.source_date_epoch | type == "string" and test("^[0-9]+$")) and
+            (.ubuntu_snapshot | type == "string" and test("^[0-9]{8}T[0-9]{6}Z$")) and
+            ((.ubuntu_base | keys) == ["linux/amd64", "linux/arm64"]) and
+            all(.ubuntu_base[]; pinned) and
+            ((.builder | keys) == ["chisel_releases_commit", "chisel_releases_sha256",
+              "chisel_sha256", "chisel_version", "dockerfile_frontend", "go_image"]) and
+            (.builder.dockerfile_frontend | pinned) and
+            (.builder.go_image | pinned) and
+            (.builder.chisel_version | type == "string" and length > 0) and
+            (.builder.chisel_releases_commit | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.builder.chisel_releases_sha256 | hex256) and
+            ((.builder.chisel_sha256 | keys) == ["amd64", "arm64"]) and
+            all(.builder.chisel_sha256[]; hex256) and
+            (.homebrew_commit | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.homebrew_archive_sha256 | hex256) and
+            (.portable_ruby_version | type == "string" and length > 0) and
+            (.verification_keys_digest | sha256) and
+            (.dalec_module | type == "string" and length > 0) and
+            (.buildkit_module | type == "string" and length > 0)
+          ' dist/release/inputs.json >/dev/null
+          source_date_epoch=$(jq -er .source_date_epoch dist/release/inputs.json)
+          expected_snapshot=$(date -u --date="@$source_date_epoch" +%Y%m%dT%H%M%SZ)
+          [[ "$expected_snapshot" == "$(jq -er .ubuntu_snapshot dist/release/inputs.json)" ]] || {
+            echo "release input timestamp does not match the Ubuntu snapshot" >&2
+            exit 1
+          }
+
+          jq -e \
+            --arg tag "$RELEASE_TAG" \
+            --arg sha "$RELEASE_SHA" \
+            --arg frontend "$REGISTRY_NAMESPACE/dalec-homebrew" \
+            --arg runtime_base "$REGISTRY_NAMESPACE/dalec-homebrew-runtime-base" \
+            --arg materializer "$REGISTRY_NAMESPACE/dalec-homebrew-materializer" \
+            --slurpfile inputs dist/release/inputs.json '
+            def digest: type == "string" and test("^sha256:[0-9a-f]{64}$");
+            .schema_version == "dalec-homebrew-release-digests/v1" and
+            .source.tag == $tag and
+            .source.git_sha == $sha and
+            .source.source_date_epoch == $inputs[0].source_date_epoch and
+            (.components | keys) == ["frontend", "materializer", "runtime-base"] and
+            .components.frontend.repository == $frontend and
+            .components["runtime-base"].repository == $runtime_base and
+            .components.materializer.repository == $materializer and
+            all(.components[];
+              (.index | digest) and
+              ((.platforms | keys) == ["linux/amd64", "linux/arm64"]) and
+              all(.platforms[]; digest))
+          ' dist/release/digests.json >/dev/null
+
+          platform_digest() {
+            local ref=$1 platform=$2 os arch
+            os=${platform%/*}
+            arch=${platform#*/}
+            docker buildx imagetools inspect --raw "$ref" \
+              | jq -er --arg os "$os" --arg arch "$arch" '
+                  .manifests as $manifests
+                  | if (($manifests | length) == 2 and
+                        ([$manifests[] | .platform.os + "/" + .platform.architecture] | sort) ==
+                          ["linux/amd64", "linux/arm64"]) then
+                      $manifests
+                    else
+                      error("expected exactly the linux/amd64 and linux/arm64 platform children")
+                    end
+                  | [.[] | select(.platform.os == $os and .platform.architecture == $arch)]
+                  | if length == 1 then .[0].digest else error("expected exactly one platform child") end
+                  | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))
+                '
+          }
+          for component in frontend runtime-base materializer; do
+            repository=$(jq -er --arg component "$component" '.components[$component].repository' dist/release/digests.json)
+            index=$(jq -er --arg component "$component" '.components[$component].index' dist/release/digests.json)
+            for platform in linux/amd64 linux/arm64; do
+              recorded=$(jq -er --arg component "$component" --arg platform "$platform" '.components[$component].platforms[$platform]' dist/release/digests.json)
+              actual=$(platform_digest "$repository@$index" "$platform")
+              [[ "$actual" == "$recorded" ]] || {
+                echo "$component $platform child $actual does not match recorded digest $recorded" >&2
+                exit 1
+              }
+            done
+          done
+
+          python3 - dist/release/components.json dist/release/components.digest <<'PYCOMPONENTS'
+          import hashlib
+          import json
+          import sys
+
+          manifest_path, digest_path = sys.argv[1:]
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant {value!r}")
+
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON member {key!r}")
+                  result[key] = value
+              return result
+
+          def exact_keys(value, expected, label):
+              if not isinstance(value, dict) or set(value) != set(expected):
+                  raise ValueError(f"{label} has unexpected fields")
+
+          def require_string(value, label):
+              if not isinstance(value, str):
+                  raise ValueError(f"{label} is not a string")
+              return value
+
+          def canonical_platform_ref(value):
+              exact_keys(value, ("platform", "ref"), "platform reference")
+              platform = value["platform"]
+              exact_keys(platform, ("os", "architecture", "variant"), "platform") if "variant" in platform else exact_keys(platform, ("os", "architecture"), "platform")
+              canonical_platform = {
+                  "os": require_string(platform["os"], "platform.os"),
+                  "architecture": require_string(platform["architecture"], "platform.architecture"),
+              }
+              if "variant" in platform:
+                  variant = require_string(platform["variant"], "platform.variant")
+                  if variant:
+                      canonical_platform["variant"] = variant
+              return {
+                  "platform": canonical_platform,
+                  "ref": require_string(value["ref"], "platform reference ref"),
+              }
+
+          def canonical_component(value, label):
+              exact_keys(value, ("index", "platforms"), label)
+              if not isinstance(value["platforms"], list):
+                  raise ValueError(f"{label}.platforms is not an array")
+              platforms = [canonical_platform_ref(item) for item in value["platforms"]]
+              platforms.sort(key=lambda item: (
+                  item["platform"]["os"],
+                  item["platform"]["architecture"],
+                  item["platform"].get("variant", ""),
+              ))
+              return {
+                  "index": require_string(value["index"], f"{label}.index"),
+                  "platforms": platforms,
+              }
+
+          raw = open(manifest_path, "rb").read(4 * 1024 * 1024 + 1)
+          if len(raw) > 4 * 1024 * 1024:
+              raise SystemExit("component manifest exceeds 4 MiB")
+          manifest = json.loads(
+              raw.decode("utf-8"),
+              object_pairs_hook=unique_object,
+              parse_constant=reject_constant,
+          )
+          top_keys = (
+              "schema_version", "policy_version", "frontend", "runtime_base",
+              "materializer", "homebrew_commit", "portable_ruby_version",
+              "verification_keys_digest", "dalec_module", "buildkit_module",
+          )
+          exact_keys(manifest, top_keys, "component manifest")
+          canonical_manifest = {
+              "schema_version": require_string(manifest["schema_version"], "schema_version"),
+              "policy_version": require_string(manifest["policy_version"], "policy_version"),
+              "frontend": canonical_component(manifest["frontend"], "frontend"),
+              "runtime_base": canonical_component(manifest["runtime_base"], "runtime_base"),
+              "materializer": canonical_component(manifest["materializer"], "materializer"),
+              "homebrew_commit": require_string(manifest["homebrew_commit"], "homebrew_commit"),
+              "portable_ruby_version": require_string(manifest["portable_ruby_version"], "portable_ruby_version"),
+              "verification_keys_digest": require_string(manifest["verification_keys_digest"], "verification_keys_digest"),
+              "dalec_module": require_string(manifest["dalec_module"], "dalec_module"),
+              "buildkit_module": require_string(manifest["buildkit_module"], "buildkit_module"),
+          }
+          canonical_text = json.dumps(
+              canonical_manifest,
+              ensure_ascii=False,
+              allow_nan=False,
+              separators=(",", ":"),
+          )
+          # release.Canonical disables HTML escaping, but encoding/json still
+          # escapes these two JavaScript line separators.
+          canonical_text = canonical_text.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+          canonical = canonical_text.encode("utf-8")
+          if raw != canonical:
+              raise SystemExit("components.json is not canonically encoded")
+          expected = ("sha256:" + hashlib.sha256(canonical).hexdigest() + "\n").encode("ascii")
+          actual = open(digest_path, "rb").read()
+          if actual != expected:
+              raise SystemExit("components.digest does not match canonical components.json")
+          PYCOMPONENTS
+          jq -e \
+            --slurpfile digests dist/release/digests.json \
+            --slurpfile inputs dist/release/inputs.json '
+            def component_matches($manifest; $name):
+              $digests[0].components[$name] as $component
+              | $manifest.index == ($component.repository + "@" + $component.index) and
+                ([$manifest.platforms[].platform | .os + "/" + .architecture] | sort) ==
+                  ["linux/amd64", "linux/arm64"] and
+                all($manifest.platforms[];
+                  (.platform.variant // "") == "" and
+                  .ref == ($component.repository + "@" +
+                    $component.platforms["linux/" + .platform.architecture]));
+            .schema_version == "dalec-homebrew-components/v1" and
+            .policy_version == "homebrew-runtime-v1" and
+            component_matches(.frontend; "frontend") and
+            component_matches(.runtime_base; "runtime-base") and
+            component_matches(.materializer; "materializer") and
+            .homebrew_commit == $inputs[0].homebrew_commit and
+            .portable_ruby_version == $inputs[0].portable_ruby_version and
+            .verification_keys_digest == $inputs[0].verification_keys_digest and
+            .dalec_module == $inputs[0].dalec_module and
+            .buildkit_module == $inputs[0].buildkit_module
+          ' dist/release/components.json >/dev/null
+
+          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+            def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
+            .schema_version == "dalec-homebrew-release-metadata/v1" and
+            .release.tag == $tag and
+            .release.sha == $sha and
+            (.accepted_snapshot | type) == "object" and
+            ([.accepted_snapshot.digest,
+              .accepted_snapshot.formula_digest,
+              .accepted_snapshot.migration_digest,
+              .accepted_snapshot.formula_envelope_digest,
+              .accepted_snapshot.migration_envelope_digest] | all(sha256)) and
+            (.accepted_snapshot.generated_at | type == "string" and length > 0) and
+            ([.accepted_snapshot.formula_freshness_source,
+              .accepted_snapshot.migration_freshness_source] |
+              all(. == "signed-payload" or . == "http-last-modified")) and
+            (.accepted_snapshot.formula_url | type == "string" and length > 0) and
+            (.accepted_snapshot.migration_url | type == "string" and length > 0)
+          ' dist/release/metadata-snapshot.json >/dev/null
+          python3 - dist/release/metadata-snapshot.json <<'PYTIME'
+          from datetime import datetime
+          import json
+          import re
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              document = json.load(source)
+          value = document["accepted_snapshot"]["generated_at"]
+          if not isinstance(value, str):
+              raise SystemExit("metadata generated_at is not a string")
+          match = re.fullmatch(
+              r"([0-9]{4})-([0-9]{2})-([0-9]{2})T"
+              r"([0-9]{2}):([0-9]{2}):([0-9]{2})"
+              r"(?:\.[0-9]+)?(Z|[+-]([0-9]{2}):([0-9]{2}))",
+              value,
+          )
+          if match is None:
+              raise SystemExit("metadata generated_at is not RFC3339")
+          year, month, day, hour, minute, second = map(int, match.groups()[:6])
+          if hour > 23 or minute > 59 or second > 59:
+              raise SystemExit("metadata generated_at has an invalid time")
+          datetime(year, month, day, hour, minute, second)
+          if match.group(7) != "Z":
+              if int(match.group(8)) > 23 or int(match.group(9)) > 59:
+                  raise SystemExit("metadata generated_at has an invalid offset")
+          PYTIME
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg tag "$RELEASE_TAG" \
+            --arg sha "$RELEASE_SHA" \
+            --slurpfile digests dist/release/digests.json \
+            --slurpfile inputs dist/release/inputs.json '
+            .builder.id == "https://github.com/actions/runner" and
+            .buildType == ("https://github.com/" + $repository + "/.github/workflows/release.yml@v1") and
+            .invocation.configSource.uri == ("git+https://github.com/" + $repository + "@refs/heads/main") and
+            (.invocation.configSource.digest.sha1 | type == "string" and test("^[0-9a-f]{40}$")) and
+            .invocation.configSource.digest.sha1 == $sha and
+            .invocation.configSource.entryPoint == ".github/workflows/release.yml" and
+            .invocation.parameters.tag == $tag and
+            .invocation.parameters.source_date_epoch == $inputs[0].source_date_epoch and
+            .invocation.parameters.buildx_version == env.BUILDX_VERSION and
+            .invocation.parameters.buildx_sha256_amd64 == env.BUILDX_SHA256_AMD64 and
+            .invocation.parameters.buildx_sha256_arm64 == env.BUILDX_SHA256_ARM64 and
+            .invocation.parameters.buildkit_image == env.BUILDKIT_IMAGE and
+            .invocation.parameters.binfmt_image == env.BINFMT_IMAGE and
+            .invocation.parameters.syft_image == env.SYFT_IMAGE and
+            .invocation.parameters.trivy_image == env.TRIVY_IMAGE and
+            .invocation.parameters.workflow_ref == "refs/heads/main" and
+            .invocation.parameters.workflow_sha == .invocation.configSource.digest.sha1 and
+            (.invocation.environment | type == "object" and length == 0) and
+            .metadata.buildInvocationId == $digests[0].source.build_invocation and
+            .metadata.completeness == {parameters: false, environment: false, materials: false} and
+            .metadata.reproducible == false and
+            (.materials | length) == 1 and
+            .materials[0].uri == ("git+https://github.com/" + $repository + "@refs/tags/" + $tag) and
+            .materials[0].digest.sha1 == $sha
+          ' dist/release/provenance.json >/dev/null
+          workflow_sha=$(jq -er .invocation.configSource.digest.sha1 dist/release/provenance.json)
+          build_invocation=$(jq -er .metadata.buildInvocationId dist/release/provenance.json)
+          build_invocation_prefix="https://github.com/$GITHUB_REPOSITORY/actions/runs/"
+          if [[ "$build_invocation" != "$build_invocation_prefix"* ]]; then
+            echo "provenance build invocation is not a release workflow run" >&2
+            exit 1
+          fi
+          build_invocation_suffix=${build_invocation#"$build_invocation_prefix"}
+          if [[ ! "$build_invocation_suffix" =~ ^([0-9]+)/attempts/([0-9]+)$ ]]; then
+            echo "provenance build invocation is not a release workflow run" >&2
+            exit 1
+          fi
+          run_id=${BASH_REMATCH[1]}
+          run_attempt=${BASH_REMATCH[2]}
+          run_json=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$run_attempt")
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow_sha "$workflow_sha" \
+            --argjson run_id "$run_id" \
+            --argjson run_attempt "$run_attempt" '
+            .id == $run_id and
+            .run_attempt == $run_attempt and
+            .event == "repository_dispatch" and
+            .head_branch == "main" and
+            .head_sha == $workflow_sha and
+            (.path == ".github/workflows/release.yml" or
+             .path == ".github/workflows/release.yml@main" or
+             .path == ".github/workflows/release.yml@refs/heads/main") and
+            .repository.full_name == $repository
+          ' <<<"$run_json" >/dev/null
+
+      - name: Pin source state and validate release tags before signing
+        run: |
+          set -euo pipefail
+          build_invocation=$(jq -er .metadata.buildInvocationId dist/release/provenance.json)
+          build_invocation_prefix="https://github.com/$GITHUB_REPOSITORY/actions/runs/"
+          if [[ "$build_invocation" != "$build_invocation_prefix"* ]]; then
+            echo "provenance build invocation is not a release workflow run" >&2
+            exit 1
+          fi
+          build_invocation_suffix=${build_invocation#"$build_invocation_prefix"}
+          if [[ ! "$build_invocation_suffix" =~ ^([0-9]+)/attempts/([0-9]+)$ ]]; then
+            echo "provenance build invocation is not a release workflow run" >&2
+            exit 1
+          fi
+          [[ "${BASH_REMATCH[1]}" == "$GITHUB_RUN_ID" ]] || {
+            echo "provenance run ${BASH_REMATCH[1]} does not match signing run $GITHUB_RUN_ID" >&2
+            exit 1
+          }
+          claimed_attempt=${BASH_REMATCH[2]}
+          (( claimed_attempt >= 1 && claimed_attempt <= GITHUB_RUN_ATTEMPT )) || {
+            echo "provenance attempt $claimed_attempt is not valid for signing attempt $GITHUB_RUN_ATTEMPT" >&2
+            exit 1
+          }
+
+          resolve_release_tag() {
+            local object object_type actual
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG") || return 1
+            object_type=$(jq -er '.object.type' <<<"$object") || return 1
+            actual=$(jq -er '.object.sha' <<<"$object") || return 1
+            for _ in $(seq 1 8); do
+              [[ "$object_type" == tag ]] || break
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$actual") || return 1
+              object_type=$(jq -er '.object.type' <<<"$object") || return 1
+              actual=$(jq -er '.object.sha' <<<"$object") || return 1
+            done
+            [[ "$object_type" == commit && "$actual" =~ ^[0-9a-f]{40}$ ]] || return 1
+            printf '%s\n' "$actual"
+          }
+          pinned_main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha | select(test("^[0-9a-f]{40}$"))')
+          actual_release_sha=$(resolve_release_tag) || {
+            echo "refs/tags/$RELEASE_TAG no longer resolves to a commit" >&2
+            exit 1
+          }
+          [[ "$actual_release_sha" == "$RELEASE_SHA" ]] || {
+            echo "refs/tags/$RELEASE_TAG moved from $RELEASE_SHA to $actual_release_sha" >&2
+            exit 1
+          }
+          source_comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$RELEASE_SHA...$pinned_main_sha" --jq .status)
+          if [[ "$source_comparison" != ahead && "$source_comparison" != identical ]]; then
+            echo "$RELEASE_TAG is not reachable from pinned main $pinned_main_sha (comparison: $source_comparison)" >&2
+            exit 1
+          fi
+          workflow_sha=$(jq -er .invocation.configSource.digest.sha1 dist/release/provenance.json)
+          workflow_comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$workflow_sha...$pinned_main_sha" --jq .status)
+          if [[ "$workflow_comparison" != ahead && "$workflow_comparison" != identical ]]; then
+            echo "provenance workflow commit $workflow_sha is not reachable from pinned main $pinned_main_sha" >&2
+            exit 1
+          fi
+          export PINNED_MAIN_SHA="$pinned_main_sha"
+          echo "PINNED_MAIN_SHA=$pinned_main_sha" >> "$GITHUB_ENV"
+          cat > "$RUNNER_TEMP/require-signing-context" <<'BASH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          current_main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          [[ "$current_main_sha" == "$PINNED_MAIN_SHA" ]] || {
+            echo "main moved from pinned commit $PINNED_MAIN_SHA to $current_main_sha" >&2
+            exit 1
+          }
+          object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")
+          object_type=$(jq -er '.object.type' <<<"$object")
+          actual=$(jq -er '.object.sha' <<<"$object")
+          for _ in $(seq 1 8); do
+            [[ "$object_type" == tag ]] || break
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$actual")
+            object_type=$(jq -er '.object.type' <<<"$object")
+            actual=$(jq -er '.object.sha' <<<"$object")
+          done
+          [[ "$object_type" == commit && "$actual" == "$RELEASE_SHA" ]] || {
+            echo "refs/tags/$RELEASE_TAG no longer resolves to $RELEASE_SHA" >&2
+            exit 1
+          }
+          BASH
+          chmod 0700 "$RUNNER_TEMP/require-signing-context"
+
+          read_registry_digest() {
+            local ref=$1 descriptor digest attempt error_file errors_file all_missing
+            errors_file=$(mktemp "$RUNNER_TEMP/registry-inspect.XXXXXX")
+            all_missing=true
+            for attempt in $(seq 1 5); do
+              error_file=$(mktemp "$RUNNER_TEMP/registry-inspect-attempt.XXXXXX")
+              if descriptor=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' 2>"$error_file"); then
+                if digest=$(jq -er 'select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<<"$descriptor" 2>>"$errors_file"); then
+                  rm -f "$error_file" "$errors_file"
+                  printf '%s\n' "$digest"
+                  return 0
+                fi
+                all_missing=false
+                printf 'malformed manifest descriptor for %s:\n%s\n' "$ref" "$descriptor" >> "$errors_file"
+              else
+                {
+                  printf 'attempt %s for %s:\n' "$attempt" "$ref"
+                  cat "$error_file"
+                } >> "$errors_file"
+                if ! cmp -s "$error_file" <(printf 'ERROR: %s: not found\n' "$ref"); then
+                  all_missing=false
+                fi
+              fi
+              rm -f "$error_file"
+              sleep $((attempt * 2))
+            done
+            if [[ "$all_missing" == true ]]; then
+              rm -f "$errors_file"
+              return 3
+            fi
+            cat "$errors_file" >&2
+            rm -f "$errors_file"
+            return 1
+          }
+          for component in runtime-base materializer frontend; do
+            repository=$(jq -er --arg component "$component" '.components[$component].repository' dist/release/digests.json)
+            digest=$(jq -er --arg component "$component" '.components[$component].index' dist/release/digests.json)
+            if existing=$(read_registry_digest "$repository:$RELEASE_TAG"); then
+              [[ "$existing" == "$digest" ]] || {
+                echo "immutable release tag $repository:$RELEASE_TAG already points to $existing, not $digest" >&2
+                exit 1
+              }
+            else
+              status=$?
+              (( status == 3 )) || {
+                echo "could not safely inspect immutable release tag $repository:$RELEASE_TAG" >&2
+                exit "$status"
+              }
+            fi
+          done
+
+      - name: Sign images and attach provenance and SBOM attestations
+        run: |
+          set -euo pipefail
+
+          subjects_file="$RUNNER_TEMP/release-subjects"
+          jq -r '
+            .components[]
+            | .repository as $repository
+            | ($repository + "@" + .index),
+              (.platforms[] | $repository + "@" + .)
+          ' dist/release/digests.json | sort -u > "$subjects_file"
+          mapfile -t subjects < "$subjects_file"
+          (( ${#subjects[@]} == 9 ))
+
+          for subject in "${subjects[@]}"; do
+            "$RUNNER_TEMP/require-signing-context"
+            cosign sign --yes "$subject"
+            "$RUNNER_TEMP/require-signing-context"
+            cosign attest --yes \
+              --type slsaprovenance02 \
+              --predicate dist/release/provenance.json \
+              "$subject"
+          done
+
+          platform_subjects_file="$RUNNER_TEMP/release-platform-subjects"
+          jq -r '
+            .components
+            | to_entries[]
+            | .key as $component
+            | .value.repository as $repository
+            | .value.platforms
+            | to_entries[]
+            | [$component, .key, ($repository + "@" + .value)]
+            | @tsv
+          ' dist/release/digests.json > "$platform_subjects_file"
+          platform_subject_count=0
+          while IFS=$'\t' read -r component platform subject; do
+            platform_subject_count=$((platform_subject_count + 1))
+            slug="${component}-${platform//\//-}"
+            predicate="dist/release/evidence/sbom-${slug}.spdx.json"
+            vulnerability="dist/release/evidence/vulnerability-${slug}.json"
+            test -s "$predicate"
+            # Vulnerability reports are checksum-signed release assets; only SPDX is attached as an image attestation.
+            test -s "$vulnerability"
+            "$RUNNER_TEMP/require-signing-context"
+            cosign attest --yes \
+              --type spdxjson \
+              --predicate "$predicate" \
+              "$subject"
+          done < "$platform_subjects_file"
+          (( platform_subject_count == 6 ))
+
+      - name: Flatten release evidence
+        run: |
+          set -euo pipefail
+          find dist/release/evidence -maxdepth 1 -type f -exec mv {} dist/release/ \;
+          find dist/release/runtime-evidence -maxdepth 1 -type f -exec mv {} dist/release/ \;
+          rmdir dist/release/evidence dist/release/runtime-evidence
+
+      - name: Sign release records
+        run: |
+          set -euo pipefail
+          checksums="$RUNNER_TEMP/SHA256SUMS"
+          (
+            cd dist/release
+            find . -type f ! -name '*.bundle' ! -name SHA256SUMS -print0 \
+              | sort -z \
+              | xargs -0 sha256sum > "$checksums"
+          )
+          mv "$checksums" dist/release/SHA256SUMS
+          "$RUNNER_TEMP/require-signing-context"
+          cosign sign-blob --yes \
+            --bundle dist/release/components.json.bundle \
+            dist/release/components.json
+          "$RUNNER_TEMP/require-signing-context"
+          cosign sign-blob --yes \
+            --bundle dist/release/metadata-snapshot.json.bundle \
+            dist/release/metadata-snapshot.json
+          "$RUNNER_TEMP/require-signing-context"
+          cosign sign-blob --yes \
+            --bundle dist/release/SHA256SUMS.bundle \
+            dist/release/SHA256SUMS
+
+      - name: Upload signed release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-bundle
+          path: dist/release
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  promote:
+    name: Promote tested digests
+    needs: [prepare, release_target, sign]
+    if: >-
+      always() &&
+      !cancelled() &&
+      needs.prepare.result == 'success' &&
+      needs.release_target.result == 'success' &&
+      (needs.sign.result == 'success' ||
+       (needs.release_target.outputs.state == 'draft' && needs.sign.result == 'skipped'))
+    runs-on: ubuntu-24.04
+    environment: release
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+      RELEASE_STATE: ${{ needs.release_target.outputs.state }}
+      STABLE: ${{ needs.prepare.outputs.stable }}
+    steps:
+      - name: Download newly signed release bundle
+        if: needs.release_target.outputs.state == 'absent'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-bundle
+          path: dist/release
+
+      - name: Download signed draft bundle
+        if: needs.release_target.outputs.state == 'draft'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          expected_prerelease=false
+          [[ "$STABLE" == true ]] || expected_prerelease=true
+          release_json=$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json databaseId,isDraft,isPrerelease,tagName)
+          jq -e \
+            --arg tag "$RELEASE_TAG" \
+            --argjson prerelease "$expected_prerelease" '
+              .tagName == $tag and
+              .isDraft == true and
+              .isPrerelease == $prerelease and
+              (.databaseId | type == "number" and . > 0)
+            ' <<<"$release_json" >/dev/null
+          release_id=$(jq -er .databaseId <<<"$release_json")
+          uploaded_assets=$(gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100")
+          jq -e \
+            --argjson max_asset "$MAX_RELEASE_ASSET_BYTES" \
+            --argjson max_total "$MAX_RELEASE_TOTAL_BYTES" '
+              [.[][] | {name, digest, state, size}]
+              | length > 0 and length <= 200
+              and all(.[];
+                (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"))
+                and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+                and .state == "uploaded"
+                and (.size | type == "number" and . >= 0 and . <= $max_asset))
+              and ([.[].size] | add <= $max_total)
+              and ([.[].name] | length == (unique | length))
+            ' <<<"$uploaded_assets" >/dev/null
+          mkdir -p dist/release
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir dist/release
+
+      - name: Install checksum-pinned Buildx
+        run: *install-buildx
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.2
+
+      - name: Verify signed bundle checksums
+        env:
+          CERTIFICATE_IDENTITY_REGEXP: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/heads/main$
+          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          cosign verify-blob \
+            --bundle dist/release/SHA256SUMS.bundle \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            dist/release/SHA256SUMS
+
+          contract_names=$(mktemp "$RUNNER_TEMP/release-contract.XXXXXX")
+          expected_names=$(mktemp "$RUNNER_TEMP/signed-assets-expected.XXXXXX")
+          actual_names=$(mktemp "$RUNNER_TEMP/signed-assets-actual.XXXXXX")
+          read -r -a specs <<< "$RELEASE_SPECS"
+          (( ${#specs[@]} > 0 ))
+          {
+            printf '%s\n' \
+              components.digest \
+              components.json \
+              components.json.bundle \
+              digests.json \
+              inputs.json \
+              metadata-snapshot.json \
+              metadata-snapshot.json.bundle \
+              provenance.json \
+              SHA256SUMS \
+              SHA256SUMS.bundle
+            for component in frontend runtime-base materializer; do
+              for platform in linux-amd64 linux-arm64; do
+                printf 'sbom-%s-%s.spdx.json\n' "$component" "$platform"
+                printf 'vulnerability-%s-%s.json\n' "$component" "$platform"
+              done
+            done
+            for platform in linux-amd64 linux-arm64; do
+              for spec in "${specs[@]}"; do
+                printf 'runtime-evidence-%s-%s.tar.gz\n' "$platform" "$spec"
+              done
+            done
+          } | sort > "$contract_names"
+          expected_contract_count=$((22 + 2 * ${#specs[@]}))
+          (( $(wc -l < "$contract_names") == expected_contract_count ))
+          (
+            cd dist/release
+            awk '
+              NF != 2 || length($1) != 64 || $1 !~ /^[0-9a-f]+$/ ||
+                $2 !~ /^\.\/[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/ { exit 1 }
+              {
+                name = substr($2, 3)
+                if (seen[name]++) exit 1
+                print name
+              }
+            ' SHA256SUMS > "$expected_names"
+            printf '%s\n' \
+              components.json.bundle \
+              metadata-snapshot.json.bundle \
+              SHA256SUMS \
+              SHA256SUMS.bundle >> "$expected_names"
+            sort -u -o "$expected_names" "$expected_names"
+            find . -maxdepth 1 -type f -print | sed 's#^\./##' | sort > "$actual_names"
+            diff -u "$contract_names" "$expected_names"
+            diff -u "$contract_names" "$actual_names"
+            sha256sum -c SHA256SUMS
+          )
+
+      - name: Validate signed release tuple
+        run: *validate-release-tuple
+
+      - name: Revalidate runtime evidence and metadata snapshot
+        run: *validate-runtime-evidence
+
+      - name: Revalidate vulnerability reports
+        run: *validate-vulnerability-reports
+
+      - name: Reverify release signatures and attestations
+        env:
+          CERTIFICATE_IDENTITY_REGEXP: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/heads/main$
+          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          cosign verify-blob \
+            --bundle dist/release/components.json.bundle \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            dist/release/components.json
+          cosign verify-blob \
+            --bundle dist/release/metadata-snapshot.json.bundle \
+            --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            dist/release/metadata-snapshot.json
+          verify_attestation_predicate() {
+            local type=$1 subject=$2 predicate=$3 output
+            output=$(mktemp "$RUNNER_TEMP/verified-attestations.XXXXXX")
+            cosign verify-attestation \
+              --type "$type" \
+              --output text \
+              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$subject" > "$output"
+            jq -s -e --slurpfile expected "$predicate" '
+              def predicate:
+                if has("payload") then (.payload | @base64d | fromjson | .predicate)
+                elif has("predicate") then .predicate
+                else empty
+                end;
+              any(.[]; predicate == $expected[0])
+            ' "$output" >/dev/null || {
+              echo "no verified $type attestation for $subject matches $predicate" >&2
+              rm -f "$output"
+              return 1
+            }
+            rm -f "$output"
+          }
+
+          subjects_file="$RUNNER_TEMP/release-subjects"
+          jq -r '
+            .components[]
+            | .repository as $repository
+            | ($repository + "@" + .index),
+              (.platforms[] | $repository + "@" + .)
+          ' dist/release/digests.json | sort -u > "$subjects_file"
+          mapfile -t subjects < "$subjects_file"
+          (( ${#subjects[@]} == 9 ))
+          for subject in "${subjects[@]}"; do
+            cosign verify \
+              --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$subject" >/dev/null
+            verify_attestation_predicate \
+              slsaprovenance02 \
+              "$subject" \
+              dist/release/provenance.json
+          done
+
+          platform_subjects_file="$RUNNER_TEMP/release-platform-subjects"
+          jq -r '
+            .components
+            | to_entries[]
+            | .key as $component
+            | .value.repository as $repository
+            | .value.platforms
+            | to_entries[]
+            | [$component, .key, ($repository + "@" + .value)]
+            | @tsv
+          ' dist/release/digests.json > "$platform_subjects_file"
+          platform_subject_count=0
+          while IFS=$'\t' read -r component platform subject; do
+            platform_subject_count=$((platform_subject_count + 1))
+            slug="${component}-${platform//\//-}"
+            verify_attestation_predicate \
+              spdxjson \
+              "$subject" \
+              "dist/release/sbom-${slug}.spdx.json"
+          done < "$platform_subjects_file"
+          (( platform_subject_count == 6 ))
+
+      - name: Stage assets, promote digests, and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          resolve_release_tag() {
+            local object object_type actual
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG") || return 1
+            object_type=$(jq -er '.object.type' <<<"$object") || return 1
+            actual=$(jq -er '.object.sha' <<<"$object") || return 1
+            for _ in $(seq 1 8); do
+              [[ "$object_type" == tag ]] || break
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$actual") || return 1
+              object_type=$(jq -er '.object.type' <<<"$object") || return 1
+              actual=$(jq -er '.object.sha' <<<"$object") || return 1
+            done
+            [[ "$object_type" == commit && "$actual" =~ ^[0-9a-f]{40}$ ]] || return 1
+            printf '%s\n' "$actual"
+          }
+
+          require_release_tag() {
+            local actual
+            actual=$(resolve_release_tag) || {
+              echo "refs/tags/$RELEASE_TAG no longer resolves to a commit" >&2
+              exit 1
+            }
+            [[ "$actual" == "$RELEASE_SHA" ]] || {
+              echo "refs/tags/$RELEASE_TAG moved from $RELEASE_SHA to $actual" >&2
+              exit 1
+            }
+          }
+
+          require_release_commit() {
+            local comparison
+            require_release_tag
+            comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$RELEASE_SHA...main" --jq .status)
+            if [[ "$comparison" != ahead && "$comparison" != identical ]]; then
+              echo "$RELEASE_TAG is no longer reachable from main (comparison: $comparison)" >&2
+              exit 1
+            fi
+          }
+
+          read_registry_digest() {
+            local ref=$1 descriptor digest attempt error_file errors_file all_missing
+            errors_file=$(mktemp "$RUNNER_TEMP/registry-inspect.XXXXXX")
+            all_missing=true
+            for attempt in $(seq 1 5); do
+              error_file=$(mktemp "$RUNNER_TEMP/registry-inspect-attempt.XXXXXX")
+              if descriptor=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' 2>"$error_file"); then
+                if digest=$(jq -er 'select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' <<<"$descriptor" 2>>"$errors_file"); then
+                  rm -f "$error_file" "$errors_file"
+                  printf '%s\n' "$digest"
+                  return 0
+                fi
+                all_missing=false
+                printf 'malformed manifest descriptor for %s:\n%s\n' "$ref" "$descriptor" >> "$errors_file"
+              else
+                {
+                  printf 'attempt %s for %s:\n' "$attempt" "$ref"
+                  cat "$error_file"
+                } >> "$errors_file"
+                if ! cmp -s "$error_file" <(printf 'ERROR: %s: not found\n' "$ref"); then
+                  all_missing=false
+                fi
+              fi
+              rm -f "$error_file"
+              sleep $((attempt * 2))
+            done
+
+            if [[ "$all_missing" == true ]]; then
+              rm -f "$errors_file"
+              return 3
+            fi
+            cat "$errors_file" >&2
+            rm -f "$errors_file"
+            return 1
+          }
+
+          require_component_tag() {
+            local component=$1 allow_missing=$2 repository digest existing status
+            repository=$(jq -er --arg component "$component" '.components[$component].repository' dist/release/digests.json)
+            digest=$(jq -er --arg component "$component" '.components[$component].index' dist/release/digests.json)
+            if existing=$(read_registry_digest "$repository:$RELEASE_TAG"); then
+              [[ "$existing" == "$digest" ]] || {
+                echo "immutable release tag $repository:$RELEASE_TAG already points to $existing, not $digest" >&2
+                exit 1
+              }
+              return 0
+            else
+              status=$?
+            fi
+            if (( status == 3 )) && [[ "$allow_missing" == true ]]; then
+              return 0
+            fi
+            if (( status == 3 )); then
+              echo "immutable release tag $repository:$RELEASE_TAG is missing" >&2
+              exit 1
+            fi
+            echo "could not safely inspect immutable release tag $repository:$RELEASE_TAG" >&2
+            exit "$status"
+          }
+
+          components=(runtime-base materializer frontend)
+          require_release_commit
+          for component in "${components[@]}"; do
+            require_component_tag "$component" true
+          done
+
+          assets_file="$RUNNER_TEMP/release-assets"
+          find dist/release -maxdepth 1 -type f | sort > "$assets_file"
+          mapfile -t assets < "$assets_file"
+          (( ${#assets[@]} > 0 && ${#assets[@]} <= 200 ))
+          total_asset_bytes=0
+          for asset in "${assets[@]}"; do
+            asset_name=${asset##*/}
+            [[ "$asset_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$ ]]
+            asset_bytes=$(wc -c < "$asset")
+            (( asset_bytes >= 0 && asset_bytes <= MAX_RELEASE_ASSET_BYTES ))
+            total_asset_bytes=$((total_asset_bytes + asset_bytes))
+            (( total_asset_bytes <= MAX_RELEASE_TOTAL_BYTES ))
+          done
+
+          expected_prerelease=false
+          release_args=(
+            --draft
+            --verify-tag
+            --generate-notes
+            --title "$RELEASE_TAG"
+            --latest=false
+          )
+          if [[ "$STABLE" != true ]]; then
+            expected_prerelease=true
+            release_args+=(--prerelease)
+          fi
+
+          verify_draft_assets() {
+            local release_json release_id uploaded_assets asset asset_name expected_digest uploaded_digest uploaded_size
+            release_json=$(gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json databaseId,isDraft,isPrerelease,tagName)
+            jq -e \
+              --arg tag "$RELEASE_TAG" \
+              --argjson prerelease "$expected_prerelease" '
+                .tagName == $tag and
+                .isDraft == true and
+                .isPrerelease == $prerelease and
+                (.databaseId | type == "number" and . > 0)
+              ' <<<"$release_json" >/dev/null
+            release_id=$(jq -er .databaseId <<<"$release_json")
+            uploaded_assets=$(gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100")
+            jq -e \
+              --argjson expected_count "${#assets[@]}" \
+              --argjson max_asset "$MAX_RELEASE_ASSET_BYTES" \
+              --argjson max_total "$MAX_RELEASE_TOTAL_BYTES" '
+                [.[][] | {name, digest, state, size}]
+                | length == $expected_count
+                and all(.[];
+                  (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"))
+                  and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+                  and .state == "uploaded"
+                  and (.size | type == "number" and . >= 0 and . <= $max_asset))
+                and ([.[].size] | add <= $max_total)
+                and ([.[].name] | length == (unique | length))
+              ' <<<"$uploaded_assets" >/dev/null
+
+            for asset in "${assets[@]}"; do
+              asset_name=${asset##*/}
+              expected_digest=$(sha256sum "$asset")
+              expected_digest="sha256:${expected_digest%% *}"
+              uploaded_digest=$(jq -er --arg name "$asset_name" '
+                [.[][] | select(.name == $name)]
+                | if length == 1 then .[0].digest else error("missing or duplicate release asset") end
+              ' <<<"$uploaded_assets")
+              uploaded_size=$(jq -er --arg name "$asset_name" '
+                [.[][] | select(.name == $name)]
+                | if length == 1 then .[0].size else error("missing or duplicate release asset") end
+              ' <<<"$uploaded_assets")
+              [[ "$uploaded_digest" == "$expected_digest" ]]
+              (( uploaded_size == $(wc -c < "$asset") ))
+            done
+          }
+
+          case "$RELEASE_STATE" in
+            absent)
+              require_release_tag
+              gh release create "$RELEASE_TAG" "${assets[@]}" \
+                "${release_args[@]}" \
+                --repo "$GITHUB_REPOSITORY"
+              ;;
+            draft)
+              ;;
+            *)
+              echo "unexpected target release state: $RELEASE_STATE" >&2
+              exit 1
+              ;;
+          esac
+          verify_draft_assets
+
+          promote() {
+            local component=$1 repository digest existing status published
+            require_release_tag
+            repository=$(jq -er --arg component "$component" '.components[$component].repository' dist/release/digests.json)
+            digest=$(jq -er --arg component "$component" '.components[$component].index' dist/release/digests.json)
+
+            if existing=$(read_registry_digest "$repository:$RELEASE_TAG"); then
+              [[ "$existing" == "$digest" ]] || {
+                echo "immutable release tag $repository:$RELEASE_TAG changed after preflight" >&2
+                exit 1
+              }
+              return 0
+            else
+              status=$?
+            fi
+            if (( status != 3 )); then
+              echo "could not safely re-inspect immutable release tag $repository:$RELEASE_TAG" >&2
+              exit "$status"
+            fi
+
+            docker buildx imagetools create \
+              --tag "$repository:$RELEASE_TAG" \
+              "$repository@$digest"
+            if ! published=$(read_registry_digest "$repository:$RELEASE_TAG"); then
+              echo "could not verify promoted release tag $repository:$RELEASE_TAG" >&2
+              exit 1
+            fi
+            [[ "$published" == "$digest" ]] || {
+              echo "promoted release tag $repository:$RELEASE_TAG resolved to $published, not $digest" >&2
+              exit 1
+            }
+          }
+
+          require_release_commit
+          for component in "${components[@]}"; do
+            promote "$component"
+          done
+
+          verify_draft_assets
+          for component in "${components[@]}"; do
+            require_component_tag "$component" false
+          done
+          require_release_commit
+          gh release edit "$RELEASE_TAG" \
+            --draft=false \
+            --latest=false \
+            --repo "$GITHUB_REPOSITORY"
+
+      - name: Release summary
+        run: |
+          {
+            echo "### Released $RELEASE_TAG"
+            echo
+            jq -r '
+              .components
+              | to_entries[]
+              | "- `" + .value.repository + "@" + .value.index + "`"
+            ' dist/release/digests.json
+            echo
+            echo "The release assets include the signed component manifest, input tuple, digests, SBOMs, vulnerability reports, provenance predicate, and checksums."
+          } >> "$GITHUB_STEP_SUMMARY"

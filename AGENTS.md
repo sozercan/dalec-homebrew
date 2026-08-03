@@ -140,7 +140,7 @@ git diff --exit-code -- go.mod go.sum
 
 # Dockerfile or Bake changes
 go test ./internal/buildfiles
-docker buildx bake --print
+docker buildx bake --print release-children frontend
 
 # Final hygiene
 git diff --check
@@ -153,13 +153,14 @@ Additional expectations:
   runner changes: run affected packages with `go test -race` where supported.
 - Dockerfile or image-composition changes: build the affected Bake target.
 - End-to-end materializer or runtime changes: run `./scripts/live-test.sh` with
-  a configured BuildKit builder and registry. Use the focused specs under
+  a configured BuildKit builder. Component rebuild mode requires network access
+  and a writable registry; published-tuple mode requires pull access to all
+  three digest-pinned component references. Use the focused specs under
   `examples/` for the behavior changed.
 - Published-image hardening changes: run `./scripts/vm-live-validate.sh` against
   the exact image digest when the VM target is available.
 
-Live checks require Docker/BuildKit, registry access, and networked component
-builds. If they cannot be run, report the closest verification performed and
+If live checks cannot be run, report the closest verification performed and
 why the live check was skipped. Never claim a check passed unless it was run.
 
 ## Change-specific review

@@ -21,7 +21,10 @@ These options are not general overrides. Runtime-base, materializer, and Homebre
 
 The frontend cannot bind its own final digest before it is published. `DALEC_HOMEBREW_FRONTEND_REF` therefore normally comes from BuildKit's digest-pinned gateway `source` option and must match it when explicitly supplied. Mutable tags are rejected. The platform child digests returned by BuildKit are recorded in every resolution record.
 
-See [`../release/components.example.json`](../release/components.example.json) for the canonical manifest shape. The checked-in file contains placeholders and is illustrative. Validate a populated manifest with:
+See [`../release/components.example.json`](../release/components.example.json)
+for the canonical manifest shape. The checked-in file contains placeholders
+and is illustrative. Release automation generates the manifest with
+`cmd/release-manifest`. Validate a populated manifest with:
 
 ```console
 go run ./cmd/release-verify path/to/components.json
@@ -56,9 +59,12 @@ The repository currently pins:
 
 The exact image and archive digests live beside the build instructions in [`../Dockerfile`](../Dockerfile). These values are release inputs, not update channels. Update, test, review, and sign the complete tuple together.
 
-## Release procedure
+## Release requirements
 
-A production release pipeline must:
+An end-to-end production release must satisfy the following requirements. The
+repository workflow automates steps 1-5 for a reusable component tuple;
+downstream product releases consume that signed tuple and complete steps 6-9.
+The example runtimes are integration fixtures and are not promoted.
 
 1. Build `amd64` and `arm64` runtime-base children from the pinned Chisel binary, immutable `chisel-releases` commit, and Ubuntu snapshot with `SOURCE_DATE_EPOCH` fixed.
 2. Build materializer children from the corresponding pinned full Ubuntu child images and copy only the matching Chisel runtime-base package and artifact evidence into them.
@@ -78,6 +84,71 @@ Release CI must reject:
 - changed Chisel, release-definition, snapshot, or Ubuntu pins without review
 - unsigned or mixed component tuples
 - exporter settings that differ between test and promotion
+
+## Automated component release
+
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) publishes an
+existing v-prefixed, OCI-compatible SemVer tag, including supported pre-releases. Build metadata (`+...`) is not accepted because OCI tags cannot represent it without an additional mapping. Trigger the trusted default-branch workflow with a repository dispatch:
+
+```console
+gh api --method POST repos/OWNER/REPOSITORY/dispatches \
+  -f event_type=release \
+  -f 'client_payload[tag]=v1.2.3'
+```
+
+A new tuple is built only when the tag names the exact commit that contains the
+dispatched workflow, so code receiving registry write access is the trusted
+workflow source. A later descendant of `main` may verify and resume an existing
+draft because recovery never rebuilds the tuple.
+
+Runs are serialized repository-wide, and an existing published release is
+rejected. With no target release, the workflow builds a new tuple and stages a
+draft. With an existing draft, it skips rebuilding and resumes only after the
+draft's complete signed bundle has been verified. An incomplete or mismatched
+draft fails closed and must be removed explicitly before a new build; the
+workflow never deletes a draft or replaces release assets.
+
+For a new tuple, the workflow:
+
+1. Runs normal CI and validates the tagged release inputs.
+2. Builds and smoke-tests the `amd64` and `arm64` component children and indexes,
+   then builds the frontend against the exact runtime-base and materializer
+   indexes.
+3. Runs every focused integration spec on native `amd64` and `arm64` workers,
+   requires one authenticated Homebrew metadata snapshot across every spec and
+   platform, and produces deterministic runtime evidence, SPDX SBOMs, and
+   vulnerability reports.
+4. Generates the component manifest and provenance, signs every component child
+   and index with keyless Cosign, attaches the exact SLSA and SPDX predicates,
+   and signs the component manifest, metadata snapshot, and checksum set.
+
+Promotion revalidates the tag and signed bundle, creates or resumes the draft,
+and verifies its exact asset inventory. Each component version tag must be
+absent or already resolve to the tested index digest; the workflow creates only
+missing tags, verifies them, rechecks the draft, and then publishes it. It never
+rebuilds during promotion or publishes a `latest` tag.
+
+The workflow records the accepted metadata snapshot but does not compare it
+with earlier releases. See [`../SECURITY.md`](../SECURITY.md) for the resulting
+cross-release anti-rollback limitation.
+
+The GitHub `release` environment gates signing and promotion. Configure required
+reviewers, protect release-critical paths with branch rules, and prevent updates
+or deletion of `v*.*.*` tags. GHCR and GitHub Release writes use the scoped
+`GITHUB_TOKEN`; keyless Cosign uses GitHub Actions OIDC.
+
+Release assets include:
+
+- `components.json`, `components.digest`, and `components.json.bundle`
+- `digests.json`, `inputs.json`, `metadata-snapshot.json`, its Sigstore bundle,
+  and the SLSA provenance predicate
+- per-platform SPDX SBOMs and vulnerability reports
+- deterministic runtime evidence archives for `amd64` and `arm64`
+- `SHA256SUMS` and `SHA256SUMS.bundle`
+
+The signed component images and their SLSA and SPDX attestations remain in the
+registry. The GitHub release contains the records needed to identify and verify
+that tuple; it does not publish the example runtime images.
 
 ## Rollback
 

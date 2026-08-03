@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-bash -n \
-  scripts/check.sh \
-  scripts/live-test.sh \
-  scripts/image-size-report.sh \
-  scripts/vm-live-validate.sh
+for script in scripts/*.sh; do
+  bash -n "$script"
+done
+./scripts/live-test-test.sh
 go test -trimpath ./...
 go vet ./...
 go test -race \
@@ -18,7 +17,7 @@ go test -race \
   ./internal/runtimebase \
   ./internal/testrunner
 for arch in amd64 arm64; do
-  for cmd in frontend materializer record-verify release-verify test-runner resolve runtime-base-evidence snapshot-proxy; do
+  for cmd in frontend live-input-verify materializer record-verify release-manifest release-verify test-runner resolve runtime-base-evidence snapshot-proxy; do
     CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -o "/tmp/dalec-homebrew-${cmd}-${arch}" "./cmd/${cmd}"
   done
 done

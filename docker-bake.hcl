@@ -8,6 +8,7 @@ variable "MATERIALIZER_REF" { default = "" }
 variable "FRONTEND_REF" { default = "" }
 
 group "default" { targets = ["frontend"] }
+group "release-children" { targets = ["runtime-base-amd64", "runtime-base-arm64", "materializer-amd64", "materializer-arm64"] }
 
 target "runtime-base-amd64" {
   target = "runtime-base"
@@ -26,14 +27,20 @@ target "runtime-base-arm64" {
 target "materializer-amd64" {
   target = "materializer"
   platforms = ["linux/amd64"]
-  args = { RUNTIME_BASE = RUNTIME_BASE_AMD64, SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH }
+  args = {
+    RUNTIME_BASE = RUNTIME_BASE_AMD64
+    SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH
+  }
   tags = ["${REGISTRY}/dalec-homebrew-materializer:${VERSION}-amd64"]
 }
 
 target "materializer-arm64" {
   target = "materializer"
   platforms = ["linux/arm64"]
-  args = { RUNTIME_BASE = RUNTIME_BASE_ARM64, SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH }
+  args = {
+    RUNTIME_BASE = RUNTIME_BASE_ARM64
+    SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH
+  }
   tags = ["${REGISTRY}/dalec-homebrew-materializer:${VERSION}-arm64"]
 }
 

@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.12
+# syntax=docker/dockerfile:1.12@sha256:93bfd3b68c109427185cd78b4779fc82b484b0b7618e36d0f104d4d801e66d25
 
 ARG GO_IMAGE=docker.io/library/golang:1.25.9-bookworm@sha256:298734aec230b5f3e8cee450ce6d7eccc39f1797ba548ee90d57e9803030c6c3
 # Full Ubuntu is retained only as the materializer's tooling environment.
@@ -10,6 +10,10 @@ ARG CHISEL_RELEASES_COMMIT=f42d76490045602d83de8afef5126987179a6693
 ARG CHISEL_RELEASES_SHA256=d8f07a312d25a72d91dc48994fff7d3563cbb1bbb532a1affdbd61e12b35dc5b
 ARG CHISEL_AMD64_SHA256=3b3d86ea38045e54a13334e358ab8da12e6dd33342163c5c1ba13525f1070cfe
 ARG CHISEL_ARM64_SHA256=398050085cf32d7718ba1e2fad144b179e0943d0e0376b2a0614577c51d331e8
+ARG HOMEBREW_COMMIT=77d90328ca2f63ff4ec1f67de0ade5632f5d2335
+ARG HOMEBREW_ARCHIVE_SHA256=42e3678a8b00d53319f6b88b9384fcc7baa072e44864e41117cc7fd4f78fcb54
+ARG HOMEBREW_RUBY_VERSION=4.0.6
+ARG HOMEBREW_KEYS_DIGEST=sha256:ef2d2c9e0219d485df9f07fff7b037feadc36c93085be9ffefb1390f31a3de1d
 
 FROM ${GO_IMAGE} AS ca-bundle
 ARG GO_IMAGE
@@ -155,9 +159,9 @@ ARG UBUNTU_SNAPSHOT
 ARG SOURCE_DATE_EPOCH
 ARG LINUXBREW_UID=1000
 ARG LINUXBREW_GID=1000
-ARG HOMEBREW_COMMIT=77d90328ca2f63ff4ec1f67de0ade5632f5d2335
-ARG HOMEBREW_ARCHIVE_SHA256=42e3678a8b00d53319f6b88b9384fcc7baa072e44864e41117cc7fd4f78fcb54
-ARG HOMEBREW_RUBY_VERSION=4.0.6
+ARG HOMEBREW_COMMIT
+ARG HOMEBREW_ARCHIVE_SHA256
+ARG HOMEBREW_RUBY_VERSION
 RUN --mount=from=runtime-base-rootfs,source=/rootfs,target=/run/runtime-base,ro \
     install -D -o root -g root -m 0444 /run/runtime-base/etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt \
     && install -D -o root -g root -m 0444 /run/runtime-base/usr/share/doc/ca-certificates/copyright /usr/share/doc/ca-certificates/copyright \
@@ -320,9 +324,9 @@ ARG SOURCE_DATE_EPOCH
 ARG RUNTIME_BASE_REF
 ARG MATERIALIZER_REF
 ARG FRONTEND_REF
-ARG HOMEBREW_COMMIT=77d90328ca2f63ff4ec1f67de0ade5632f5d2335
-ARG HOMEBREW_KEYS_DIGEST=sha256:ef2d2c9e0219d485df9f07fff7b037feadc36c93085be9ffefb1390f31a3de1d
-ARG HOMEBREW_RUBY_VERSION=4.0.6
+ARG HOMEBREW_COMMIT
+ARG HOMEBREW_KEYS_DIGEST
+ARG HOMEBREW_RUBY_VERSION
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
