@@ -21,6 +21,8 @@ env:
   TRIVY_IMAGE: docker.io/aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e
   MAX_RELEASE_ASSET_BYTES: 268435456
   MAX_RELEASE_TOTAL_BYTES: 1073741824
+  MAX_RUNTIME_EVIDENCE_EXPANDED_BYTES: 268435456
+  RELEASE_SPECS: live-test live-python live-glibc live-redis live-graphviz live-toolchain
 
 jobs:
   prepare:
@@ -613,7 +615,8 @@ jobs:
           frontend_ref=$(component_ref frontend "$PLATFORM")
           source_date_epoch=$(jq -er .source.source_date_epoch dist/release/digests.json)
 
-          specs=(live-test live-python live-glibc live-redis live-graphviz)
+          read -r -a specs <<< "$RELEASE_SPECS"
+          (( ${#specs[@]} > 0 ))
           mkdir -p runtime-evidence
           for spec in "${specs[@]}"; do
             final_image="dalec-homebrew-live:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${PLATFORM_SLUG}-${spec}"
@@ -640,8 +643,7 @@ jobs:
               --owner=0 \
               --group=0 \
               --numeric-owner \
-              --format=posix \
-              --pax-option=delete=atime,delete=ctime \
+              --format=ustar \
               -C "$evidence_root" \
               -cf - . \
               | gzip -n > "runtime-evidence-${PLATFORM_SLUG}-${spec}.tar.gz"
@@ -814,9 +816,227 @@ jobs:
           path: dist/release/runtime-evidence
           merge-multiple: true
 
-      - name: Verify integration metadata snapshots match across platforms
-        run: |
+      - name: Validate runtime evidence and metadata snapshot
+        run: &validate-runtime-evidence |
           set -euo pipefail
+          read -r -a specs <<< "$RELEASE_SPECS"
+          (( ${#specs[@]} > 0 ))
+          runtime_evidence_dir=dist/release
+          [[ -d dist/release/runtime-evidence ]] && runtime_evidence_dir=dist/release/runtime-evidence
+
+          extract_resolution() {
+            python3 - "$1" "$2" <<'PYARCHIVE'
+          import json
+          import os
+          from pathlib import Path
+          import posixpath
+          import resource
+          import sys
+          import tempfile
+          import unicodedata
+          import zlib
+
+          max_archive_bytes = int(os.environ["MAX_RELEASE_ASSET_BYTES"])
+          max_expanded_bytes = int(os.environ["MAX_RUNTIME_EVIDENCE_EXPANDED_BYTES"])
+          max_members = 100_000
+          max_resolution_bytes = 16 << 20
+          archive_path = Path(sys.argv[1])
+          output_path = Path(sys.argv[2])
+          if sys.platform == "linux":
+              memory_limit = 512 << 20
+              resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
+
+          def read_exact(source, size):
+              chunks = []
+              remaining = size
+              while remaining:
+                  chunk = source.read(remaining)
+                  if not chunk:
+                      raise ValueError("archive is truncated")
+                  chunks.append(chunk)
+                  remaining -= len(chunk)
+              return b"".join(chunks)
+
+          def read_block(source):
+              first = source.read(512)
+              if not first:
+                  return None
+              if len(first) == 512:
+                  return first
+              return first + read_exact(source, 512 - len(first))
+
+          def skip_exact(source, size):
+              remaining = size
+              while remaining:
+                  chunk = source.read(min(1 << 20, remaining))
+                  if not chunk:
+                      raise ValueError("archive is truncated")
+                  remaining -= len(chunk)
+
+          def parse_octal(field, label):
+              if field and field[0] & 0x80:
+                  raise ValueError(f"archive {label} uses an unsupported base-256 value")
+              value = field.strip(b" \0")
+              if not value:
+                  return 0
+              if any(byte < ord("0") or byte > ord("7") for byte in value):
+                  raise ValueError(f"archive {label} is not octal")
+              return int(value, 8)
+
+          def decode_field(field, label):
+              value, separator, padding = field.partition(b"\0")
+              if separator and any(byte not in (0, 32) for byte in padding):
+                  raise ValueError(f"archive {label} has nonzero bytes after NUL")
+              try:
+                  return value.decode("utf-8")
+              except UnicodeDecodeError as exc:
+                  raise ValueError(f"archive {label} is not UTF-8") from exc
+
+          def validate_header(block):
+              stored_checksum = parse_octal(block[148:156], "checksum")
+              checksum_block = bytearray(block)
+              checksum_block[148:156] = b" " * 8
+              if sum(checksum_block) != stored_checksum:
+                  raise ValueError("archive header checksum is invalid")
+              if block[257:263] != b"ustar\0" or block[263:265] != b"00":
+                  raise ValueError("archive member is not POSIX USTAR")
+              if any(block[500:512]):
+                  raise ValueError("archive USTAR reserved header padding is nonzero")
+              name = decode_field(block[0:100], "name")
+              prefix = decode_field(block[345:500], "prefix")
+              path = f"{prefix}/{name}" if prefix else name
+              size = parse_octal(block[124:136], "size")
+              typeflag = block[156:157]
+              linkname = decode_field(block[157:257], "linkname")
+              return path, size, typeflag, linkname
+
+          def validate_member(path, size, typeflag, linkname):
+              if len(path) > 4096 or not path:
+                  raise ValueError("archive member path length is invalid")
+              if any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in path) or "\\" in path:
+                  raise ValueError("archive member name contains unsafe characters")
+              if posixpath.isabs(path):
+                  raise ValueError(f"archive contains absolute member path {path!r}")
+              normalized = posixpath.normpath(path)
+              if normalized == ".." or normalized.startswith("../"):
+                  raise ValueError(f"archive member escapes the root: {path!r}")
+              canonical = "." if normalized == "." else "./" + normalized
+              is_directory = typeflag == b"5"
+              is_regular = typeflag in {b"0", b"\0"}
+              if not (is_directory or is_regular):
+                  raise ValueError(f"archive member has unsafe type {typeflag!r}")
+              if is_directory:
+                  allowed_paths = {canonical, "./"} if canonical == "." else {canonical, canonical + "/"}
+                  if path not in allowed_paths:
+                      raise ValueError(f"archive uses noncanonical member path {path!r}")
+              elif path != canonical:
+                  raise ValueError(f"archive uses noncanonical member path {path!r}")
+              if is_regular and canonical == ".":
+                  raise ValueError("archive root must be a directory")
+              if is_directory and size != 0:
+                  raise ValueError("archive directory has a nonzero size")
+              if linkname:
+                  raise ValueError("archive member has an unexpected link target")
+              return normalized, is_regular
+
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON member {key!r}")
+                  result[key] = value
+              return result
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant {value}")
+
+          try:
+              archive_size = archive_path.stat().st_size
+              if archive_size <= 0 or archive_size > max_archive_bytes:
+                  raise ValueError(f"archive size {archive_size} is outside the allowed range")
+              resolution = None
+              member_count = 0
+              total_size = 0
+              with tempfile.TemporaryFile() as uncompressed:
+                  decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                  expanded_size = 0
+                  with archive_path.open("rb") as compressed:
+                      while True:
+                          chunk = compressed.read(1 << 20)
+                          if not chunk:
+                              break
+                          while chunk:
+                              remaining = max_expanded_bytes - expanded_size
+                              data = decompressor.decompress(chunk, min(1 << 20, remaining + 1))
+                              if data:
+                                  uncompressed.write(data)
+                                  expanded_size += len(data)
+                                  if expanded_size > max_expanded_bytes:
+                                      raise ValueError("archive expansion exceeds the limit")
+                              if decompressor.unused_data:
+                                  raise ValueError("archive contains trailing or concatenated gzip data")
+                              chunk = decompressor.unconsumed_tail
+                              if decompressor.eof:
+                                  if chunk or compressed.read(1):
+                                      raise ValueError("archive contains trailing or concatenated gzip data")
+                                  break
+                          if decompressor.eof:
+                              break
+                  if not decompressor.eof:
+                      raise ValueError("archive gzip stream is truncated")
+                  flushed = decompressor.flush()
+                  if flushed:
+                      uncompressed.write(flushed)
+                      expanded_size += len(flushed)
+                      if expanded_size > max_expanded_bytes:
+                          raise ValueError("archive expansion exceeds the limit")
+                  uncompressed.seek(0)
+                  zero_blocks = 0
+                  while True:
+                      block = read_block(uncompressed)
+                      if block is None:
+                          if zero_blocks < 2:
+                              raise ValueError("archive is missing the canonical two-block end marker")
+                          break
+                      if block == bytes(512):
+                          zero_blocks += 1
+                          continue
+                      if zero_blocks:
+                          raise ValueError("archive contains nonzero data after the tar end marker")
+                      member_count += 1
+                      if member_count > max_members:
+                          raise ValueError("archive contains too many members")
+                      path, size, typeflag, linkname = validate_header(block)
+                      normalized, is_regular = validate_member(path, size, typeflag, linkname)
+                      total_size += size
+                      if total_size > max_expanded_bytes:
+                          raise ValueError("archive expansion exceeds the limit")
+                      if normalized == "resolution.json":
+                          if path != "./resolution.json" or not is_regular:
+                              raise ValueError(f"archive uses noncanonical resolution path {path!r}")
+                          if resolution is not None:
+                              raise ValueError("archive contains duplicate ./resolution.json members")
+                          if size <= 0 or size > max_resolution_bytes:
+                              raise ValueError("archive resolution.json is not a bounded regular file")
+                          resolution = read_exact(uncompressed, size)
+                      else:
+                          skip_exact(uncompressed, size)
+                      padding = (-size) % 512
+                      if padding and any(read_exact(uncompressed, padding)):
+                          raise ValueError("archive member padding is nonzero")
+              if resolution is None:
+                  raise ValueError("archive is missing ./resolution.json")
+              json.loads(
+                  resolution.decode("utf-8"),
+                  object_pairs_hook=unique_object,
+                  parse_constant=reject_constant,
+              )
+              output_path.write_bytes(resolution)
+          except (EOFError, MemoryError, OSError, UnicodeError, ValueError, zlib.error) as exc:
+              raise SystemExit(f"{archive_path}: invalid runtime evidence: {exc}")
+          PYARCHIVE
+          }
+
           verify_resolution_epoch() {
             python3 - "$1" <<'PYEPOCH'
           from datetime import datetime
@@ -834,73 +1054,93 @@ jobs:
           PYEPOCH
           }
 
-          for spec in live-test live-python live-glibc live-redis live-graphviz; do
-            amd64="dist/release/runtime-evidence/runtime-evidence-linux-amd64-${spec}.tar.gz"
-            arm64="dist/release/runtime-evidence/runtime-evidence-linux-arm64-${spec}.tar.gz"
-            for archive in "$amd64" "$arm64"; do
-              test -s "$archive"
-            done
+          metadata_filter='
+            def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
+            def allowed_metadata_keys: [
+              "digest", "fetched_at", "formula_digest", "formula_envelope_digest",
+              "formula_freshness_source", "formula_signatures", "formula_url",
+              "generated_at", "migration_digest", "migration_envelope_digest",
+              "migration_freshness_source", "migration_signatures", "migration_url",
+              "signatures"
+            ];
+            if .schema_version != "dalec-homebrew-resolution/v1" then
+              error("unexpected resolution schema")
+            elif (.metadata | type) != "object" then
+              error("resolution metadata is missing")
+            elif ((.metadata | keys) - allowed_metadata_keys | length) != 0 then
+              error("resolution metadata has unknown fields")
+            elif ([.metadata.digest, .metadata.formula_digest, .metadata.migration_digest, .metadata.formula_envelope_digest, .metadata.migration_envelope_digest] | all(sha256)) | not then
+              error("resolution metadata digests are missing or invalid")
+            elif (.metadata.generated_at | type) != "string" or (.metadata.generated_at | length) == 0 then
+              error("resolution metadata generated_at is missing")
+            elif (.metadata.fetched_at | type) != "string" or (.metadata.fetched_at | length) == 0 then
+              error("resolution metadata fetched_at is missing")
+            elif ([.metadata.formula_freshness_source, .metadata.migration_freshness_source] | all(. == "signed-payload" or . == "http-last-modified")) | not then
+              error("resolution metadata freshness source is invalid")
+            elif (.metadata.formula_url | type) != "string" or (.metadata.formula_url | length) == 0 then
+              error("resolution Formula URL is missing")
+            elif (.metadata.migration_url | type) != "string" or (.metadata.migration_url | length) == 0 then
+              error("resolution migration URL is missing")
+            elif ([.metadata.signatures, .metadata.formula_signatures, .metadata.migration_signatures] | all(. == null or type == "array")) | not then
+              error("resolution metadata signatures are malformed")
+            else
+              {metadata: (.metadata | del(.fetched_at, .signatures, .formula_signatures, .migration_signatures))}
+            end
+          '
+
+          # jq variables are intentionally literal in the single-quoted filter.
+          # shellcheck disable=SC2016
+          resolution_binding_filter='
+            .schema_version == "dalec-homebrew-resolution/v1" and
+            .input.platform.os == ($platform | split("/")[0]) and
+            .input.platform.architecture == ($platform | split("/")[1]) and
+            (((.input.platform | keys) == ["architecture", "os"]) or
+             (((.input.platform | keys) == ["architecture", "os", "variant"]) and
+              ((.input.platform.variant | type) == "string") and
+              .input.platform.variant == "")) and
+            .policy_version == $manifest[0].policy_version and
+            .components.frontend_ref == $frontend and
+            .components.runtime_base_ref == $runtime_base and
+            .components.materializer_ref == $materializer and
+            .components.homebrew_commit == $inputs[0].homebrew_commit and
+            .components.ruby_runtime == $inputs[0].portable_ruby_version and
+            .components.verification_keys_digest == $inputs[0].verification_keys_digest and
+            .components.dalec_module == $inputs[0].dalec_module and
+            .components.buildkit_module == $inputs[0].buildkit_module
+          '
+
+          for spec in "${specs[@]}"; do
             for platform in linux/amd64 linux/arm64; do
               platform_slug=${platform//\//-}
-              archive="dist/release/runtime-evidence/runtime-evidence-${platform_slug}-${spec}.tar.gz"
+              archive="$runtime_evidence_dir/runtime-evidence-${platform_slug}-${spec}.tar.gz"
+              test -s "$archive"
               frontend_ref=$(jq -er --arg platform "$platform" '.components.frontend.repository + "@" + .components.frontend.platforms[$platform]' dist/release/digests.json)
               runtime_base_ref=$(jq -er --arg platform "$platform" '.components["runtime-base"].repository + "@" + .components["runtime-base"].platforms[$platform]' dist/release/digests.json)
               materializer_ref=$(jq -er --arg platform "$platform" '.components.materializer.repository + "@" + .components.materializer.platforms[$platform]' dist/release/digests.json)
               resolution="$RUNNER_TEMP/${spec}-${platform_slug}-resolution.json"
-              tar -xOf "$archive" ./resolution.json > "$resolution"
+              extract_resolution "$archive" "$resolution"
               jq -e \
+                --arg platform "$platform" \
                 --arg frontend "$frontend_ref" \
                 --arg runtime_base "$runtime_base_ref" \
                 --arg materializer "$materializer_ref" \
                 --slurpfile manifest dist/release/components.json \
-                --slurpfile inputs dist/release/inputs.json '
-                  .policy_version == $manifest[0].policy_version and
-                  .components.frontend_ref == $frontend and
-                  .components.runtime_base_ref == $runtime_base and
-                  .components.materializer_ref == $materializer and
-                  .components.homebrew_commit == $inputs[0].homebrew_commit and
-                  .components.ruby_runtime == $inputs[0].portable_ruby_version and
-                  .components.verification_keys_digest == $inputs[0].verification_keys_digest and
-                  .components.dalec_module == $inputs[0].dalec_module and
-                  .components.buildkit_module == $inputs[0].buildkit_module
-                ' "$resolution" >/dev/null
+                --slurpfile inputs dist/release/inputs.json \
+                "$resolution_binding_filter" "$resolution" >/dev/null
               verify_resolution_epoch "$resolution"
+              jq -S -e "$metadata_filter" "$resolution" \
+                > "$RUNNER_TEMP/${spec}-${platform_slug#linux-}-metadata.json"
             done
-            metadata_filter='
-              def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
-              if .schema_version != "dalec-homebrew-resolution/v1" then
-                error("unexpected resolution schema")
-              elif (.metadata | type) != "object" then
-                error("resolution metadata is missing")
-              elif ([.metadata.digest, .metadata.formula_digest, .metadata.migration_digest, .metadata.formula_envelope_digest, .metadata.migration_envelope_digest] | all(sha256)) | not then
-                error("resolution metadata digests are missing or invalid")
-              elif (.metadata.generated_at | type) != "string" or (.metadata.generated_at | length) == 0 then
-                error("resolution metadata generated_at is missing")
-              elif ([.metadata.formula_freshness_source, .metadata.migration_freshness_source] | all(. == "signed-payload" or . == "http-last-modified")) | not then
-                error("resolution metadata freshness source is invalid")
-              elif (.metadata.formula_url | type) != "string" or (.metadata.formula_url | length) == 0 then
-                error("resolution Formula URL is missing")
-              elif (.metadata.migration_url | type) != "string" or (.metadata.migration_url | length) == 0 then
-                error("resolution migration URL is missing")
-              else
-                {metadata: {digest: .metadata.digest, formula_digest: .metadata.formula_digest, migration_digest: .metadata.migration_digest, formula_envelope_digest: .metadata.formula_envelope_digest, migration_envelope_digest: .metadata.migration_envelope_digest, generated_at: .metadata.generated_at, formula_freshness_source: .metadata.formula_freshness_source, migration_freshness_source: .metadata.migration_freshness_source, formula_url: .metadata.formula_url, migration_url: .metadata.migration_url}}
-              end
-            '
-            jq -S -e "$metadata_filter" \
-              "$RUNNER_TEMP/${spec}-linux-amd64-resolution.json" \
-              > "$RUNNER_TEMP/${spec}-amd64-metadata.json"
-            jq -S -e "$metadata_filter" \
-              "$RUNNER_TEMP/${spec}-linux-arm64-resolution.json" \
-              > "$RUNNER_TEMP/${spec}-arm64-metadata.json"
             diff -u \
               "$RUNNER_TEMP/${spec}-amd64-metadata.json" \
               "$RUNNER_TEMP/${spec}-arm64-metadata.json"
           done
 
-          reference="$RUNNER_TEMP/live-test-amd64-metadata.json"
-          for spec in live-python live-glibc live-redis live-graphviz; do
+          reference="$RUNNER_TEMP/${specs[0]}-amd64-metadata.json"
+          for spec in "${specs[@]:1}"; do
             diff -u "$reference" "$RUNNER_TEMP/${spec}-amd64-metadata.json"
           done
+          candidate="$RUNNER_TEMP/metadata-snapshot-candidate.json"
           jq -n \
             --arg release_tag "$RELEASE_TAG" \
             --arg release_sha "$RELEASE_SHA" \
@@ -909,7 +1149,98 @@ jobs:
               schema_version: "dalec-homebrew-release-metadata/v1",
               release: {tag: $release_tag, sha: $release_sha},
               accepted_snapshot: $snapshot[0].metadata
-            }' > dist/release/metadata-snapshot.json
+            }' > "$candidate"
+          if [[ -e dist/release/metadata-snapshot.json ]]; then
+            diff -u dist/release/metadata-snapshot.json "$candidate"
+          else
+            mv "$candidate" dist/release/metadata-snapshot.json
+          fi
+
+      - name: Validate vulnerability reports
+        run: &validate-vulnerability-reports |
+          set -euo pipefail
+          evidence_dir=dist/release
+          [[ -d dist/release/evidence ]] && evidence_dir=dist/release/evidence
+          report_args=()
+          for component in frontend runtime-base materializer; do
+            for platform in linux/amd64 linux/arm64; do
+              slug=${platform//\//-}
+              report="$evidence_dir/vulnerability-${component}-${slug}.json"
+              test -s "$report"
+              subject=$(jq -er --arg component "$component" --arg platform "$platform" \
+                '.components[$component].repository + "@" + .components[$component].platforms[$platform]' \
+                dist/release/digests.json)
+              report_args+=("$report" "$subject")
+            done
+          done
+          python3 - "${report_args[@]}" <<'PYVULN'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          max_bytes = int(os.environ["MAX_RELEASE_ASSET_BYTES"])
+
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON member {key!r}")
+                  result[key] = value
+              return result
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant {value}")
+
+          if (len(sys.argv) - 1) % 2 != 0:
+              raise SystemExit("vulnerability validator requires report/subject pairs")
+
+          for index in range(1, len(sys.argv), 2):
+              path = Path(sys.argv[index])
+              expected_subject = sys.argv[index + 1]
+              try:
+                  size = path.stat().st_size
+                  if size <= 0 or size > max_bytes:
+                      raise ValueError(f"report size {size} is outside the allowed range")
+                  with path.open("rb") as source:
+                      data = source.read(max_bytes + 1)
+                  if len(data) != size or len(data) > max_bytes:
+                      raise ValueError("report size changed or exceeded the limit while reading")
+                  document = json.loads(
+                      data.decode("utf-8"),
+                      object_pairs_hook=unique_object,
+                      parse_constant=reject_constant,
+                  )
+                  if not isinstance(document, dict) or document.get("SchemaVersion") != 2:
+                      raise ValueError("unexpected Trivy schema")
+                  if document.get("ArtifactName") != expected_subject:
+                      raise ValueError("Trivy ArtifactName does not match the expected subject")
+                  if document.get("ArtifactType") != "container_image":
+                      raise ValueError("Trivy ArtifactType is not container_image")
+                  metadata = document.get("Metadata")
+                  if not isinstance(metadata, dict):
+                      raise ValueError("Trivy Metadata is not an object")
+                  repo_digests = metadata.get("RepoDigests")
+                  if not isinstance(repo_digests, list) or expected_subject not in repo_digests:
+                      raise ValueError("Trivy RepoDigests does not contain the expected subject")
+                  results = document.get("Results")
+                  if not isinstance(results, list) or not results:
+                      raise ValueError("Trivy Results is not a nonempty array")
+                  for result in results:
+                      if not isinstance(result, dict):
+                          raise ValueError("Trivy result is not an object")
+                      if not isinstance(result.get("Target"), str) or not result["Target"]:
+                          raise ValueError("Trivy result Target is missing")
+                      vulnerabilities = result.get("Vulnerabilities")
+                      if vulnerabilities is None:
+                          continue
+                      if not isinstance(vulnerabilities, list):
+                          raise ValueError("Trivy Vulnerabilities is not an array")
+                      if vulnerabilities:
+                          raise ValueError("report contains a fixed critical vulnerability")
+              except (OSError, UnicodeError, ValueError) as exc:
+                  raise SystemExit(f"{path}: invalid vulnerability report: {exc}")
+          PYVULN
 
       - name: Generate SLSA provenance predicate
         env:
@@ -964,6 +1295,48 @@ jobs:
       - name: Validate release tuple before signing
         run: &validate-release-tuple |
           set -euo pipefail
+
+          python3 - \
+            dist/release/components.json \
+            dist/release/metadata-snapshot.json \
+            dist/release/inputs.json \
+            dist/release/digests.json \
+            dist/release/provenance.json <<'PYJSON'
+          import json
+          from pathlib import Path
+          import sys
+
+          max_bytes = 4 << 20
+
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON member {key!r}")
+                  result[key] = value
+              return result
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant {value}")
+
+          for raw_path in sys.argv[1:]:
+              path = Path(raw_path)
+              try:
+                  size = path.stat().st_size
+                  if size <= 0 or size > max_bytes:
+                      raise ValueError(f"record size {size} is outside the allowed range")
+                  with path.open("rb") as source:
+                      data = source.read(max_bytes + 1)
+                  if len(data) != size or len(data) > max_bytes:
+                      raise ValueError("record size changed or exceeded the limit while reading")
+                  json.loads(
+                      data.decode("utf-8"),
+                      object_pairs_hook=unique_object,
+                      parse_constant=reject_constant,
+                  )
+              except (OSError, UnicodeError, ValueError) as exc:
+                  raise SystemExit(f"{path}: invalid strict JSON: {exc}")
+          PYJSON
 
           jq -e '
             def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
@@ -1205,16 +1578,8 @@ jobs:
           import re
           import sys
 
-          def unique_object(pairs):
-              result = {}
-              for key, value in pairs:
-                  if key in result:
-                      raise ValueError(f"duplicate JSON member {key!r}")
-                  result[key] = value
-              return result
-
           with open(sys.argv[1], encoding="utf-8") as source:
-              document = json.load(source, object_pairs_hook=unique_object)
+              document = json.load(source)
           value = document["accepted_snapshot"]["generated_at"]
           if not isinstance(value, str):
               raise SystemExit("metadata generated_at is not a string")
@@ -1624,6 +1989,8 @@ jobs:
           contract_names=$(mktemp "$RUNNER_TEMP/release-contract.XXXXXX")
           expected_names=$(mktemp "$RUNNER_TEMP/signed-assets-expected.XXXXXX")
           actual_names=$(mktemp "$RUNNER_TEMP/signed-assets-actual.XXXXXX")
+          read -r -a specs <<< "$RELEASE_SPECS"
+          (( ${#specs[@]} > 0 ))
           {
             printf '%s\n' \
               components.digest \
@@ -1643,12 +2010,13 @@ jobs:
               done
             done
             for platform in linux-amd64 linux-arm64; do
-              for spec in live-test live-python live-glibc live-redis live-graphviz; do
+              for spec in "${specs[@]}"; do
                 printf 'runtime-evidence-%s-%s.tar.gz\n' "$platform" "$spec"
               done
             done
           } | sort > "$contract_names"
-          (( $(wc -l < "$contract_names") == 32 ))
+          expected_contract_count=$((22 + 2 * ${#specs[@]}))
+          (( $(wc -l < "$contract_names") == expected_contract_count ))
           (
             cd dist/release
             awk '
@@ -1674,6 +2042,12 @@ jobs:
 
       - name: Validate signed release tuple
         run: *validate-release-tuple
+
+      - name: Revalidate runtime evidence and metadata snapshot
+        run: *validate-runtime-evidence
+
+      - name: Revalidate vulnerability reports
+        run: *validate-vulnerability-reports
 
       - name: Reverify release signatures and attestations
         env:
