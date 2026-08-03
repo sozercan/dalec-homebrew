@@ -3,17 +3,26 @@ package buildfiles
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/moby/buildkit/frontend/dockerfile/parser"
 )
 
+func repositoryRoot(t *testing.T) string {
+	t.Helper()
+	// The go command runs tests from the package directory. Avoid runtime.Caller:
+	// -trimpath rewrites caller filenames to module paths, not filesystem paths.
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repository root: %v", err)
+	}
+	return root
+}
+
 func dockerfilePath(t *testing.T) string {
 	t.Helper()
-	_, file, _, _ := runtime.Caller(0)
-	return filepath.Clean(filepath.Join(filepath.Dir(file), "../..", "Dockerfile"))
+	return filepath.Join(repositoryRoot(t), "Dockerfile")
 }
 
 func dockerfileText(t *testing.T) string {

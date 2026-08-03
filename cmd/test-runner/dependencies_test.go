@@ -3,17 +3,23 @@ package main
 import (
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
-func TestRuntimeDependencyGraphExcludesBuildStack(t *testing.T) {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test source path")
+func repositoryRoot(t *testing.T) string {
+	t.Helper()
+	// The go command runs tests from the package directory. Avoid runtime.Caller:
+	// -trimpath rewrites caller filenames to module paths, not filesystem paths.
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repository root: %v", err)
 	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../.."))
+	return root
+}
+
+func TestRuntimeDependencyGraphExcludesBuildStack(t *testing.T) {
+	root := repositoryRoot(t)
 	cmd := exec.Command("go", "list", "-mod=readonly", "-deps", "-f", "{{.ImportPath}}", "./cmd/test-runner")
 	cmd.Dir = root
 	output, err := cmd.CombinedOutput()
