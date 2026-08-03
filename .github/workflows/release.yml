@@ -3,6 +3,16 @@ name: release
 on:
   repository_dispatch:
     types: [release]
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Optional commit expected from the tag creation event
+        required: false
+        type: string
+      tag:
+        description: Existing v-prefixed OCI-compatible SemVer tag to publish
+        required: true
+        type: string
 
 concurrency:
   group: release-${{ github.repository }}
@@ -38,16 +48,30 @@ jobs:
       - name: Validate release request
         id: request
         env:
-          INPUT_TAG: ${{ github.event.client_payload.tag }}
+          INPUT_EXPECTED_SHA: ${{ inputs.expected_sha || github.event.client_payload.expected_sha }}
+          INPUT_TAG: ${{ inputs.tag || github.event.client_payload.tag }}
         run: |
           set -euo pipefail
 
-          if [[ "$GITHUB_EVENT_NAME" != repository_dispatch || "$GITHUB_REF" != refs/heads/main ]]; then
-            echo "release dispatches must use the trusted main branch workflow" >&2
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "release requests must use the trusted main branch workflow" >&2
             exit 1
           fi
+          case "$GITHUB_EVENT_NAME" in
+            repository_dispatch|workflow_dispatch)
+              ;;
+            *)
+              echo "unsupported release event: $GITHUB_EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
 
           tag=$INPUT_TAG
+          expected_sha=$INPUT_EXPECTED_SHA
+          if [[ -n "$expected_sha" && ! "$expected_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release request has an invalid expected commit: $expected_sha" >&2
+            exit 1
+          fi
           if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
             echo "release tag is not supported semver: $tag" >&2
             exit 1
@@ -73,6 +97,7 @@ jobs:
           [[ "$tag" == *-* ]] && stable=false
           {
             echo "tag=$tag"
+            echo "expected_sha=$expected_sha"
             echo "stable=$stable"
           } >> "$GITHUB_OUTPUT"
 
@@ -86,6 +111,7 @@ jobs:
       - name: Verify tag and main reachability
         id: release
         env:
+          EXPECTED_SHA: ${{ steps.request.outputs.expected_sha }}
           RELEASE_TAG: ${{ steps.request.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -99,6 +125,10 @@ jobs:
           head_sha=$(git rev-parse HEAD)
           if [[ "$tag_sha" != "$head_sha" ]]; then
             echo "checked-out HEAD $head_sha does not match $RELEASE_TAG ($tag_sha)" >&2
+            exit 1
+          fi
+          if [[ -n "$EXPECTED_SHA" && "$tag_sha" != "$EXPECTED_SHA" ]]; then
+            echo "$RELEASE_TAG moved from the pushed commit $EXPECTED_SHA to $tag_sha" >&2
             exit 1
           fi
 
@@ -1652,7 +1682,7 @@ jobs:
             --argjson run_attempt "$run_attempt" '
             .id == $run_id and
             .run_attempt == $run_attempt and
-            .event == "repository_dispatch" and
+            (.event == "repository_dispatch" or .event == "workflow_dispatch") and
             .head_branch == "main" and
             .head_sha == $workflow_sha and
             (.path == ".github/workflows/release.yml" or

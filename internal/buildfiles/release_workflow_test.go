@@ -13,7 +13,319 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+func TestReleaseTagWorkflowDispatcher(t *testing.T) {
+	workflow := workflowYAML(t, "release-tag.yml")
+	on := yamlMappingValue(t, workflow, "on")
+	requireYAMLMappingKeys(t, on, "push")
+	push := yamlMappingValue(t, on, "push")
+	requireYAMLMappingKeys(t, push, "tags")
+	requireYAMLStringSequence(t, yamlMappingValue(t, push, "tags"), "v*.*.*")
+	if got := yamlStringSequence(t, yamlMappingValue(t, push, "tags")); len(got) != 1 || got[0] != "v*.*.*" {
+		t.Fatalf("release tag workflow tags = %v, want [v*.*.*]", got)
+	}
+	requireYAMLMappingKeys(t, yamlMappingValue(t, workflow, "permissions"))
+
+	jobs := yamlMappingValue(t, workflow, "jobs")
+	requireYAMLMappingKeys(t, jobs, "dispatch")
+	dispatch := yamlMappingValue(t, jobs, "dispatch")
+	if got := yamlScalarValue(t, yamlMappingValue(t, dispatch, "if")); got != "github.ref_type == 'tag' && startsWith(github.ref_name, 'v')" {
+		t.Fatalf("release tag dispatcher guard = %q", got)
+	}
+	jobPermissions := yamlMappingValue(t, dispatch, "permissions")
+	requireYAMLMappingKeys(t, jobPermissions, "actions")
+	if got := yamlScalarValue(t, yamlMappingValue(t, jobPermissions, "actions")); got != "write" {
+		t.Fatalf("release tag dispatcher actions permission = %q, want write", got)
+	}
+
+	steps := yamlMappingValue(t, dispatch, "steps")
+	if steps.Kind != yaml.SequenceNode {
+		t.Fatalf("release tag dispatcher steps YAML kind = %v, want sequence", steps.Kind)
+	}
+	for _, step := range steps.Content {
+		if _, ok := yamlMappingLookup(t, step, "uses"); ok {
+			t.Fatalf("release tag dispatcher contains a uses step: %q", yamlOptionalScalar(t, step, "name"))
+		}
+		if run := yamlOptionalScalar(t, step, "run"); strings.Contains(strings.ToLower(run), "checkout") {
+			t.Fatalf("release tag dispatcher step %q performs a checkout", yamlOptionalScalar(t, step, "name"))
+		}
+	}
+
+	dispatchStep := workflowStepByName(t, workflow, "dispatch", "Dispatch release workflow from main")
+	dispatchEnvironment := yamlMappingValue(t, dispatchStep, "env")
+	wantEnvironment := map[string]string{
+		"EXPECTED_SHA": "${{ github.sha }}",
+		"GH_TOKEN":     "${{ github.token }}",
+		"RELEASE_TAG":  "${{ github.ref_name }}",
+	}
+	wantEnvironmentKeys := make([]string, 0, len(wantEnvironment))
+	for key := range wantEnvironment {
+		wantEnvironmentKeys = append(wantEnvironmentKeys, key)
+	}
+	requireYAMLMappingKeys(t, dispatchEnvironment, wantEnvironmentKeys...)
+	for key, want := range wantEnvironment {
+		if got := yamlScalarValue(t, yamlMappingValue(t, dispatchEnvironment, key)); got != want {
+			t.Fatalf("release tag dispatcher environment %s = %q, want %q", key, got, want)
+		}
+	}
+
+	temporary := t.TempDir()
+	argumentsPath := filepath.Join(temporary, "gh-arguments")
+	fakeGH := filepath.Join(temporary, "gh")
+	if err := os.WriteFile(fakeGH, []byte("#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > \"$GH_ARGUMENTS\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	expectedSHA := strings.Repeat("a", 40)
+	dispatchScript := yamlScalarValue(t, yamlMappingValue(t, dispatchStep, "run"))
+	output, err := runWorkflowShell(t, dispatchScript, map[string]string{
+		"EXPECTED_SHA":      expectedSHA,
+		"GH_ARGUMENTS":      argumentsPath,
+		"GH_TOKEN":          "unused",
+		"GITHUB_EVENT_NAME": "push",
+		"GITHUB_REF":        "refs/tags/v1.2.3",
+		"GITHUB_REF_TYPE":   "tag",
+		"GITHUB_REPOSITORY": "sozercan/dalec-homebrew",
+		"PATH":              temporary + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"RELEASE_TAG":       "v1.2.3",
+	})
+	if err != nil {
+		t.Fatalf("release tag dispatcher failed: %v\n%s", err, output)
+	}
+	data, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	requireArgumentSequence(t, arguments, "api", "--method", "POST")
+	requireArgument(t, arguments, "repos/sozercan/dalec-homebrew/actions/workflows/release.yml/dispatches")
+	requireArgumentSequence(t, arguments, "-f", "ref=main")
+	requireArgumentSequence(t, arguments, "-f", "inputs[tag]=v1.2.3")
+	requireArgumentSequence(t, arguments, "-f", "inputs[expected_sha]="+expectedSHA)
+}
+
+func TestReleaseWorkflowRequestTriggers(t *testing.T) {
+	workflow := workflowYAML(t, "release.yml")
+	on := yamlMappingValue(t, workflow, "on")
+	requireYAMLMappingKeys(t, on, "repository_dispatch", "workflow_dispatch")
+
+	repositoryDispatch := yamlMappingValue(t, on, "repository_dispatch")
+	requireYAMLMappingKeys(t, repositoryDispatch, "types")
+	requireYAMLStringSequence(t, yamlMappingValue(t, repositoryDispatch, "types"), "release")
+
+	workflowDispatch := yamlMappingValue(t, on, "workflow_dispatch")
+	requireYAMLMappingKeys(t, workflowDispatch, "inputs")
+	inputs := yamlMappingValue(t, workflowDispatch, "inputs")
+	requireYAMLMappingKeys(t, inputs, "expected_sha", "tag")
+	expectedSHAInput := yamlMappingValue(t, inputs, "expected_sha")
+	if got := yamlScalarValue(t, yamlMappingValue(t, expectedSHAInput, "required")); got != "false" {
+		t.Fatalf("workflow_dispatch expected_sha required = %q, want false", got)
+	}
+	if got := yamlScalarValue(t, yamlMappingValue(t, expectedSHAInput, "type")); got != "string" {
+		t.Fatalf("workflow_dispatch expected_sha type = %q, want string", got)
+	}
+	tagInput := yamlMappingValue(t, inputs, "tag")
+	if got := yamlScalarValue(t, yamlMappingValue(t, tagInput, "required")); got != "true" {
+		t.Fatalf("workflow_dispatch tag required = %q, want true", got)
+	}
+	if got := yamlScalarValue(t, yamlMappingValue(t, tagInput, "type")); got != "string" {
+		t.Fatalf("workflow_dispatch tag type = %q, want string", got)
+	}
+
+	requestStep := workflowStepByName(t, workflow, "prepare", "Validate release request")
+	requestEnvironment := yamlMappingValue(t, requestStep, "env")
+	requireYAMLMappingKeys(t, requestEnvironment, "INPUT_EXPECTED_SHA", "INPUT_TAG")
+	if got := yamlScalarValue(t, yamlMappingValue(t, requestEnvironment, "INPUT_EXPECTED_SHA")); got != "${{ inputs.expected_sha || github.event.client_payload.expected_sha }}" {
+		t.Fatalf("release request expected SHA expression = %q", got)
+	}
+	if got := yamlScalarValue(t, yamlMappingValue(t, requestEnvironment, "INPUT_TAG")); got != "${{ inputs.tag || github.event.client_payload.tag }}" {
+		t.Fatalf("release request tag expression = %q", got)
+	}
+
+	requestScript := yamlScalarValue(t, yamlMappingValue(t, requestStep, "run"))
+	expectedSHA := strings.Repeat("a", 40)
+	valid := []struct {
+		event       string
+		expectedSHA string
+	}{
+		{event: "workflow_dispatch", expectedSHA: expectedSHA},
+		{event: "repository_dispatch"},
+	}
+	for _, tt := range valid {
+		t.Run("valid "+tt.event, func(t *testing.T) {
+			outputPath := filepath.Join(t.TempDir(), "github-output")
+			output, err := runWorkflowShell(t, requestScript, map[string]string{
+				"GITHUB_EVENT_NAME":  tt.event,
+				"GITHUB_OUTPUT":      outputPath,
+				"GITHUB_REF":         "refs/heads/main",
+				"INPUT_EXPECTED_SHA": tt.expectedSHA,
+				"INPUT_TAG":          "v1.2.3",
+				"PATH":               os.Getenv("PATH"),
+			})
+			if err != nil {
+				t.Fatalf("valid %s request rejected: %v\n%s", tt.event, err, output)
+			}
+			outputs := readWorkflowOutputs(t, outputPath)
+			if outputs["tag"] != "v1.2.3" || outputs["expected_sha"] != tt.expectedSHA || outputs["stable"] != "true" {
+				t.Fatalf("%s outputs = %v", tt.event, outputs)
+			}
+		})
+	}
+
+	invalid := []struct {
+		name        string
+		event       string
+		ref         string
+		expectedSHA string
+	}{
+		{name: "workflow run", event: "workflow_run", ref: "refs/heads/main", expectedSHA: expectedSHA},
+		{name: "create event", event: "create", ref: "refs/heads/main", expectedSHA: expectedSHA},
+		{name: "wrong ref", event: "workflow_dispatch", ref: "refs/tags/v1.2.3", expectedSHA: expectedSHA},
+		{name: "invalid expected SHA", event: "workflow_dispatch", ref: "refs/heads/main", expectedSHA: "not-a-commit"},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			output, err := runWorkflowShell(t, requestScript, map[string]string{
+				"GITHUB_EVENT_NAME":  tt.event,
+				"GITHUB_OUTPUT":      filepath.Join(t.TempDir(), "github-output"),
+				"GITHUB_REF":         tt.ref,
+				"INPUT_EXPECTED_SHA": tt.expectedSHA,
+				"INPUT_TAG":          "v1.2.3",
+				"PATH":               os.Getenv("PATH"),
+			})
+			if err == nil {
+				t.Fatalf("invalid release request accepted\n%s", output)
+			}
+		})
+	}
+}
+
+func TestReleaseWorkflowBindsLiveTagToPushedSHA(t *testing.T) {
+	workflow := workflowYAML(t, "release.yml")
+	verifyStep := workflowStepByName(t, workflow, "prepare", "Verify tag and main reachability")
+	verifyEnvironment := yamlMappingValue(t, verifyStep, "env")
+	if got := yamlScalarValue(t, yamlMappingValue(t, verifyEnvironment, "EXPECTED_SHA")); got != "${{ steps.request.outputs.expected_sha }}" {
+		t.Fatalf("verify EXPECTED_SHA = %q", got)
+	}
+	verifyScript := yamlScalarValue(t, yamlMappingValue(t, verifyStep, "run"))
+	for _, contract := range []string{
+		`tag_sha=$(git rev-parse "$RELEASE_TAG^{commit}")`,
+		`if [[ -n "$EXPECTED_SHA" && "$tag_sha" != "$EXPECTED_SHA" ]]; then`,
+	} {
+		if !strings.Contains(verifyScript, contract) {
+			t.Fatalf("verify step does not bind the live tag to the pushed SHA; missing %q", contract)
+		}
+	}
+
+	temporary := t.TempDir()
+	fakeGit := filepath.Join(temporary, "git")
+	if err := os.WriteFile(fakeGit, []byte(`#!/bin/sh
+set -eu
+case "$1" in
+  show-ref) exit 0 ;;
+  rev-parse) printf '%s\n' "$LIVE_SHA" ;;
+  *) exit 2 ;;
+esac
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fakeGH := filepath.Join(temporary, "gh")
+	if err := os.WriteFile(fakeGH, []byte("#!/bin/sh\nset -eu\nprintf '%s\\n' identical\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	liveSHA := strings.Repeat("a", 40)
+	tests := []struct {
+		name        string
+		expectedSHA string
+		wantErr     bool
+	}{
+		{name: "matching pushed SHA", expectedSHA: liveSHA},
+		{name: "mismatched pushed SHA", expectedSHA: strings.Repeat("b", 40), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outputPath := filepath.Join(t.TempDir(), "github-output")
+			output, err := runWorkflowShell(t, verifyScript, map[string]string{
+				"EXPECTED_SHA":      tt.expectedSHA,
+				"GITHUB_OUTPUT":     outputPath,
+				"GITHUB_REPOSITORY": "sozercan/dalec-homebrew",
+				"LIVE_SHA":          liveSHA,
+				"PATH":              temporary + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"RELEASE_TAG":       "v1.2.3",
+			})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("tag SHA verification error = %v, wantErr %v\n%s", err, tt.wantErr, output)
+			}
+			if !tt.wantErr {
+				outputs := readWorkflowOutputs(t, outputPath)
+				if outputs["sha"] != liveSHA {
+					t.Fatalf("verified tag SHA = %q, want %q", outputs["sha"], liveSHA)
+				}
+			}
+		})
+	}
+}
+
+func TestReleaseWorkflowProvenanceRunValidation(t *testing.T) {
+	workflow := workflowYAML(t, "release.yml")
+	validationStep := workflowStepByName(t, workflow, "sign", "Validate release tuple before signing")
+	validationScript := yamlScalarValue(t, yamlMappingValue(t, validationStep, "run"))
+	validationScript = provenanceRunValidationShell(t, validationScript)
+
+	temporary := t.TempDir()
+	responsePath := filepath.Join(temporary, "gh-response.json")
+	fakeGH := filepath.Join(temporary, "gh")
+	if err := os.WriteFile(fakeGH, []byte("#!/bin/sh\nset -eu\ncat \"$GH_RESPONSE\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workflowSHA := strings.Repeat("a", 40)
+	tests := []struct {
+		name       string
+		event      string
+		headBranch string
+		headSHA    string
+		path       string
+		wantErr    bool
+	}{
+		{name: "repository dispatch", event: "repository_dispatch", headBranch: "main", headSHA: workflowSHA, path: ".github/workflows/release.yml"},
+		{name: "workflow dispatch", event: "workflow_dispatch", headBranch: "main", headSHA: workflowSHA, path: ".github/workflows/release.yml@main"},
+		{name: "workflow run", event: "workflow_run", headBranch: "main", headSHA: workflowSHA, path: ".github/workflows/release.yml@refs/heads/main", wantErr: true},
+		{name: "untrusted event", event: "push", headBranch: "main", headSHA: workflowSHA, path: ".github/workflows/release.yml", wantErr: true},
+		{name: "wrong branch", event: "workflow_dispatch", headBranch: "release", headSHA: workflowSHA, path: ".github/workflows/release.yml", wantErr: true},
+		{name: "wrong SHA", event: "workflow_dispatch", headBranch: "main", headSHA: strings.Repeat("b", 40), path: ".github/workflows/release.yml", wantErr: true},
+		{name: "wrong path", event: "workflow_dispatch", headBranch: "main", headSHA: workflowSHA, path: ".github/workflows/release-tag.yml", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response, err := json.Marshal(map[string]any{
+				"id":          123,
+				"run_attempt": 2,
+				"event":       tt.event,
+				"head_branch": tt.headBranch,
+				"head_sha":    tt.headSHA,
+				"path":        tt.path,
+				"repository":  map[string]any{"full_name": "sozercan/dalec-homebrew"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(responsePath, response, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			script := "set -euo pipefail\nrun_id=123\nrun_attempt=2\nworkflow_sha=" + workflowSHA + "\n" + validationScript
+			output, err := runWorkflowShell(t, script, map[string]string{
+				"GH_RESPONSE":       responsePath,
+				"GITHUB_REPOSITORY": "sozercan/dalec-homebrew",
+				"PATH":              temporary + string(os.PathListSeparator) + os.Getenv("PATH"),
+			})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("provenance run validation error = %v, wantErr %v\n%s", err, tt.wantErr, output)
+			}
+		})
+	}
+}
 
 func TestReleaseWorkflowSpecInventory(t *testing.T) {
 	workflow := releaseWorkflowText(t)
@@ -575,6 +887,191 @@ func releaseWorkflowShellFilter(t *testing.T, variable string) string {
 		lines[i] = strings.TrimPrefix(line, "            ")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func workflowYAML(t *testing.T, name string) *yaml.Node {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repositoryRoot(t), ".github", "workflows", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		t.Fatalf("parse %s: %v", name, err)
+	}
+	if document.Kind != yaml.DocumentNode || len(document.Content) != 1 {
+		t.Fatalf("%s root YAML kind = %v with %d children, want one document", name, document.Kind, len(document.Content))
+	}
+	root := document.Content[0]
+	if root.Kind != yaml.MappingNode {
+		t.Fatalf("%s root YAML kind = %v, want mapping", name, root.Kind)
+	}
+	return root
+}
+
+func yamlMappingLookup(t *testing.T, mapping *yaml.Node, key string) (*yaml.Node, bool) {
+	t.Helper()
+	if mapping.Kind != yaml.MappingNode || len(mapping.Content)%2 != 0 {
+		t.Fatalf("YAML node kind = %v with %d children, want mapping", mapping.Kind, len(mapping.Content))
+	}
+	for index := 0; index < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Value == key {
+			return mapping.Content[index+1], true
+		}
+	}
+	return nil, false
+}
+
+func yamlMappingValue(t *testing.T, mapping *yaml.Node, key string) *yaml.Node {
+	t.Helper()
+	value, ok := yamlMappingLookup(t, mapping, key)
+	if !ok {
+		t.Fatalf("YAML mapping does not contain %q", key)
+	}
+	return value
+}
+
+func requireYAMLMappingKeys(t *testing.T, mapping *yaml.Node, want ...string) {
+	t.Helper()
+	if mapping.Kind != yaml.MappingNode || len(mapping.Content)%2 != 0 {
+		t.Fatalf("YAML node kind = %v with %d children, want mapping", mapping.Kind, len(mapping.Content))
+	}
+	got := make([]string, 0, len(mapping.Content)/2)
+	for index := 0; index < len(mapping.Content); index += 2 {
+		got = append(got, mapping.Content[index].Value)
+	}
+	sort.Strings(got)
+	want = append([]string(nil), want...)
+	sort.Strings(want)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("YAML mapping keys = %v, want %v", got, want)
+	}
+}
+
+func yamlScalarValue(t *testing.T, node *yaml.Node) string {
+	t.Helper()
+	if node.Kind != yaml.ScalarNode {
+		t.Fatalf("YAML node kind = %v, want scalar", node.Kind)
+	}
+	return node.Value
+}
+
+func yamlOptionalScalar(t *testing.T, mapping *yaml.Node, key string) string {
+	t.Helper()
+	value, ok := yamlMappingLookup(t, mapping, key)
+	if !ok {
+		return ""
+	}
+	return yamlScalarValue(t, value)
+}
+
+func yamlStringSequence(t *testing.T, sequence *yaml.Node) []string {
+	t.Helper()
+	if sequence.Kind != yaml.SequenceNode {
+		t.Fatalf("YAML node kind = %v, want sequence", sequence.Kind)
+	}
+	values := make([]string, 0, len(sequence.Content))
+	for _, node := range sequence.Content {
+		values = append(values, yamlScalarValue(t, node))
+	}
+	return values
+}
+
+func requireYAMLStringSequence(t *testing.T, sequence *yaml.Node, want ...string) {
+	t.Helper()
+	got := yamlStringSequence(t, sequence)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("YAML sequence = %v, want %v", got, want)
+	}
+}
+
+func workflowStepByName(t *testing.T, workflow *yaml.Node, jobName, stepName string) *yaml.Node {
+	t.Helper()
+	jobs := yamlMappingValue(t, workflow, "jobs")
+	job := yamlMappingValue(t, jobs, jobName)
+	steps := yamlMappingValue(t, job, "steps")
+	if steps.Kind != yaml.SequenceNode {
+		t.Fatalf("workflow job %q steps YAML kind = %v, want sequence", jobName, steps.Kind)
+	}
+	for _, step := range steps.Content {
+		if yamlOptionalScalar(t, step, "name") == stepName {
+			return step
+		}
+	}
+	t.Fatalf("workflow job %q does not contain step %q", jobName, stepName)
+	return nil
+}
+
+func readWorkflowOutputs(t *testing.T, path string) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || key == "" {
+			t.Fatalf("invalid workflow output line %q", line)
+		}
+		if _, exists := outputs[key]; exists {
+			t.Fatalf("duplicate workflow output %q", key)
+		}
+		outputs[key] = value
+	}
+	return outputs
+}
+
+func provenanceRunValidationShell(t *testing.T, script string) string {
+	t.Helper()
+	startToken := `run_json=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$run_attempt")`
+	start := strings.Index(script, startToken)
+	if start < 0 {
+		t.Fatal("release workflow does not fetch the provenance workflow run")
+	}
+	validation := script[start:]
+	endToken := `' <<<"$run_json" >/dev/null`
+	end := strings.Index(validation, endToken)
+	if end < 0 {
+		t.Fatal("release workflow provenance run validation is unterminated")
+	}
+	return validation[:end+len(endToken)] + "\n"
+}
+
+func runWorkflowShell(t *testing.T, script string, environment map[string]string) ([]byte, error) {
+	t.Helper()
+	keys := make([]string, 0, len(environment))
+	for key := range environment {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	variables := make([]string, 0, len(keys))
+	for _, key := range keys {
+		variables = append(variables, key+"="+environment[key])
+	}
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = variables
+	return cmd.CombinedOutput()
+}
+
+func requireArgument(t *testing.T, arguments []string, want string) {
+	t.Helper()
+	for _, argument := range arguments {
+		if argument == want {
+			return
+		}
+	}
+	t.Fatalf("arguments %q do not contain %q", arguments, want)
+}
+
+func requireArgumentSequence(t *testing.T, arguments []string, want ...string) {
+	t.Helper()
+	for start := 0; start+len(want) <= len(arguments); start++ {
+		if strings.Join(arguments[start:start+len(want)], "\n") == strings.Join(want, "\n") {
+			return
+		}
+	}
+	t.Fatalf("arguments %q do not contain sequence %q", arguments, want)
 }
 
 func releaseWorkflowText(t *testing.T) string {
