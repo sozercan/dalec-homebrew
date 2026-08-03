@@ -49,6 +49,10 @@ func TestReleaseInputsFixture(t *testing.T) {
 }
 
 func TestReleaseInputsRejectsUnsafeFixtures(t *testing.T) {
+	setAMD64Base := func(f *bakeFixture, ref string) {
+		f.Target["runtime-base-amd64"].Args["RUNTIME_BASE"] = ref
+		f.Target["materializer-amd64"].Args["RUNTIME_BASE"] = ref
+	}
 	tests := []struct {
 		name           string
 		mutate         func(*bakeFixture)
@@ -65,10 +69,23 @@ func TestReleaseInputsRejectsUnsafeFixtures(t *testing.T) {
 		{
 			name: "mutable runtime base",
 			mutate: func(f *bakeFixture) {
-				f.Target["runtime-base-amd64"].Args["RUNTIME_BASE"] = "docker.io/library/ubuntu:24.04"
-				f.Target["materializer-amd64"].Args["RUNTIME_BASE"] = "docker.io/library/ubuntu:24.04"
+				setAMD64Base(f, "docker.io/library/ubuntu:24.04")
 			},
-			want: "runtime base is not digest pinned",
+			want: "runtime-base-amd64 must be a digest-pinned OCI reference",
+		},
+		{
+			name: "runtime base with scheme",
+			mutate: func(f *bakeFixture) {
+				setAMD64Base(f, "https://"+testRuntimeBaseAMD64)
+			},
+			want: "runtime-base-amd64 must be a digest-pinned OCI reference",
+		},
+		{
+			name: "malformed runtime base",
+			mutate: func(f *bakeFixture) {
+				setAMD64Base(f, "docker.io//ubuntu@sha256:"+strings.Repeat("a", 64))
+			},
+			want: "runtime-base-amd64 must be a digest-pinned OCI reference",
 		},
 		{
 			name: "target argument override",
@@ -80,11 +97,65 @@ func TestReleaseInputsRejectsUnsafeFixtures(t *testing.T) {
 		{
 			name: "alternate Dockerfile",
 			mutate: func(f *bakeFixture) {
-				target := f.Target["frontend"]
-				target.Dockerfile = "Dockerfile.release"
-				f.Target["frontend"] = target
+				f.Target["frontend"].Dockerfile = "Dockerfile.release"
 			},
 			want: "frontend must use context ., Dockerfile, target frontend",
+		},
+		{
+			name: "unexpected staging tag",
+			mutate: func(f *bakeFixture) {
+				f.Target["frontend"].Tags = []string{"registry.example/other:latest"}
+			},
+			want: "frontend must use context ., Dockerfile, target frontend, platforms",
+		},
+		{
+			name: "target output",
+			mutate: func(f *bakeFixture) {
+				f.Target["runtime-base-amd64"].Output = []string{"type=registry"}
+			},
+			want: "runtime-base-amd64 must not set output",
+		},
+		{
+			name: "target cache exporter",
+			mutate: func(f *bakeFixture) {
+				f.Target["runtime-base-amd64"].CacheTo = []string{"type=registry,ref=registry.example/cache:latest"}
+			},
+			want: "runtime-base-amd64 must not set cache-to",
+		},
+		{
+			name: "target secret",
+			mutate: func(f *bakeFixture) {
+				f.Target["runtime-base-arm64"].Secret = []string{"id=token"}
+			},
+			want: "runtime-base-arm64 must not set secret",
+		},
+		{
+			name: "target ssh",
+			mutate: func(f *bakeFixture) {
+				f.Target["materializer-amd64"].SSH = []string{"default"}
+			},
+			want: "materializer-amd64 must not set ssh",
+		},
+		{
+			name: "target network",
+			mutate: func(f *bakeFixture) {
+				f.Target["materializer-arm64"].Network = "host"
+			},
+			want: "materializer-arm64 must not set network",
+		},
+		{
+			name: "target entitlements",
+			mutate: func(f *bakeFixture) {
+				f.Target["frontend"].Entitlements = []string{"network.host"}
+			},
+			want: "frontend must not set entitlements",
+		},
+		{
+			name: "target attestations",
+			mutate: func(f *bakeFixture) {
+				f.Target["frontend"].Attest = []string{"type=provenance"}
+			},
+			want: "frontend must not set attest",
 		},
 		{
 			name:           "module replacement",
@@ -119,6 +190,8 @@ func TestReleaseInputsRejectsUnsafeFixtures(t *testing.T) {
 }
 
 const (
+	testRegistry               = "registry.example/release"
+	testVersion                = "v1.2.3-rc.1"
 	testSourceDateEpoch        = "1781049600"
 	testRuntimeBaseAMD64       = "docker.io/library/ubuntu@sha256:52df9b1ee71626e0088f7d400d5c6b5f7bb916f8f0c82b474289a4ece6cf3faf"
 	testRuntimeBaseARM64       = "docker.io/library/ubuntu@sha256:7f622ca8766bccb22f04242ecb6f19f770b2f08827dc4b8c707de5e78a6da7ab"
@@ -127,30 +200,45 @@ const (
 )
 
 type bakeFixture struct {
-	Target map[string]bakeTarget `json:"target"`
+	Target map[string]*bakeTarget `json:"target"`
 }
 
 type bakeTarget struct {
-	Target     string            `json:"target"`
-	Context    string            `json:"context"`
-	Dockerfile string            `json:"dockerfile"`
-	Platforms  []string          `json:"platforms"`
-	Args       map[string]string `json:"args"`
+	Target       string            `json:"target"`
+	Context      string            `json:"context"`
+	Dockerfile   string            `json:"dockerfile"`
+	Platforms    []string          `json:"platforms"`
+	Args         map[string]string `json:"args"`
+	Tags         []string          `json:"tags"`
+	Output       any               `json:"output,omitempty"`
+	CacheTo      any               `json:"cache-to,omitempty"`
+	Secret       any               `json:"secret,omitempty"`
+	SSH          any               `json:"ssh,omitempty"`
+	Network      any               `json:"network,omitempty"`
+	Entitlements any               `json:"entitlements,omitempty"`
+	Attest       any               `json:"attest,omitempty"`
 }
 
 func validBakeFixture() bakeFixture {
-	child := func(target, platform, runtimeBase string) bakeTarget {
+	child := func(target, platform, runtimeBase, tag string) *bakeTarget {
 		args := map[string]string{"SOURCE_DATE_EPOCH": testSourceDateEpoch}
 		if runtimeBase != "" {
 			args["RUNTIME_BASE"] = runtimeBase
 		}
-		return bakeTarget{Target: target, Context: ".", Dockerfile: "Dockerfile", Platforms: []string{platform}, Args: args}
+		return &bakeTarget{
+			Target:     target,
+			Context:    ".",
+			Dockerfile: "Dockerfile",
+			Platforms:  []string{platform},
+			Args:       args,
+			Tags:       []string{tag},
+		}
 	}
-	return bakeFixture{Target: map[string]bakeTarget{
-		"runtime-base-amd64": child("runtime-base", "linux/amd64", testRuntimeBaseAMD64),
-		"runtime-base-arm64": child("runtime-base", "linux/arm64", testRuntimeBaseARM64),
-		"materializer-amd64": child("materializer", "linux/amd64", testRuntimeBaseAMD64),
-		"materializer-arm64": child("materializer", "linux/arm64", testRuntimeBaseARM64),
+	return bakeFixture{Target: map[string]*bakeTarget{
+		"runtime-base-amd64": child("runtime-base", "linux/amd64", testRuntimeBaseAMD64, testRegistry+"/dalec-homebrew-runtime-base:"+testVersion+"-amd64"),
+		"runtime-base-arm64": child("runtime-base", "linux/arm64", testRuntimeBaseARM64, testRegistry+"/dalec-homebrew-runtime-base:"+testVersion+"-arm64"),
+		"materializer-amd64": child("materializer", "linux/amd64", testRuntimeBaseAMD64, testRegistry+"/dalec-homebrew-materializer:"+testVersion+"-amd64"),
+		"materializer-arm64": child("materializer", "linux/arm64", testRuntimeBaseARM64, testRegistry+"/dalec-homebrew-materializer:"+testVersion+"-arm64"),
 		"frontend": {
 			Target:     "frontend",
 			Context:    ".",
@@ -162,6 +250,7 @@ func validBakeFixture() bakeFixture {
 				"RUNTIME_BASE_REF":  "",
 				"SOURCE_DATE_EPOCH": testSourceDateEpoch,
 			},
+			Tags: []string{testRegistry + "/dalec-homebrew:" + testVersion},
 		},
 	}}
 }
@@ -183,13 +272,21 @@ func runReleaseInputs(t *testing.T, fixture bakeFixture, replacedModule string) 
 		t.Fatal(err)
 	}
 
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goCache := goEnv(t, realGo, "GOCACHE")
+	goModCache := goEnv(t, realGo, "GOMODCACHE")
+
 	bin := filepath.Join(temp, "bin")
 	if err := os.Mkdir(bin, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	writeExecutable(t, filepath.Join(bin, "docker"), `#!/usr/bin/env bash
 set -euo pipefail
-[[ "$*" == "buildx bake --print runtime-base-amd64 runtime-base-arm64 materializer-amd64 materializer-arm64 frontend" ]] || {
+expected="buildx bake --print --var REGISTRY=$REGISTRY --var VERSION=$VERSION runtime-base-amd64 runtime-base-arm64 materializer-amd64 materializer-arm64 frontend"
+[[ "$*" == "$expected" ]] || {
   echo "unexpected docker command: $*" >&2
   exit 1
 }
@@ -197,6 +294,9 @@ cat "$RELEASE_INPUTS_BAKE_FIXTURE"
 `)
 	writeExecutable(t, filepath.Join(bin, "go"), `#!/usr/bin/env bash
 set -euo pipefail
+if [[ "$1 $2" == "run ./cmd/live-input-verify" ]]; then
+  exec "$RELEASE_INPUTS_REAL_GO" "$@"
+fi
 [[ "$1 $2 $3" == "list -m -json" && $# == 4 ]] || {
   echo "unexpected go command: $*" >&2
   exit 1
@@ -225,9 +325,14 @@ fi
 		"ENV=",
 		"GOFLAGS=",
 		"GOWORK=off",
+		"GOCACHE="+goCache,
+		"GOMODCACHE="+goModCache,
 		"BUILDX_BAKE_FILE=",
 		"BUILDX_BAKE_PATH_SEPARATOR=",
+		"REGISTRY="+testRegistry,
+		"VERSION="+testVersion,
 		"RELEASE_INPUTS_BAKE_FIXTURE="+fixturePath,
+		"RELEASE_INPUTS_REAL_GO="+realGo,
 		"RELEASE_INPUTS_REPLACED_MODULE="+replacedModule,
 	)
 	var stdout bytes.Buffer
@@ -238,13 +343,15 @@ fi
 	return append([]byte(nil), stdout.Bytes()...), append([]byte(nil), stderr.Bytes()...), err
 }
 
-func repositoryRoot(t *testing.T) string {
+func goEnv(t *testing.T, goBinary, name string) string {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("locate test source")
+	cmd := exec.Command(goBinary, "env", name)
+	cmd.Env = append(os.Environ(), "GOFLAGS=", "GOWORK=off")
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go env %s: %v", name, err)
 	}
-	return filepath.Clean(filepath.Join(filepath.Dir(file), "../.."))
+	return strings.TrimSpace(string(output))
 }
 
 func writeExecutable(t *testing.T, path, content string) {

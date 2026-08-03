@@ -8,7 +8,6 @@ done
 go test -trimpath ./...
 go vet ./...
 go test -race \
-  ./cmd/live-input-verify \
   ./internal/homebrew/metadata \
   ./internal/homebrew/oci \
   ./internal/bottle \

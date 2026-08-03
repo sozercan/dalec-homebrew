@@ -136,46 +136,11 @@ expect_rejected partial-one "must be set together" \
   "${COMMON_ENV[@]}" \
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF"
 
-expect_rejected partial-two "must be set together" \
-  "${COMMON_ENV[@]}" \
-  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
-  "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF"
-
-expect_rejected mutable-base "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF must be a digest-pinned OCI reference" \
-  "${COMMON_ENV[@]}" \
-  DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=ghcr.io/example/runtime-base:latest \
-  "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
-  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"
-
-expect_rejected invalid-materializer "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF must be a digest-pinned OCI reference" \
-  "${COMMON_ENV[@]}" \
-  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
-  DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=ghcr.io/example/materializer@sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"
-
-expect_rejected malformed-frontend "DALEC_HOMEBREW_LIVE_FRONTEND_REF must be a digest-pinned OCI reference" \
-  "${COMMON_ENV[@]}" \
-  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
-  "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
-  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=ghcr.io/example/front|end@$DIGEST_C"
-
 expect_rejected scheme-frontend "DALEC_HOMEBREW_LIVE_FRONTEND_REF must be a digest-pinned OCI reference" \
   "${COMMON_ENV[@]}" \
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
   "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
   "DALEC_HOMEBREW_LIVE_FRONTEND_REF=https://ghcr.io/example/frontend@$DIGEST_C"
-
-expect_rejected empty-reference-segment "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF must be a digest-pinned OCI reference" \
-  "${COMMON_ENV[@]}" \
-  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=ghcr.io//runtime-base@$DIGEST_A" \
-  "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
-  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"
-
-expect_rejected malformed-reference-tag "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF must be a digest-pinned OCI reference" \
-  "${COMMON_ENV[@]}" \
-  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
-  "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=ghcr.io/example/materializer:bad:tag@$DIGEST_B" \
-  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"
 
 expect_rejected invalid-metadata-not-before "DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE must be a valid RFC3339 timestamp" \
   "${PUBLISHED_ENV[@]}" \

@@ -13,6 +13,9 @@ for tool in docker jq go python3; do
   command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"
 done
 
+release_registry=${REGISTRY:-ghcr.io/sozercan}
+release_version=${VERSION:-dev}
+
 targets=(
   runtime-base-amd64
   runtime-base-arm64
@@ -22,7 +25,10 @@ targets=(
 )
 targets_json=$(printf '%s\n' "${targets[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
 unset BUILDX_BAKE_FILE BUILDX_BAKE_PATH_SEPARATOR
-bake=$(docker buildx bake --print "${targets[@]}")
+bake=$(docker buildx bake --print \
+  --var "REGISTRY=$release_registry" \
+  --var "VERSION=$release_version" \
+  "${targets[@]}")
 
 source_date_epoch=$(jq -er --argjson targets "$targets_json" '
   . as $bake
@@ -77,22 +83,38 @@ for name in FRONTEND_REF RUNTIME_BASE_REF MATERIALIZER_REF; do
 done
 
 validate_bake_target() {
-  local name=$1 target=$2 platforms=$3
-  jq -e --arg name "$name" --arg target "$target" --argjson platforms "$platforms" '
-    .target[$name] as $actual
-    | $actual != null
-      and $actual.context == "."
-      and $actual.dockerfile == "Dockerfile"
-      and $actual.target == $target
-      and (($actual.platforms | sort) == ($platforms | sort))
-  ' <<<"$bake" >/dev/null || fail \
-    "$name must use context ., Dockerfile, target $target, and platforms $platforms"
+  local name=$1 target=$2 platforms=$3 tag=$4 unsafe
+  jq -e \
+    --arg name "$name" \
+    --arg target "$target" \
+    --argjson platforms "$platforms" \
+    --arg tag "$tag" '
+      .target[$name] as $actual
+      | $actual != null
+        and $actual.context == "."
+        and $actual.dockerfile == "Dockerfile"
+        and $actual.target == $target
+        and (($actual.platforms | sort) == ($platforms | sort))
+        and $actual.tags == [$tag]
+    ' <<<"$bake" >/dev/null || fail \
+    "$name must use context ., Dockerfile, target $target, platforms $platforms, and staging tag $tag"
+
+  unsafe=$(jq -r --arg name "$name" '
+    (.target[$name] | keys - ["args", "context", "dockerfile", "platforms", "tags", "target"])
+    | first // ""
+  ' <<<"$bake")
+  [[ -z "$unsafe" ]] || fail "$name must not set $unsafe"
 }
-validate_bake_target runtime-base-amd64 runtime-base '["linux/amd64"]'
-validate_bake_target runtime-base-arm64 runtime-base '["linux/arm64"]'
-validate_bake_target materializer-amd64 materializer '["linux/amd64"]'
-validate_bake_target materializer-arm64 materializer '["linux/arm64"]'
-validate_bake_target frontend frontend '["linux/amd64","linux/arm64"]'
+validate_bake_target runtime-base-amd64 runtime-base '["linux/amd64"]' \
+  "$release_registry/dalec-homebrew-runtime-base:${release_version}-amd64"
+validate_bake_target runtime-base-arm64 runtime-base '["linux/arm64"]' \
+  "$release_registry/dalec-homebrew-runtime-base:${release_version}-arm64"
+validate_bake_target materializer-amd64 materializer '["linux/amd64"]' \
+  "$release_registry/dalec-homebrew-materializer:${release_version}-amd64"
+validate_bake_target materializer-arm64 materializer '["linux/arm64"]' \
+  "$release_registry/dalec-homebrew-materializer:${release_version}-arm64"
+validate_bake_target frontend frontend '["linux/amd64","linux/arm64"]' \
+  "$release_registry/dalec-homebrew:$release_version"
 
 runtime_base_amd64=$(jq -er '.target["runtime-base-amd64"].args.RUNTIME_BASE' <<<"$bake")
 runtime_base_arm64=$(jq -er '.target["runtime-base-arm64"].args.RUNTIME_BASE' <<<"$bake")
@@ -102,15 +124,10 @@ materializer_base_arm64=$(jq -er '.target["materializer-arm64"].args.RUNTIME_BAS
   "materializer-amd64 Ubuntu base differs from runtime-base-amd64"
 [[ "$materializer_base_arm64" == "$runtime_base_arm64" ]] || fail \
   "materializer-arm64 Ubuntu base differs from runtime-base-arm64"
-for ref in "$runtime_base_amd64" "$runtime_base_arm64"; do
-  [[ "$ref" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || fail "runtime base is not digest pinned: $ref"
-done
 [[ "$runtime_base_amd64" != "$runtime_base_arm64" ]] || fail \
   "amd64 and arm64 runtime bases unexpectedly use the same manifest"
 
 dockerfile_frontend=$(sed -n '1s/^# syntax=//p' Dockerfile)
-[[ "$dockerfile_frontend" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || fail \
-  "Dockerfile frontend is not digest pinned: $dockerfile_frontend"
 
 go_image=$(dockerfile_arg GO_IMAGE)
 chisel_version=$(dockerfile_arg CHISEL_VERSION)
@@ -123,7 +140,12 @@ homebrew_commit=$(dockerfile_arg HOMEBREW_COMMIT)
 portable_ruby_version=$(dockerfile_arg HOMEBREW_RUBY_VERSION)
 verification_keys_digest=$(dockerfile_arg HOMEBREW_KEYS_DIGEST)
 
-[[ "$go_image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || fail "GO_IMAGE is not digest pinned: $go_image"
+GOWORK=off GOFLAGS='' go run ./cmd/live-input-verify \
+  --pinned-ref "runtime-base-amd64=$runtime_base_amd64" \
+  --pinned-ref "runtime-base-arm64=$runtime_base_arm64" \
+  --pinned-ref "GO_IMAGE=$go_image" \
+  --pinned-ref "Dockerfile frontend=$dockerfile_frontend"
+
 [[ -n "$chisel_version" ]] || fail "CHISEL_VERSION is empty"
 [[ "$chisel_releases_commit" =~ ^[0-9a-f]{40}$ ]] || fail \
   "invalid chisel-releases commit: $chisel_releases_commit"

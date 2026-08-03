@@ -172,6 +172,20 @@ jobs:
           fi
           echo "state=$state" >> "$GITHUB_OUTPUT"
 
+      - name: Authorize new release source
+        if: steps.target.outputs.state == 'absent'
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+          TRUSTED_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRUSTED_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_SHA" == "$TRUSTED_WORKFLOW_SHA" ]] || {
+            echo "new releases must tag the trusted workflow commit $TRUSTED_WORKFLOW_SHA, not $RELEASE_SHA" >&2
+            exit 1
+          }
+
   ci:
     name: Validate tagged source
     needs: [prepare, release_target]
@@ -433,7 +447,6 @@ jobs:
             --arg git_sha "$RELEASE_SHA" \
             --slurpfile inputs dist/release/inputs.json \
             --arg build_invocation "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
-            --arg build_run_attempt "$GITHUB_RUN_ATTEMPT" \
             --arg frontend_repo "$frontend_repo" \
             --arg frontend_index "$frontend_index" \
             --arg frontend_amd64 "$frontend_amd64" \
@@ -452,8 +465,7 @@ jobs:
                 tag: $release_tag,
                 git_sha: $git_sha,
                 source_date_epoch: $inputs[0].source_date_epoch,
-                build_invocation: $build_invocation,
-                build_run_attempt: $build_run_attempt
+                build_invocation: $build_invocation
               },
               components: {
                 frontend: {
@@ -748,7 +760,8 @@ jobs:
 
   sign:
     name: Sign and attest immutable tuple
-    needs: [prepare, build, integration, evidence]
+    needs: [prepare, release_target, build, integration, evidence]
+    if: needs.release_target.outputs.state == 'absent'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: release
@@ -758,6 +771,7 @@ jobs:
       id-token: write
       packages: write
     env:
+      GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
     steps:
@@ -1216,15 +1230,152 @@ jobs:
               if int(match.group(8)) > 23 or int(match.group(9)) > 59:
                   raise SystemExit("metadata generated_at has an invalid offset")
           PYTIME
-          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg tag "$RELEASE_TAG" \
+            --arg sha "$RELEASE_SHA" \
+            --slurpfile digests dist/release/digests.json \
+            --slurpfile inputs dist/release/inputs.json '
+            .builder.id == "https://github.com/actions/runner" and
+            .buildType == ("https://github.com/" + $repository + "/.github/workflows/release.yml@v1") and
+            .invocation.configSource.uri == ("git+https://github.com/" + $repository + "@refs/heads/main") and
+            (.invocation.configSource.digest.sha1 | type == "string" and test("^[0-9a-f]{40}$")) and
+            .invocation.configSource.digest.sha1 == $sha and
+            .invocation.configSource.entryPoint == ".github/workflows/release.yml" and
             .invocation.parameters.tag == $tag and
-            .metadata.completeness.parameters == false and
-            any(.materials[]; (.uri | endswith("@refs/tags/" + $tag)) and .digest.sha1 == $sha)
+            .invocation.parameters.source_date_epoch == $inputs[0].source_date_epoch and
+            .invocation.parameters.buildx_version == env.BUILDX_VERSION and
+            .invocation.parameters.buildx_sha256_amd64 == env.BUILDX_SHA256_AMD64 and
+            .invocation.parameters.buildx_sha256_arm64 == env.BUILDX_SHA256_ARM64 and
+            .invocation.parameters.buildkit_image == env.BUILDKIT_IMAGE and
+            .invocation.parameters.binfmt_image == env.BINFMT_IMAGE and
+            .invocation.parameters.syft_image == env.SYFT_IMAGE and
+            .invocation.parameters.trivy_image == env.TRIVY_IMAGE and
+            .invocation.parameters.workflow_ref == "refs/heads/main" and
+            .invocation.parameters.workflow_sha == .invocation.configSource.digest.sha1 and
+            (.invocation.environment | type == "object" and length == 0) and
+            .metadata.buildInvocationId == $digests[0].source.build_invocation and
+            .metadata.completeness == {parameters: false, environment: false, materials: false} and
+            .metadata.reproducible == false and
+            (.materials | length) == 1 and
+            .materials[0].uri == ("git+https://github.com/" + $repository + "@refs/tags/" + $tag) and
+            .materials[0].digest.sha1 == $sha
           ' dist/release/provenance.json >/dev/null
+          workflow_sha=$(jq -er .invocation.configSource.digest.sha1 dist/release/provenance.json)
+          build_invocation=$(jq -er .metadata.buildInvocationId dist/release/provenance.json)
+          build_invocation_prefix="https://github.com/$GITHUB_REPOSITORY/actions/runs/"
+          if [[ "$build_invocation" != "$build_invocation_prefix"* ]]; then
+            echo "provenance build invocation is not a release workflow run" >&2
+            exit 1
+          fi
+          build_invocation_suffix=${build_invocation#"$build_invocation_prefix"}
+          if [[ ! "$build_invocation_suffix" =~ ^([0-9]+)/attempts/([0-9]+)$ ]]; then
+            echo "provenance build invocation is not a release workflow run" >&2
+            exit 1
+          fi
+          run_id=${BASH_REMATCH[1]}
+          run_attempt=${BASH_REMATCH[2]}
+          run_json=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$run_attempt")
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow_sha "$workflow_sha" \
+            --argjson run_id "$run_id" \
+            --argjson run_attempt "$run_attempt" '
+            .id == $run_id and
+            .run_attempt == $run_attempt and
+            .event == "workflow_dispatch" and
+            .head_branch == "main" and
+            .head_sha == $workflow_sha and
+            (.path == ".github/workflows/release.yml" or
+             .path == ".github/workflows/release.yml@main" or
+             .path == ".github/workflows/release.yml@refs/heads/main") and
+            .repository.full_name == $repository
+          ' <<<"$run_json" >/dev/null
 
-      - name: Validate release tags before signing
+      - name: Pin source state and validate release tags before signing
         run: |
           set -euo pipefail
+          build_invocation=$(jq -er .metadata.buildInvocationId dist/release/provenance.json)
+          build_invocation_prefix="https://github.com/$GITHUB_REPOSITORY/actions/runs/"
+          if [[ "$build_invocation" != "$build_invocation_prefix"* ]]; then
+            echo "provenance build invocation is not a release workflow run" >&2
+            exit 1
+          fi
+          build_invocation_suffix=${build_invocation#"$build_invocation_prefix"}
+          if [[ ! "$build_invocation_suffix" =~ ^([0-9]+)/attempts/([0-9]+)$ ]]; then
+            echo "provenance build invocation is not a release workflow run" >&2
+            exit 1
+          fi
+          [[ "${BASH_REMATCH[1]}" == "$GITHUB_RUN_ID" ]] || {
+            echo "provenance run ${BASH_REMATCH[1]} does not match signing run $GITHUB_RUN_ID" >&2
+            exit 1
+          }
+          claimed_attempt=${BASH_REMATCH[2]}
+          (( claimed_attempt >= 1 && claimed_attempt <= GITHUB_RUN_ATTEMPT )) || {
+            echo "provenance attempt $claimed_attempt is not valid for signing attempt $GITHUB_RUN_ATTEMPT" >&2
+            exit 1
+          }
+
+          resolve_release_tag() {
+            local object object_type actual
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG") || return 1
+            object_type=$(jq -er '.object.type' <<<"$object") || return 1
+            actual=$(jq -er '.object.sha' <<<"$object") || return 1
+            for _ in $(seq 1 8); do
+              [[ "$object_type" == tag ]] || break
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$actual") || return 1
+              object_type=$(jq -er '.object.type' <<<"$object") || return 1
+              actual=$(jq -er '.object.sha' <<<"$object") || return 1
+            done
+            [[ "$object_type" == commit && "$actual" =~ ^[0-9a-f]{40}$ ]] || return 1
+            printf '%s\n' "$actual"
+          }
+          pinned_main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha | select(test("^[0-9a-f]{40}$"))')
+          actual_release_sha=$(resolve_release_tag) || {
+            echo "refs/tags/$RELEASE_TAG no longer resolves to a commit" >&2
+            exit 1
+          }
+          [[ "$actual_release_sha" == "$RELEASE_SHA" ]] || {
+            echo "refs/tags/$RELEASE_TAG moved from $RELEASE_SHA to $actual_release_sha" >&2
+            exit 1
+          }
+          source_comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$RELEASE_SHA...$pinned_main_sha" --jq .status)
+          if [[ "$source_comparison" != ahead && "$source_comparison" != identical ]]; then
+            echo "$RELEASE_TAG is not reachable from pinned main $pinned_main_sha (comparison: $source_comparison)" >&2
+            exit 1
+          fi
+          workflow_sha=$(jq -er .invocation.configSource.digest.sha1 dist/release/provenance.json)
+          workflow_comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$workflow_sha...$pinned_main_sha" --jq .status)
+          if [[ "$workflow_comparison" != ahead && "$workflow_comparison" != identical ]]; then
+            echo "provenance workflow commit $workflow_sha is not reachable from pinned main $pinned_main_sha" >&2
+            exit 1
+          fi
+          export PINNED_MAIN_SHA="$pinned_main_sha"
+          echo "PINNED_MAIN_SHA=$pinned_main_sha" >> "$GITHUB_ENV"
+          cat > "$RUNNER_TEMP/require-signing-context" <<'BASH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          current_main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          [[ "$current_main_sha" == "$PINNED_MAIN_SHA" ]] || {
+            echo "main moved from pinned commit $PINNED_MAIN_SHA to $current_main_sha" >&2
+            exit 1
+          }
+          object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")
+          object_type=$(jq -er '.object.type' <<<"$object")
+          actual=$(jq -er '.object.sha' <<<"$object")
+          for _ in $(seq 1 8); do
+            [[ "$object_type" == tag ]] || break
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$actual")
+            object_type=$(jq -er '.object.type' <<<"$object")
+            actual=$(jq -er '.object.sha' <<<"$object")
+          done
+          [[ "$object_type" == commit && "$actual" == "$RELEASE_SHA" ]] || {
+            echo "refs/tags/$RELEASE_TAG no longer resolves to $RELEASE_SHA" >&2
+            exit 1
+          }
+          BASH
+          chmod 0700 "$RUNNER_TEMP/require-signing-context"
+
           read_registry_digest() {
             local ref=$1 descriptor digest attempt error_file errors_file all_missing
             errors_file=$(mktemp "$RUNNER_TEMP/registry-inspect.XXXXXX")
@@ -1291,7 +1442,9 @@ jobs:
           (( ${#subjects[@]} == 9 ))
 
           for subject in "${subjects[@]}"; do
+            "$RUNNER_TEMP/require-signing-context"
             cosign sign --yes "$subject"
+            "$RUNNER_TEMP/require-signing-context"
             cosign attest --yes \
               --type slsaprovenance02 \
               --predicate dist/release/provenance.json \
@@ -1316,7 +1469,9 @@ jobs:
             predicate="dist/release/evidence/sbom-${slug}.spdx.json"
             vulnerability="dist/release/evidence/vulnerability-${slug}.json"
             test -s "$predicate"
+            # Vulnerability reports are checksum-signed release assets; only SPDX is attached as an image attestation.
             test -s "$vulnerability"
+            "$RUNNER_TEMP/require-signing-context"
             cosign attest --yes \
               --type spdxjson \
               --predicate "$predicate" \
@@ -1342,12 +1497,15 @@ jobs:
               | xargs -0 sha256sum > "$checksums"
           )
           mv "$checksums" dist/release/SHA256SUMS
+          "$RUNNER_TEMP/require-signing-context"
           cosign sign-blob --yes \
             --bundle dist/release/components.json.bundle \
             dist/release/components.json
+          "$RUNNER_TEMP/require-signing-context"
           cosign sign-blob --yes \
             --bundle dist/release/metadata-snapshot.json.bundle \
             dist/release/metadata-snapshot.json
+          "$RUNNER_TEMP/require-signing-context"
           cosign sign-blob --yes \
             --bundle dist/release/SHA256SUMS.bundle \
             dist/release/SHA256SUMS
@@ -1379,6 +1537,7 @@ jobs:
       contents: write
       packages: write
     env:
+      GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
       RELEASE_STATE: ${{ needs.release_target.outputs.state }}

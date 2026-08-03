@@ -8,16 +8,43 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 )
+
+type namedPinnedRef struct {
+	name  string
+	value string
+}
+
+type namedPinnedRefs []namedPinnedRef
+
+func (refs *namedPinnedRefs) String() string {
+	values := make([]string, 0, len(*refs))
+	for _, ref := range *refs {
+		values = append(values, ref.name+"="+ref.value)
+	}
+	return strings.Join(values, ",")
+}
+
+func (refs *namedPinnedRefs) Set(value string) error {
+	name, ref, ok := strings.Cut(value, "=")
+	name = strings.TrimSpace(name)
+	if !ok || name == "" {
+		return errors.New("pinned reference must use NAME=REFERENCE")
+	}
+	*refs = append(*refs, namedPinnedRef{name: name, value: ref})
+	return nil
+}
 
 type options struct {
 	runtimeBaseRef    string
 	materializerRef   string
 	frontendRef       string
 	metadataNotBefore string
+	pinnedRefs        namedPinnedRefs
 }
 
 func main() {
@@ -38,6 +65,7 @@ func run(args []string, stderr io.Writer) error {
 	flags.StringVar(&opts.materializerRef, "materializer-ref", "", "digest-pinned materializer reference")
 	flags.StringVar(&opts.frontendRef, "frontend-ref", "", "digest-pinned frontend reference")
 	flags.StringVar(&opts.metadataNotBefore, "metadata-not-before", "", "RFC3339 metadata rollback floor")
+	flags.Var(&opts.pinnedRefs, "pinned-ref", "additional digest-pinned NAME=REFERENCE to validate (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -45,13 +73,10 @@ func run(args []string, stderr io.Writer) error {
 		return fmt.Errorf("unexpected positional arguments: %q", flags.Args())
 	}
 
-	refs := []struct {
-		name  string
-		value string
-	}{
-		{"DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF", opts.runtimeBaseRef},
-		{"DALEC_HOMEBREW_LIVE_MATERIALIZER_REF", opts.materializerRef},
-		{"DALEC_HOMEBREW_LIVE_FRONTEND_REF", opts.frontendRef},
+	refs := []namedPinnedRef{
+		{name: "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF", value: opts.runtimeBaseRef},
+		{name: "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF", value: opts.materializerRef},
+		{name: "DALEC_HOMEBREW_LIVE_FRONTEND_REF", value: opts.frontendRef},
 	}
 	set := 0
 	for _, ref := range refs {
@@ -62,18 +87,29 @@ func run(args []string, stderr io.Writer) error {
 	if set != 0 && set != len(refs) {
 		return errors.New("DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF, DALEC_HOMEBREW_LIVE_MATERIALIZER_REF, and DALEC_HOMEBREW_LIVE_FRONTEND_REF must be set together")
 	}
-	for _, ref := range refs {
-		if ref.value == "" {
-			continue
+	if set == len(refs) {
+		for _, ref := range refs {
+			if err := validatePinnedReference(ref); err != nil {
+				return err
+			}
 		}
-		if err := resolution.ValidatePinnedReference(ref.value); err != nil {
-			return fmt.Errorf("%s must be a digest-pinned OCI reference using sha256: %w", ref.name, err)
+	}
+	for _, ref := range opts.pinnedRefs {
+		if err := validatePinnedReference(ref); err != nil {
+			return err
 		}
 	}
 	if opts.metadataNotBefore != "" {
 		if err := validateRFC3339(opts.metadataNotBefore); err != nil {
 			return fmt.Errorf("DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE must be a valid RFC3339 timestamp: %w", err)
 		}
+	}
+	return nil
+}
+
+func validatePinnedReference(ref namedPinnedRef) error {
+	if err := resolution.ValidatePinnedReference(ref.value); err != nil {
+		return fmt.Errorf("%s must be a digest-pinned OCI reference using sha256: %w", ref.name, err)
 	}
 	return nil
 }

@@ -89,8 +89,10 @@ Release CI must reject:
 
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) publishes an
 existing v-prefixed, OCI-compatible SemVer tag, including supported pre-releases. Build metadata (`+...`) is not accepted because OCI tags cannot represent it without an additional mapping. Dispatch it
-from `main` with a tag whose commit is reachable from `main`; this keeps write
-and signing privileges in the trusted workflow rather than the tagged source.
+from `main`. A new tuple is built only when the tag names the exact commit that
+contains the dispatched workflow, so code receiving registry write access is the
+trusted workflow source. A later descendant of `main` may verify and resume an
+existing draft because recovery never rebuilds the tuple.
 
 Runs are serialized repository-wide, and an existing published release is
 rejected. With no target release, the workflow builds a new tuple and stages a

@@ -15,7 +15,6 @@ live-test:
 build:
 	mkdir -p bin
 	go build -trimpath -o bin/dalec-homebrew-frontend ./cmd/frontend
-	go build -trimpath -o bin/dalec-homebrew-live-input-verify ./cmd/live-input-verify
 	go build -trimpath -o bin/dalec-homebrew-materializer ./cmd/materializer
 	go build -trimpath -o bin/dalec-homebrew-record-verify ./cmd/record-verify
 	go build -trimpath -o bin/dalec-homebrew-release-verify ./cmd/release-verify

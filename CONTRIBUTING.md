@@ -7,7 +7,7 @@ Contributions are welcome. This guide covers the local workflow; the [architectu
 For Go development:
 
 - Go 1.25.9 or newer
-- Bash, Make, and `jq`
+- Bash, Make, `jq`, and Python 3
 
 For component and integration work:
 
