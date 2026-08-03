@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -257,6 +258,145 @@ func TestClassifyAllowsContainedIncludeLinks(t *testing.T) {
 	}
 }
 
+func TestValidateExternalBottleSymlinkTargetsRequiresExactDependencyKeg(t *testing.T) {
+	node := resolution.Node{Name: "hello", PkgVersion: "1", Dependencies: []resolution.Requirement{{Name: "python@3.14", Direct: true}}}
+	python := resolution.Node{Name: "python@3.14", PkgVersion: "3.14.1"}
+	verified := bottle.Result{Inventory: []bottle.InventoryEntry{{Path: "hello/1/libexec/bin/python3.14", PrefixTarget: "opt/python@3.14/bin/python3.14"}}}
+	snapshot := map[string]fileState{
+		"Cellar":                                   {Type: "directory"},
+		"Cellar/python@3.14":                       {Type: "directory"},
+		"Cellar/python@3.14/3.14.1":                {Type: "directory"},
+		"Cellar/python@3.14/3.14.1/bin":            {Type: "directory"},
+		"Cellar/python@3.14/3.14.1/bin/python3.14": {Type: "regular", Mode: 0o755},
+		"opt":             {Type: "directory"},
+		"opt/python@3.14": {Type: "symlink", Link: "../Cellar/python@3.14/3.14.1"},
+	}
+	closure := []resolution.Node{node, python}
+	if err := validateExternalBottleSymlinkTargets("/prefix", snapshot, node, verified, closure); err != nil {
+		t.Fatal(err)
+	}
+	redirected := maps.Clone(snapshot)
+	redirected["opt/python@3.14"] = fileState{Type: "symlink", Link: "../Cellar/python@3.14/9.9"}
+	redirected["Cellar/python@3.14/9.9"] = fileState{Type: "directory"}
+	redirected["Cellar/python@3.14/9.9/bin"] = fileState{Type: "directory"}
+	redirected["Cellar/python@3.14/9.9/bin/python3.14"] = fileState{Type: "regular", Mode: 0o755}
+	if err := validateExternalBottleSymlinkTargets("/prefix", redirected, node, verified, closure); err == nil {
+		t.Fatal("redirected dependency opt target accepted before pour")
+	}
+	unsigned := node
+	unsigned.Dependencies = []resolution.Requirement{{Name: "python@3.14", Direct: false}}
+	if err := validateExternalBottleSymlinkTargets("/prefix", snapshot, unsigned, verified, []resolution.Node{unsigned, python}); err == nil {
+		t.Fatal("external target without signed direct dependency accepted before pour")
+	}
+}
+
+func TestReconcileInstalledKegAllowsSignedDependencyOptSymlink(t *testing.T) {
+	node := resolution.Node{Name: "hello", PkgVersion: "1", Dependencies: []resolution.Requirement{{Name: "python@3.14", Direct: true}}}
+	python := resolution.Node{Name: "python@3.14", PkgVersion: "3.14.1"}
+	verified := bottle.Result{
+		Name:       "hello",
+		PkgVersion: "1",
+		KegPrefix:  "hello/1",
+		Inventory: []bottle.InventoryEntry{
+			{Path: "hello/1/libexec/bin/python", KegPath: "libexec/bin/python", Type: bottle.EntrySymlink, SymlinkTarget: "python3.14", PrefixTarget: "opt/python@3.14/bin/python3.14"},
+			{Path: "hello/1/libexec/bin/python3.14", KegPath: "libexec/bin/python3.14", Type: bottle.EntrySymlink, SymlinkTarget: "../../../../../opt/python@3.14/bin/python3.14", PrefixTarget: "opt/python@3.14/bin/python3.14"},
+		},
+	}
+	after := map[string]fileState{
+		"Cellar":                                   {Type: "directory"},
+		"Cellar/hello":                             {Type: "directory"},
+		"Cellar/hello/1":                           {Type: "directory"},
+		"Cellar/hello/1/libexec":                   {Type: "directory"},
+		"Cellar/hello/1/libexec/bin":               {Type: "directory"},
+		"Cellar/hello/1/libexec/bin/python":        {Type: "symlink", Link: "python3.14"},
+		"Cellar/hello/1/libexec/bin/python3.14":    {Type: "symlink", Link: "../../../../../opt/python@3.14/bin/python3.14"},
+		"Cellar/python@3.14":                       {Type: "directory"},
+		"Cellar/python@3.14/3.14.1":                {Type: "directory"},
+		"Cellar/python@3.14/3.14.1/bin":            {Type: "directory"},
+		"Cellar/python@3.14/3.14.1/bin/python3.14": {Type: "regular", Mode: 0o755},
+		"opt":             {Type: "directory"},
+		"opt/python@3.14": {Type: "symlink", Link: "../Cellar/python@3.14/3.14.1"},
+	}
+	if err := reconcileInstalledKeg("/prefix", node, verified, after, reconcileKegOptions{closure: []resolution.Node{node, python}}); err != nil {
+		t.Fatal(err)
+	}
+	changed := node
+	changed.Bottle.Tab.ChangedFiles = []string{"libexec/bin/python3.14"}
+	rewritten := maps.Clone(after)
+	rewritten["Cellar/hello/1/libexec/bin/python3.14"] = fileState{Type: "symlink", Link: "/prefix/opt/python@3.14/bin/python3.14"}
+	if err := reconcileInstalledKeg("/prefix", changed, verified, rewritten, reconcileKegOptions{closure: []resolution.Node{changed, python}}); err == nil {
+		t.Fatal("rewritten dependency opt symlink accepted as a changed file")
+	}
+	if err := reconcileInstalledKeg("/prefix", node, verified, after); err == nil {
+		t.Fatal("dependency opt symlink accepted without resolved closure")
+	}
+	unsigned := node
+	unsigned.Dependencies = []resolution.Requirement{{Name: "python@3.14", Direct: false}}
+	if err := reconcileInstalledKeg("/prefix", unsigned, verified, after, reconcileKegOptions{closure: []resolution.Node{unsigned, python}}); err == nil {
+		t.Fatal("dependency opt symlink accepted without signed direct dependency edge")
+	}
+	redirected := maps.Clone(after)
+	redirected["opt/python@3.14"] = fileState{Type: "symlink", Link: "../Cellar/python@3.14/9.9"}
+	redirected["Cellar/python@3.14/9.9"] = fileState{Type: "directory"}
+	redirected["Cellar/python@3.14/9.9/bin"] = fileState{Type: "directory"}
+	redirected["Cellar/python@3.14/9.9/bin/python3.14"] = fileState{Type: "regular", Mode: 0o755}
+	if err := reconcileInstalledKeg("/prefix", node, verified, redirected, reconcileKegOptions{closure: []resolution.Node{node, python}}); err == nil {
+		t.Fatal("dependency opt symlink accepted after opt redirected to a different keg")
+	}
+}
+
+func TestReconcileInstalledKegAllowsNodeNPMPostInstallLinkRewrite(t *testing.T) {
+	content := []byte("npm\n")
+	digest := sha256.Sum256(content)
+	digestHex := hex.EncodeToString(digest[:])
+	node := resolution.Node{Name: "node", PkgVersion: "1"}
+	verified := bottle.Result{
+		Name:       "node",
+		PkgVersion: "1",
+		KegPrefix:  "node/1",
+		Inventory: []bottle.InventoryEntry{
+			{Path: "node/1/bin/npm", KegPath: "bin/npm", Type: bottle.EntrySymlink, SymlinkTarget: "../libexec/lib/node_modules/npm/bin/npm-cli.js"},
+			{Path: "node/1/libexec/lib/node_modules/npm/bin/npm-cli.js", KegPath: "libexec/lib/node_modules/npm/bin/npm-cli.js", Type: bottle.EntryRegular, Mode: 0o755, Size: int64(len(content)), SHA256: "sha256:" + digestHex},
+		},
+	}
+	directory := fileState{Type: "directory"}
+	regular := fileState{Type: "regular", Mode: 0o755, Size: int64(len(content)), Digest: digestHex, Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true}
+	after := map[string]fileState{
+		"Cellar":                                         directory,
+		"Cellar/node":                                    directory,
+		"Cellar/node/1":                                  directory,
+		"Cellar/node/1/bin":                              directory,
+		"Cellar/node/1/bin/npm":                          {Type: "symlink", Link: "/prefix/lib/node_modules/npm/bin/npm-cli.js"},
+		"Cellar/node/1/libexec":                          directory,
+		"Cellar/node/1/libexec/lib":                      directory,
+		"Cellar/node/1/libexec/lib/node_modules":         directory,
+		"Cellar/node/1/libexec/lib/node_modules/npm":     directory,
+		"Cellar/node/1/libexec/lib/node_modules/npm/bin": directory,
+		"Cellar/node/1/libexec/lib/node_modules/npm/bin/npm-cli.js": regular,
+		"lib":                                 directory,
+		"lib/node_modules":                    directory,
+		"lib/node_modules/npm":                directory,
+		"lib/node_modules/npm/bin":            directory,
+		"lib/node_modules/npm/bin/npm-cli.js": regular,
+	}
+	if err := reconcileInstalledKeg("/prefix", node, verified, after); err != nil {
+		t.Fatal(err)
+	}
+	mutated := maps.Clone(after)
+	global := mutated["lib/node_modules/npm/bin/npm-cli.js"]
+	global.Digest = strings.Repeat("f", 64)
+	mutated["lib/node_modules/npm/bin/npm-cli.js"] = global
+	if err := reconcileInstalledKeg("/prefix", node, verified, mutated); err == nil {
+		t.Fatal("Node npm link rewrite accepted with modified generated target")
+	}
+	redirected := maps.Clone(after)
+	redirected["Cellar/node/1/bin/npm"] = fileState{Type: "symlink", Link: "/prefix/lib/node_modules/npm/bin/other.js"}
+	redirected["lib/node_modules/npm/bin/other.js"] = regular
+	if err := reconcileInstalledKeg("/prefix", node, verified, redirected); err == nil {
+		t.Fatal("Node npm link rewrite accepted with unexpected target")
+	}
+}
+
 func TestChangedBottleSymlinkMustRemainInsideKeg(t *testing.T) {
 	node := resolution.Node{Name: "hello", PkgVersion: "1", Bottle: resolution.Bottle{Tab: resolution.BottleTab{ChangedFiles: []string{"lib/link"}}}}
 	verified := bottle.Result{Name: "hello", PkgVersion: "1", KegPrefix: "hello/1", Inventory: []bottle.InventoryEntry{{Path: "hello/1/lib/link", KegPath: "lib/link", Type: bottle.EntrySymlink, SymlinkTarget: "target"}}}
@@ -414,6 +554,172 @@ func TestClassifyRejectsUnsafeBashCompletionLinks(t *testing.T) {
 				t.Fatalf("unsafe completion link %s -> %s accepted", tc.path, tc.link)
 			}
 		})
+	}
+}
+
+func TestValidateNodeNPMRuntimeAndGlobalLinks(t *testing.T) {
+	const prefix = "/prefix"
+	directory := func() fileState {
+		return fileState{Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true}
+	}
+	regular := func(content string, mode os.FileMode) fileState {
+		digest := sha256.Sum256([]byte(content))
+		return fileState{Type: "regular", Mode: mode, Size: int64(len(content)), Digest: hex.EncodeToString(digest[:]), Inode: "inode:" + hex.EncodeToString(digest[:]), Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true}
+	}
+	symlink := func(target string) fileState {
+		return fileState{Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: target, Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true}
+	}
+
+	node := resolution.Node{Name: "node", PkgVersion: "1"}
+	verified := bottle.Result{Name: "node", PkgVersion: "1", KegPrefix: "node/1"}
+	sourceRoot := "Cellar/node/1/libexec/lib/node_modules/npm"
+	after := map[string]fileState{}
+	for _, rel := range []string{
+		"Cellar", "Cellar/node", "Cellar/node/1", "Cellar/node/1/bin", "Cellar/node/1/libexec", "Cellar/node/1/libexec/lib", "Cellar/node/1/libexec/lib/node_modules",
+		sourceRoot, sourceRoot + "/bin", sourceRoot + "/man", sourceRoot + "/man/man1",
+		"lib", nodeNPMRuntimeParent, nodeNPMRuntimeRoot, nodeNPMRuntimeRoot + "/bin", nodeNPMRuntimeRoot + "/man", nodeNPMRuntimeRoot + "/man/man1",
+		"bin", "share", "share/man", "share/man/man1",
+	} {
+		after[rel] = directory()
+	}
+	after[sourceRoot+"/bin/npm-cli.js"] = regular("npm\n", 0o755)
+	after[sourceRoot+"/bin/npx-cli.js"] = regular("npx\n", 0o755)
+	after[sourceRoot+"/man/man1/npm.1"] = regular("npm manual\n", 0o644)
+	after[sourceRoot+"/npmrc"] = regular("private=true\n", 0o644)
+	after[nodeNPMRuntimeRoot+"/bin/npm-cli.js"] = after[sourceRoot+"/bin/npm-cli.js"]
+	after[nodeNPMRuntimeRoot+"/bin/npx-cli.js"] = after[sourceRoot+"/bin/npx-cli.js"]
+	after[nodeNPMRuntimeRoot+"/man/man1/npm.1"] = after[sourceRoot+"/man/man1/npm.1"]
+	after[sourceRoot+"/node-link"] = symlink("bin/npm-cli.js")
+	after[nodeNPMRuntimeRoot+"/node-link"] = symlink("bin/npm-cli.js")
+	after[nodeNPMRuntimeRoot+"/npmrc"] = regular("prefix = /prefix\n", 0o644)
+	after["Cellar/node/1/bin/npm"] = symlink("../../../../lib/node_modules/npm/bin/npm-cli.js")
+	after["Cellar/node/1/bin/npx"] = symlink("../../../../lib/node_modules/npm/bin/npx-cli.js")
+	after["bin/npm"] = symlink("../Cellar/node/1/bin/npm")
+	after["bin/npx"] = symlink("../Cellar/node/1/bin/npx")
+	after["share/man/man1/npm.1"] = symlink("../../../lib/node_modules/npm/man/man1/npm.1")
+
+	options := classifyOptions{verified: verified, runtimeUID: 1000, runtimeGID: 1000}
+	generated, err := validateNodeNPMRuntime(prefix, node, nil, after, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{nodeNPMRuntimeRoot + "/bin/npm-cli.js", nodeNPMRuntimeRoot + "/node-link", nodeNPMRuntimeRoot + "/npmrc"} {
+		if _, ok := generated[rel]; !ok {
+			t.Fatalf("generated path %q is missing", rel)
+		}
+	}
+	for _, rel := range []string{"bin/npm", "bin/npx", "share/man/man1/npm.1"} {
+		resolved, err := resolveSnapshotPath(prefix, after, rel)
+		if err != nil || !isNodeNPMGlobalLink(prefix, node, "Cellar/node/1", rel, resolved, after, generated) {
+			t.Fatalf("Node npm global link %q rejected: resolved=%q err=%v", rel, resolved, err)
+		}
+	}
+
+	mutated := maps.Clone(after)
+	state := mutated[nodeNPMRuntimeRoot+"/bin/npm-cli.js"]
+	state.Digest = strings.Repeat("f", 64)
+	mutated[nodeNPMRuntimeRoot+"/bin/npm-cli.js"] = state
+	if _, err := validateNodeNPMRuntime(prefix, node, nil, mutated, options); err == nil {
+		t.Fatal("modified Node npm runtime copy accepted")
+	}
+	extra := maps.Clone(after)
+	extra[nodeNPMRuntimeRoot+"/injected"] = regular("injected\n", 0o644)
+	if _, err := validateNodeNPMRuntime(prefix, node, nil, extra, options); err == nil {
+		t.Fatal("extra Node npm runtime path accepted")
+	}
+	redirected := maps.Clone(after)
+	redirected["bin/npm"] = symlink("../lib/node_modules/npm/bin/npm-cli.js")
+	resolved, err := resolveSnapshotPath(prefix, redirected, "bin/npm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isNodeNPMGlobalLink(prefix, node, "Cellar/node/1", "bin/npm", resolved, redirected, generated) {
+		t.Fatal("Node npm global command bypassed the current keg")
+	}
+}
+
+func TestValidateNodeNPMRuntimeRejectsRootOnlySourceTree(t *testing.T) {
+	const prefix = "/prefix"
+	node, after, options, _ := nodeNPMRuntimeLimitFixture(prefix)
+
+	_, err := validateNodeNPMRuntime(prefix, node, nil, after, options)
+	if err == nil || !strings.Contains(err.Error(), "verified Node npm source tree is empty") {
+		t.Fatalf("root-only Node npm source tree error = %v", err)
+	}
+}
+
+func TestValidateNodeNPMRuntimeEntryLimit(t *testing.T) {
+	const prefix = "/prefix"
+	node, after, options, sourceRoot := nodeNPMRuntimeLimitFixture(prefix)
+	state := nodeNPMRuntimeLimitRegular(0)
+	for i := 0; i < nodeNPMRuntimeMaxEntries-2; i++ {
+		name := fmt.Sprintf("entry-%05d", i)
+		after[path.Join(sourceRoot, name)] = state
+		after[path.Join(nodeNPMRuntimeRoot, name)] = state
+	}
+	if _, err := validateNodeNPMRuntime(prefix, node, nil, after, options); err != nil {
+		t.Fatalf("Node npm runtime at entry limit rejected: %v", err)
+	}
+
+	overLimit := maps.Clone(after)
+	name := fmt.Sprintf("entry-%05d", nodeNPMRuntimeMaxEntries-2)
+	overLimit[path.Join(sourceRoot, name)] = state
+	overLimit[path.Join(nodeNPMRuntimeRoot, name)] = state
+	_, err := validateNodeNPMRuntime(prefix, node, nil, overLimit, options)
+	want := fmt.Sprintf("Node npm runtime exceeds %d entries", nodeNPMRuntimeMaxEntries)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Node npm runtime above entry limit error = %v, want %q", err, want)
+	}
+}
+
+func TestValidateNodeNPMRuntimeByteLimit(t *testing.T) {
+	const prefix = "/prefix"
+	node, after, options, sourceRoot := nodeNPMRuntimeLimitFixture(prefix)
+	payloadPath := path.Join(sourceRoot, "payload")
+	runtimePayloadPath := path.Join(nodeNPMRuntimeRoot, "payload")
+	npmrcSize := after[path.Join(nodeNPMRuntimeRoot, "npmrc")].Size
+	payloadLimit := nodeNPMRuntimeMaxBytes - npmrcSize
+	state := nodeNPMRuntimeLimitRegular(payloadLimit)
+	after[payloadPath] = state
+	after[runtimePayloadPath] = state
+	if _, err := validateNodeNPMRuntime(prefix, node, nil, after, options); err != nil {
+		t.Fatalf("Node npm runtime at byte limit rejected: %v", err)
+	}
+
+	overLimit := maps.Clone(after)
+	state = nodeNPMRuntimeLimitRegular(payloadLimit + 1)
+	overLimit[payloadPath] = state
+	overLimit[runtimePayloadPath] = state
+	_, err := validateNodeNPMRuntime(prefix, node, nil, overLimit, options)
+	want := fmt.Sprintf("Node npm runtime exceeds %d bytes", nodeNPMRuntimeMaxBytes)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Node npm runtime above byte limit error = %v, want %q", err, want)
+	}
+}
+
+func nodeNPMRuntimeLimitFixture(prefix string) (resolution.Node, map[string]fileState, classifyOptions, string) {
+	directory := fileState{Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true}
+	node := resolution.Node{Name: nodeFormula, PkgVersion: "1"}
+	sourceRoot := path.Join("Cellar", node.Name, node.PkgVersion, nodeNPMSourceRoot)
+	after := map[string]fileState{
+		sourceRoot:           directory,
+		nodeNPMRuntimeParent: directory,
+		nodeNPMRuntimeRoot:   directory,
+	}
+	npmrc := []byte("prefix = " + filepath.ToSlash(prefix) + "\n")
+	npmrcDigest := sha256.Sum256(npmrc)
+	after[path.Join(nodeNPMRuntimeRoot, "npmrc")] = fileState{
+		Type: "regular", Mode: 0o644, Size: int64(len(npmrc)), Digest: hex.EncodeToString(npmrcDigest[:]),
+		Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true,
+	}
+	verified := bottle.Result{Name: node.Name, PkgVersion: node.PkgVersion, KegPrefix: path.Join(node.Name, node.PkgVersion)}
+	return node, after, classifyOptions{verified: verified, runtimeUID: 1000, runtimeGID: 1000}, sourceRoot
+}
+
+func nodeNPMRuntimeLimitRegular(size int64) fileState {
+	return fileState{
+		Type: "regular", Mode: 0o644, Size: size, Digest: strings.Repeat("a", 64),
+		Inode: "inode:node-npm-limit", Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true,
 	}
 }
 

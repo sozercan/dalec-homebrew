@@ -722,6 +722,22 @@ func TestOwnerRulesDoNotOverrideSymlinkTargetPackage(t *testing.T) {
 	}
 }
 
+func TestSymlinkCanInheritOwnerAttributedGeneratedTarget(t *testing.T) {
+	target := &sourceEntry{rel: "lib/node_modules/npm/bin/npm-cli.js", typeName: TypeRegular, retain: true, sha256: "same", mode: 0o755}
+	link := &sourceEntry{rel: "bin/npm", typeName: TypeSymlink, retain: true, linkResolved: target.rel}
+	scan := &sourceScan{entries: []*sourceEntry{link, target}, byPath: map[string]*sourceEntry{target.rel: target, link.rel: link}}
+	policy := &normalizedPolicy{
+		nodes:     map[string]resolution.Node{"node": {Name: "node", PkgVersion: "26.5.1"}},
+		allowlist: normalizedAllowlist{Owners: []normalizedRule{{Path: "lib/node_modules/npm", Package: "node"}}},
+	}
+	if err := attributeEntries(scan, policy); err != nil {
+		t.Fatal(err)
+	}
+	if target.packageName != "node" || link.packageName != "node" {
+		t.Fatalf("target=%q link=%q", target.packageName, link.packageName)
+	}
+}
+
 func TestOwnerRulesDoNotOverrideExactGlobalCopyPackage(t *testing.T) {
 	target := &sourceEntry{rel: "Cellar/jq/1/share/mime/packages/jq.xml", typeName: TypeRegular, retain: true, sha256: "same", mode: 0o644}
 	global := &sourceEntry{rel: "share/mime/packages/jq.xml", typeName: TypeRegular, retain: true, sha256: "same", mode: 0o644}

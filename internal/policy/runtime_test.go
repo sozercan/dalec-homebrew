@@ -44,6 +44,15 @@ func TestRuntimeAllowlistBindsSharedMimeDatabase(t *testing.T) {
 	}
 }
 
+func TestRuntimeAllowlistBindsNodeNPMRuntime(t *testing.T) {
+	record := &resolution.Record{Nodes: []resolution.Node{{Name: "node", PkgVersion: "26.5.1"}}}
+	allow, _ := RuntimeAllowlist(record)
+	want := runtimefs.PathRule{Path: nodeNPMRuntimePath, Package: "node", Required: true}
+	if !slices.Contains(allow.Owners, want) {
+		t.Fatalf("owner rules %#v do not contain %#v", allow.Owners, want)
+	}
+}
+
 func TestRuntimeAllowlistRetainsSharedFontconfigConfiguration(t *testing.T) {
 	record := &resolution.Record{Nodes: []resolution.Node{{Name: "fontconfig", PkgVersion: "2.18.2"}}}
 	allow, _ := RuntimeAllowlist(record)

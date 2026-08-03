@@ -447,12 +447,12 @@ type bottleBuiltOnWire struct {
 }
 
 type runtimeDependencyWire struct {
-	FullName         string `json:"full_name"`
-	Version          string `json:"version"`
-	Revision         int    `json:"revision"`
-	BottleRebuild    int    `json:"bottle_rebuild"`
-	PkgVersion       string `json:"pkg_version"`
-	DeclaredDirectly bool   `json:"declared_directly"`
+	FullName         string          `json:"full_name"`
+	Version          string          `json:"version"`
+	Revision         int             `json:"revision"`
+	BottleRebuild    int             `json:"bottle_rebuild"`
+	PkgVersion       json.RawMessage `json:"pkg_version"`
+	DeclaredDirectly bool            `json:"declared_directly"`
 }
 
 func parseBottleTab(value string, target ocispec.Platform, allBottle bool) (resolution.BottleTab, error) {
@@ -510,8 +510,22 @@ func parseBottleTab(value string, target ocispec.Platform, allBottle bool) (reso
 		if err != nil {
 			return resolution.BottleTab{}, fmt.Errorf("runtime dependency %q: %w", name, err)
 		}
-		if dependency.PkgVersion != expectedPkgVersion {
-			return resolution.BottleTab{}, fmt.Errorf("runtime dependency %q pkg_version %q, expected %q", name, dependency.PkgVersion, expectedPkgVersion)
+		// Homebrew bottle tabs created before pkg_version was added still carry
+		// the version and revision needed to derive it. Preserve the exact raw tab
+		// annotation separately, but use the canonical derived value in the record.
+		pkgVersion := expectedPkgVersion
+		if dependency.PkgVersion != nil {
+			if strings.TrimSpace(string(dependency.PkgVersion)) == "null" {
+				return resolution.BottleTab{}, fmt.Errorf("runtime dependency %q pkg_version cannot be null", name)
+			}
+			var annotatedPkgVersion string
+			if err := decodeJSON(dependency.PkgVersion, &annotatedPkgVersion); err != nil {
+				return resolution.BottleTab{}, fmt.Errorf("runtime dependency %q pkg_version: %w", name, err)
+			}
+			if annotatedPkgVersion != expectedPkgVersion {
+				return resolution.BottleTab{}, fmt.Errorf("runtime dependency %q pkg_version %q, expected %q", name, annotatedPkgVersion, expectedPkgVersion)
+			}
+			pkgVersion = annotatedPkgVersion
 		}
 		if dependency.BottleRebuild < 0 {
 			return resolution.BottleTab{}, fmt.Errorf("runtime dependency %q has negative bottle rebuild", name)
@@ -521,7 +535,7 @@ func parseBottleTab(value string, target ocispec.Platform, allBottle bool) (reso
 			Version:          dependency.Version,
 			Revision:         dependency.Revision,
 			BottleRebuild:    dependency.BottleRebuild,
-			PkgVersion:       dependency.PkgVersion,
+			PkgVersion:       pkgVersion,
 			DeclaredDirectly: dependency.DeclaredDirectly,
 		})
 	}

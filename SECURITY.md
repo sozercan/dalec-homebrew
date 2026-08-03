@@ -8,7 +8,7 @@ The V1 implementation is expected to preserve these properties:
 2. Formula identity and bottle checksums come from a verified Homebrew JWS payload and a pinned public-key set.
 3. Registry tags are discovery inputs only. Resolution records bind raw index, manifest, config, and layer descriptors.
 4. The compressed bottle digest must equal both the selected OCI layer digest and the authenticated Homebrew checksum.
-5. Bottle archives are scanned before installation and cannot contain traversal, escaping links, special files, setid bits, security capabilities or xattrs, collisions, or unbounded expansion.
+5. Bottle archives are scanned before installation and cannot contain traversal, special files, setid bits, security capabilities or xattrs, collisions, or unbounded expansion. Hardlinks remain keg-local. Symlinks remain keg-local except for relative links under the owner keg's `libexec/` tree that use prefix-contained `opt/<signed-direct-dependency>/...` targets using only canonical leading traversal to the prefix and no dot segments after the dependency root that are verified against the exact resolved dependency keg before and after installation; every other escaping link is rejected.
 6. The independent resolution verifier and every bottle verifier complete before Homebrew executes.
 7. Materialization has no network, secrets, SSH agents, sockets, devices, or shared writable caches.
 8. Homebrew is invoked only with local bottles, dependency selection and source fallback disabled, and every resulting prefix mutation checked. Unexpected kegs and source-built receipts fail.
@@ -16,7 +16,7 @@ The V1 implementation is expected to preserve these properties:
 10. Runtime code, links, libraries, plugins, and ancestors are root-owned and non-writable. Only explicitly versioned `var/<formula>` paths are writable by the runtime identity.
 11. Runtime tests use the final pruned state, final user, final environment and working directory, and no network.
 12. The Noble runtime base is cut from a fixed Ubuntu snapshot with a SHA-256-pinned Chisel binary and immutable, checksummed slice definitions. The build-only proxy accepts only Ubuntu archive hosts, while Chisel remains responsible for signed Release and package-digest verification; neither Chisel nor the proxy reaches the final image.
-13. Generated shared runtime indexes are accepted only at versioned paths with package and capability checks, bounded structure and size, authenticated runtime ownership, and explicit evidence attribution. Unrelated global `lib` or shared-data mutations continue to fail closed.
+13. Generated shared runtime indexes are accepted only at versioned paths with package and capability checks, bounded structure and size, authenticated runtime ownership, and explicit evidence attribution. Node's global `lib/node_modules/npm` runtime is accepted only as a bounded, exact copy of the verified private npm tree plus one exact prefix-bound `npmrc`, with command and manpage links bound back to that validated tree. Unrelated global `lib` or shared-data mutations continue to fail closed.
 
 ## Upstream trust limitations
 

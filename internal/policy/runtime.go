@@ -12,6 +12,7 @@ import (
 const (
 	gdkPixbufLoadersCachePath = "lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
 	sharedMimeDatabasePath    = "share/mime"
+	nodeNPMRuntimePath        = "lib/node_modules/npm"
 )
 
 // RuntimeAllowlist is the V1 package-state policy. Code and global links are
@@ -51,6 +52,17 @@ func RuntimeAllowlist(record *resolution.Record) (runtimefs.Allowlist, []string)
 			// referenced loader back to a keg in the resolved closure.
 			allow.Owners = append(allow.Owners, runtimefs.PathRule{
 				Path:     gdkPixbufLoadersCachePath,
+				Package:  node.Name,
+				Required: true,
+			})
+		}
+		if node.Name == "node" {
+			// Node's verified post-install step copies its bottled private npm
+			// tree into the global lib tree and writes one prefix-bound npmrc.
+			// The materializer validates the complete copy before this fallback
+			// attribution is applied.
+			allow.Owners = append(allow.Owners, runtimefs.PathRule{
+				Path:     nodeNPMRuntimePath,
 				Package:  node.Name,
 				Required: true,
 			})

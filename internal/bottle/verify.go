@@ -658,12 +658,13 @@ func validateHeader(hdr *tar.Header, rawHeader []byte, expected Expectation, lim
 	}
 	switch entryType {
 	case EntrySymlink:
-		resolved, err := validateSymlink(name, hdr.Linkname, expected, limits)
+		resolved, prefixTarget, err := validateSymlink(name, hdr.Linkname, expected, limits)
 		if err != nil {
 			return InventoryEntry{}, err
 		}
 		entry.SymlinkTarget = hdr.Linkname
 		entry.ResolvedTarget = resolved
+		entry.PrefixTarget = prefixTarget
 		entry.Relocatable = containsRelocationPlaceholder([]byte(hdr.Linkname))
 	case EntryHardlink:
 		target, err := validateHardlink(hdr.Linkname, expected, limits)
@@ -752,21 +753,66 @@ func validateKegPath(name string, entryType EntryType, expected Expectation) err
 	return nil
 }
 
-func validateSymlink(name, target string, expected Expectation, limits Limits) (string, error) {
+func validateSymlink(name, target string, expected Expectation, limits Limits) (string, string, error) {
 	if target == "" {
-		return "", verificationError(CodeUnsafeLink, name, "empty symlink target")
+		return "", "", verificationError(CodeUnsafeLink, name, "empty symlink target")
 	}
 	if len(target) > limits.MaxLinkBytes || !utf8.ValidString(target) || containsControl(target) {
-		return "", verificationError(CodeUnsafeLink, name, "invalid or overlong symlink target")
+		return "", "", verificationError(CodeUnsafeLink, name, "invalid or overlong symlink target")
 	}
 	if strings.Contains(target, "\\") || strings.HasPrefix(target, "/") || path.IsAbs(target) {
-		return "", verificationError(CodeUnsafeLink, name, "absolute or backslash symlink target is forbidden")
+		return "", "", verificationError(CodeUnsafeLink, name, "absolute or backslash symlink target is forbidden")
 	}
-	resolved := path.Clean(path.Join(path.Dir(name), target))
-	if !withinKeg(resolved, expected) {
-		return "", verificationError(CodeUnsafeLink, name, "symlink target %q escapes keg %q", target, expectedKegPrefix(expected))
+
+	prefixTarget := path.Clean(path.Join("Cellar", path.Dir(name), target))
+	installedKeg := path.Join("Cellar", expectedKegPrefix(expected))
+	if prefixTarget == installedKeg || strings.HasPrefix(prefixTarget, installedKeg+"/") {
+		return strings.TrimPrefix(prefixTarget, "Cellar/"), "", nil
 	}
-	return resolved, nil
+	if canonicalExternalTarget, ok := canonicalExternalSymlinkTarget(name, target, expected); ok && canonicalExternalTarget == prefixTarget {
+		return "", prefixTarget, nil
+	}
+	return "", "", verificationError(CodeUnsafeLink, name, "symlink target %q escapes keg %q", target, expectedKegPrefix(expected))
+}
+
+func allowedExternalSymlinkSource(name string, expected Expectation) bool {
+	kegPrefix := expectedKegPrefix(expected) + "/"
+	kegPath := strings.TrimPrefix(name, kegPrefix)
+	return kegPath != name && strings.HasPrefix(kegPath, "libexec/")
+}
+
+func canonicalExternalSymlinkTarget(name, target string, expected Expectation) (string, bool) {
+	if !allowedExternalSymlinkSource(name, expected) {
+		return "", false
+	}
+	base := strings.Split(path.Join("Cellar", path.Dir(name)), "/")
+	components := strings.Split(target, "/")
+	if len(components) < len(base)+2 {
+		return "", false
+	}
+	for index := range base {
+		if components[index] != ".." {
+			return "", false
+		}
+	}
+	components = components[len(base):]
+	for _, component := range components {
+		if component == "" || component == "." || component == ".." {
+			return "", false
+		}
+	}
+	candidate := strings.Join(components, "/")
+	return candidate, allowedExternalSymlinkTarget(candidate, expected)
+}
+
+func allowedExternalSymlinkTarget(target string, expected Expectation) bool {
+	for _, formula := range expected.AllowedExternalSymlinkFormulae {
+		root := path.Join("opt", formula)
+		if target == root || strings.HasPrefix(target, root+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func validateHardlink(target string, expected Expectation, limits Limits) (string, error) {
@@ -879,7 +925,7 @@ func validateCollisionsAndHardlinks(entries map[string]*scannedEntry, expected E
 		}
 	}
 
-	resolvePath := func(base, target, owner string) (string, error) {
+	resolvePath := func(base, target, owner string) (string, string, error) {
 		rootParts := strings.Split(expectedKegPrefix(expected), "/")
 		stack := []string{}
 		if base != "" && base != "." {
@@ -896,7 +942,7 @@ func validateCollisionsAndHardlinks(entries map[string]*scannedEntry, expected E
 				continue
 			case "..":
 				if len(stack) <= len(rootParts) {
-					return "", verificationError(CodeUnsafeLink, owner, "link target %q escapes keg %q", target, expectedKegPrefix(expected))
+					return "", "", verificationError(CodeUnsafeLink, owner, "link target %q escapes keg %q", target, expectedKegPrefix(expected))
 				}
 				stack = stack[:len(stack)-1]
 				continue
@@ -904,7 +950,7 @@ func validateCollisionsAndHardlinks(entries map[string]*scannedEntry, expected E
 			stack = append(stack, component)
 			candidate := strings.Join(stack, "/")
 			if !withinKeg(candidate, expected) && len(stack) >= len(rootParts) {
-				return "", verificationError(CodeUnsafeLink, owner, "link target %q escapes keg %q", target, expectedKegPrefix(expected))
+				return "", "", verificationError(CodeUnsafeLink, owner, "link target %q escapes keg %q", target, expectedKegPrefix(expected))
 			}
 			entry, ok := entries[candidate]
 			if !ok || entry.inventory.Type != EntrySymlink {
@@ -912,20 +958,26 @@ func validateCollisionsAndHardlinks(entries map[string]*scannedEntry, expected E
 			}
 			steps++
 			if steps > limits.MaxDepth {
-				return "", verificationError(CodeUnsafeLink, owner, "symlink resolution exceeds %d steps", limits.MaxDepth)
+				return "", "", verificationError(CodeUnsafeLink, owner, "symlink resolution exceeds %d steps", limits.MaxDepth)
 			}
 			if followed[candidate] {
-				return "", verificationError(CodeUnsafeLink, owner, "symlink cycle through %q", candidate)
+				return "", "", verificationError(CodeUnsafeLink, owner, "symlink cycle through %q", candidate)
 			}
 			followed[candidate] = true
+			if entry.inventory.PrefixTarget != "" {
+				if len(queue) != 0 {
+					return "", "", verificationError(CodeUnsafeLink, owner, "external symlink %q has unresolved path suffix", candidate)
+				}
+				return "", entry.inventory.PrefixTarget, nil
+			}
 			stack = stack[:len(stack)-1]
 			queue = append(strings.Split(entry.inventory.SymlinkTarget, "/"), queue...)
 		}
 		resolved := strings.Join(stack, "/")
 		if !withinKeg(resolved, expected) {
-			return "", verificationError(CodeUnsafeLink, owner, "link target %q escapes keg %q", target, expectedKegPrefix(expected))
+			return "", "", verificationError(CodeUnsafeLink, owner, "link target %q escapes keg %q", target, expectedKegPrefix(expected))
 		}
-		return resolved, nil
+		return resolved, "", nil
 	}
 
 	for _, name := range paths {
@@ -933,11 +985,18 @@ func validateCollisionsAndHardlinks(entries map[string]*scannedEntry, expected E
 		if entry.inventory.Type != EntrySymlink {
 			continue
 		}
-		resolved, err := resolvePath(path.Dir(name), entry.inventory.SymlinkTarget, name)
+		if entry.inventory.PrefixTarget != "" {
+			continue
+		}
+		resolved, prefixTarget, err := resolvePath(path.Dir(name), entry.inventory.SymlinkTarget, name)
 		if err != nil {
 			return err
 		}
+		if prefixTarget != "" && !allowedExternalSymlinkSource(name, expected) {
+			return verificationError(CodeUnsafeLink, name, "symlink chain reaches a dependency opt target from outside libexec")
+		}
 		entry.inventory.ResolvedTarget = resolved
+		entry.inventory.PrefixTarget = prefixTarget
 	}
 
 	hardResolved := make(map[string]string)
@@ -964,9 +1023,12 @@ func validateCollisionsAndHardlinks(entries map[string]*scannedEntry, expected E
 			hardResolved[name] = name
 			return name, nil
 		case EntryHardlink:
-			resolvedPath, err := resolvePath("", entry.inventory.HardlinkTarget, owner)
+			resolvedPath, prefixTarget, err := resolvePath("", entry.inventory.HardlinkTarget, owner)
 			if err != nil {
 				return "", err
+			}
+			if prefixTarget != "" {
+				return "", verificationError(CodeUnsafeLink, owner, "hardlink target resolves outside keg")
 			}
 			target, err := resolveHardlink(resolvedPath, owner, depth+1)
 			if err != nil {
@@ -983,9 +1045,12 @@ func validateCollisionsAndHardlinks(entries map[string]*scannedEntry, expected E
 		if entry.inventory.Type != EntryHardlink {
 			continue
 		}
-		resolvedPath, err := resolvePath("", entry.inventory.HardlinkTarget, name)
+		resolvedPath, prefixTarget, err := resolvePath("", entry.inventory.HardlinkTarget, name)
 		if err != nil {
 			return err
+		}
+		if prefixTarget != "" {
+			return verificationError(CodeUnsafeLink, name, "hardlink target resolves outside keg")
 		}
 		target, err := resolveHardlink(resolvedPath, name, 1)
 		if err != nil {
@@ -1080,6 +1145,17 @@ func normalizeExpectation(e Expectation, limits Limits) (Expectation, error) {
 			return e, fmt.Errorf("invalid %s %q", value.label, value.value)
 		}
 	}
+	e.AllowedExternalSymlinkFormulae = slices.Clone(e.AllowedExternalSymlinkFormulae)
+	slices.Sort(e.AllowedExternalSymlinkFormulae)
+	for index, formula := range e.AllowedExternalSymlinkFormulae {
+		if !safeFormulaName.MatchString(formula) || strings.ContainsAny(formula, `/\`) || formula == e.Name {
+			return e, fmt.Errorf("invalid allowed external symlink Formula %q", formula)
+		}
+		if index > 0 && e.AllowedExternalSymlinkFormulae[index-1] == formula {
+			return e, fmt.Errorf("duplicate allowed external symlink Formula %q", formula)
+		}
+	}
+
 	seenDeps := make(map[string]struct{}, len(e.Dependencies))
 	for _, dep := range e.Dependencies {
 		if dep.FullName == "" || dep.Version == "" || dep.PkgVersion == "" ||

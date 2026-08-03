@@ -2,6 +2,7 @@ package oci
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -65,6 +66,48 @@ func TestResolveRejectsMalformedTab(t *testing.T) {
 	_, err := fixture.client.Resolve(context.Background(), fixture.formula, fixture.target)
 	if err == nil || !strings.Contains(err.Error(), "decode sh.brew.tab") {
 		t.Fatalf("expected malformed-tab error, got %v", err)
+	}
+}
+
+func TestResolveAcceptsLegacyTabDependencyWithoutPkgVersion(t *testing.T) {
+	t.Parallel()
+
+	fixture := newRegistryFixture(t, registryFixtureOptions{tab: `{"homebrew_version":"4.0.24-13-ga626253","compiler":"gcc-11","runtime_dependencies":[{"full_name":"ca-certificates","version":"2023-05-30","declared_directly":false}],"arch":"x86_64","built_on":{"os":"Linux","os_version":"5.15.0-1039-azure","cpu_family":"skylake","glibc_version":"2.35","oldest_cpu_family":"core2"}}`})
+	result, err := fixture.client.Resolve(context.Background(), fixture.formula, fixture.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Tab.Dependencies) != 1 {
+		t.Fatalf("runtime dependencies = %#v", result.Tab.Dependencies)
+	}
+	dependency := result.Tab.Dependencies[0]
+	if dependency.FullName != "ca-certificates" || dependency.Version != "2023-05-30" || dependency.Revision != 0 || dependency.BottleRebuild != 0 || dependency.PkgVersion != "2023-05-30" || dependency.DeclaredDirectly {
+		t.Fatalf("runtime dependency = %#v", dependency)
+	}
+}
+
+func TestResolveRejectsInvalidTabDependencyPkgVersion(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name       string
+		pkgVersion string
+		want       string
+	}{
+		{name: "empty", pkgVersion: `""`, want: `runtime dependency "dep" pkg_version "", expected "1.2"`},
+		{name: "mismatched", pkgVersion: `"1.3"`, want: `runtime dependency "dep" pkg_version "1.3", expected "1.2"`},
+		{name: "null", pkgVersion: `null`, want: `runtime dependency "dep" pkg_version cannot be null`},
+		{name: "non-string", pkgVersion: `12`, want: `runtime dependency "dep" pkg_version: json: cannot unmarshal number`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			tab := fmt.Sprintf(`{"homebrew_version":"5.0.0","compiler":"gcc-13","runtime_dependencies":[{"full_name":"dep","version":"1.2","revision":0,"bottle_rebuild":0,"pkg_version":%s,"declared_directly":true}],"arch":"x86_64","built_on":{"os":"Linux","os_version":"Ubuntu 24.04","cpu_family":"test","oldest_cpu_family":"core2","glibc_version":"2.39"}}`, test.pkgVersion)
+			fixture := newRegistryFixture(t, registryFixtureOptions{tab: tab})
+			_, err := fixture.client.Resolve(context.Background(), fixture.formula, fixture.target)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q error, got %v", test.want, err)
+			}
+		})
 	}
 }
 
