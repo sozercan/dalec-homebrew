@@ -25,8 +25,8 @@ but do not always include an authenticated generation timestamp. When absent,
 freshness relies on the unsigned HTTP `Last-Modified` value.
 
 Callers may supply a metadata rollback floor, but the repository release
-workflow does not persist one across releases. It limits metadata age to seven
-days for release-bound frontends, rejects future timestamps, requires every
+workflow does not persist one across releases. For release-bound frontends, it
+limits metadata age to seven days and future skew to 15 minutes, requires every
 release integration to use the same authenticated snapshot, and records that
 snapshot in signed evidence. This is not cross-release anti-rollback: a
 previously superseded but still-fresh signed snapshot may be accepted by a
