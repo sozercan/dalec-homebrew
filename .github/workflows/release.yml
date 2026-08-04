@@ -852,9 +852,9 @@ jobs:
           summary_limit=50
           summary_field_limit=256
           {
-            printf '### Component vulnerability scan: `%s` (`%s`)\n\n' "$COMPONENT" "$PLATFORM"
-            printf -- '- Subject: `%s`\n' "$SUBJECT"
-            printf -- '- Report: `vulnerability-%s.json`\n' "$SLUG"
+            printf "### Component vulnerability scan: \`%s\` (\`%s\`)\n\n" "$COMPONENT" "$PLATFORM"
+            printf -- "- Subject: \`%s\`\n" "$SUBJECT"
+            printf -- "- Report: \`vulnerability-%s.json\`\n" "$SLUG"
             printf -- '- Fixed critical findings: **%s**\n\n' "$finding_count"
             if (( finding_count == 0 )); then
               echo "No fixed critical vulnerabilities were reported."
