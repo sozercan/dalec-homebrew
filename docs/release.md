@@ -121,20 +121,41 @@ Release CI must reject:
 existing v-prefixed, OCI-compatible SemVer tag, including supported
 pre-releases. Tags are limited to 128 characters, and numeric pre-release
 identifiers cannot have leading zeroes. Build metadata (`+...`) is not accepted
-because OCI tags cannot represent it without an additional mapping. Trigger the
-trusted `main` workflow with a repository dispatch:
+because OCI tags cannot represent it without an additional mapping.
+
+Push a release tag on the current `main` commit to start the pipeline:
 
 ```console
-gh api --method POST repos/OWNER/REPOSITORY/dispatches \
-  -f event_type=release \
-  -f 'client_payload[tag]=v1.2.3'
+git tag -a v1.2.3 -m v1.2.3
+git push origin v1.2.3
 ```
 
+Creating a release tag is a privileged release-operator action. GitHub loads a
+tag-push workflow from the tagged commit, so repository access must restrict
+creation of `v*.*.*` tags to trusted release operators. The checked-in
+[`.github/workflows/release-tag.yml`](../.github/workflows/release-tag.yml) does
+not check out source and requests only `actions: write`; it dispatches
+`release.yml` explicitly on `main` with both the pushed tag and pushed commit.
+Tag protection, rather than the tag-scoped workflow itself, is the authorization
+boundary. The workflow accepts only the initial tag push; later tag updates or
+deletions do not dispatch a release.
+
 A new tuple is built only when the tag names the exact commit that contains the
-dispatched workflow, so code receiving registry write access is the trusted
-workflow source. A later descendant of `main` may verify and resume an existing
-draft, provided the current verifier and exact asset contract still accept the
-signed bundle, because recovery never rebuilds the tuple.
+trusted `main` workflow, so the checked-in path receiving registry write access
+remains the reviewed default-branch workflow source. Tags on older or unrelated
+commits start a validation run but fail before registry or signing access. A tag
+that moves after its push also fails because the workflow binds the original
+push commit. A later descendant of `main` may verify and resume an existing
+signed draft, provided the current verifier and exact asset contract still
+accept the bundle, because recovery never rebuilds the tuple. For an explicit
+retry or draft recovery, dispatch the trusted workflow on `main`:
+
+```console
+gh workflow run release.yml --ref main -f tag=v1.2.3
+```
+
+Existing `repository_dispatch` integrations remain supported with the same
+`client_payload.tag` contract.
 
 Runs are serialized repository-wide, and an existing published release is
 rejected. With no target release, the workflow builds a new tuple and stages a
@@ -178,9 +199,10 @@ with earlier releases. See [`../SECURITY.md`](../SECURITY.md) for the resulting
 cross-release anti-rollback limitation.
 
 The GitHub `release` environment gates signing and promotion. Configure required
-reviewers, protect release-critical paths with branch rules, and prevent updates
-or deletion of `v*.*.*` tags. GHCR and GitHub Release writes use the scoped
-`GITHUB_TOKEN`; keyless Cosign uses GitHub Actions OIDC.
+reviewers, protect release-critical paths with branch rules, restrict release-tag
+creation to release operators, and use tag rules to prevent update or deletion.
+GHCR and GitHub Release writes use the scoped `GITHUB_TOKEN`; keyless Cosign
+uses GitHub Actions OIDC. Push release tags individually.
 
 Release assets include:
 
