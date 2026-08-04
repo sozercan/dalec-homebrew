@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,30 @@ import (
 	"github.com/sozercan/dalec-homebrew/internal/policy"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 )
+
+func TestEnsureWritablePrefixDirectoriesV2CreatesAndRejectsUnsafePaths(t *testing.T) {
+	prefix := t.TempDir()
+	if err := ensureWritablePrefixDirectoriesV2(prefix, os.Geteuid(), os.Getegid()); err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range writablePrefixDirectoriesV2 {
+		info, err := os.Lstat(filepath.Join(prefix, directory))
+		if err != nil || !info.IsDir() || info.Mode().Perm() != 0o755 {
+			t.Fatalf("directory %s info=%v err=%v", directory, info, err)
+		}
+	}
+
+	unsafe := filepath.Join(t.TempDir(), "prefix")
+	if err := os.Mkdir(unsafe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(unsafe, "Cellar")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureWritablePrefixDirectoriesV2(unsafe, os.Geteuid(), os.Getegid()); err == nil || !strings.Contains(err.Error(), "not a real directory") {
+		t.Fatalf("unsafe prefix error=%v", err)
+	}
+}
 
 func TestRejectsTapLocalFormulaHelperLoads(t *testing.T) {
 	for _, source := range []string{

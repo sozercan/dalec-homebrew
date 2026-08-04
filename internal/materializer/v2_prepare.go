@@ -76,6 +76,9 @@ func PrepareV2(ctx context.Context, cfg PrepareV2Config) (*PreparationEvidenceV2
 			return nil, fmt.Errorf("fetch evidence: %w", err)
 		}
 	}
+	if err := ensureWritablePrefixDirectoriesV2(cfg.Prefix, cfg.Record.Runtime.UID, cfg.Record.Runtime.GID); err != nil {
+		return nil, fmt.Errorf("prepare writable Homebrew prefix structure: %w", err)
+	}
 	preparedBottles := filepath.Join(cfg.PreparedRoot, "bottles")
 	if err := os.Mkdir(preparedBottles, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, err
@@ -193,6 +196,46 @@ func PrepareV2(ctx context.Context, cfg PrepareV2Config) (*PreparationEvidenceV2
 		return nil, err
 	}
 	return evidence, nil
+}
+
+var writablePrefixDirectoriesV2 = []string{
+	"Caskroom",
+	"Cellar",
+	"Frameworks",
+	"bin",
+	"etc",
+	"include",
+	"lib",
+	"opt",
+	"sbin",
+	"share",
+	"var",
+}
+
+func ensureWritablePrefixDirectoriesV2(prefix string, uid, gid int) error {
+	if uid <= 0 || gid <= 0 {
+		return errors.New("runtime UID and GID must be positive")
+	}
+	for _, directory := range writablePrefixDirectoriesV2 {
+		target := filepath.Join(prefix, directory)
+		info, err := os.Lstat(target)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.Mkdir(target, 0o755); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		} else if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s is not a real directory", target)
+		}
+		if err := os.Chown(target, uid, gid); err != nil {
+			return err
+		}
+		if err := os.Chmod(target, 0o755); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func verifyReceiptlessMarkerV2(node resolution.NodeV2, result *bottle.Result) error {
