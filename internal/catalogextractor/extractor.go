@@ -275,7 +275,11 @@ func brewRubyCommand(script string, args ...string) (*exec.Cmd, error) {
 	}
 	commandArgs := append([]string{"ruby", script}, args...)
 	command := exec.Command(brew, commandArgs...)
+	runBrewAsLinuxbrew(command)
 	command.Env = append(os.Environ(),
+		"HOME=/home/linuxbrew",
+		"USER=linuxbrew",
+		"LOGNAME=linuxbrew",
 		"HOMEBREW_DEVELOPER=1",
 		"HOMEBREW_NO_AUTO_UPDATE=1",
 		"HOMEBREW_NO_ANALYTICS=1",

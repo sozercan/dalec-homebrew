@@ -31,6 +31,9 @@ func TestBrewRubyCommandUsesPinnedHomebrewEntrypoint(t *testing.T) {
 		t.Fatalf("args=%q want=%q", command.Args, wantArgs)
 	}
 	for _, want := range []string{
+		"HOME=/home/linuxbrew",
+		"USER=linuxbrew",
+		"LOGNAME=linuxbrew",
 		"HOMEBREW_DEVELOPER=1",
 		"HOMEBREW_NO_AUTO_UPDATE=1",
 		"HOMEBREW_NO_ANALYTICS=1",

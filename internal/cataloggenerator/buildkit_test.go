@@ -1,10 +1,12 @@
 package cataloggenerator
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
 
+	bkclient "github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
 )
@@ -79,5 +81,17 @@ func TestExtractionGraphSeparatesNetworkedGitFromOfflineEvaluation(t *testing.T)
 	}
 	if !foundGit || execCount != 3 || !foundTapMount || !foundSourceMetadataMount || !foundTrustMount || !foundTrustEnv || !foundGitRemoval {
 		t.Fatalf("graph coverage git=%v execs=%d tap_mount=%v source_metadata=%v trust_mount=%v trust_env=%v git_removal=%v", foundGit, execCount, foundTapMount, foundSourceMetadataMount, foundTrustMount, foundTrustEnv, foundGitRemoval)
+	}
+}
+
+func TestAppendSolveLogsIsBounded(t *testing.T) {
+	var output bytes.Buffer
+	appendSolveLogs(&output, &bkclient.SolveStatus{Logs: []*bkclient.VertexLog{{Data: bytes.Repeat([]byte{'x'}, maxExtractionSolveLogBytes+1)}}})
+	if output.Len() != maxExtractionSolveLogBytes {
+		t.Fatalf("log size=%d want=%d", output.Len(), maxExtractionSolveLogBytes)
+	}
+	appendSolveLogs(&output, &bkclient.SolveStatus{Logs: []*bkclient.VertexLog{{Data: []byte("ignored")}}})
+	if output.Len() != maxExtractionSolveLogBytes {
+		t.Fatal("bounded log grew after reaching the limit")
 	}
 }

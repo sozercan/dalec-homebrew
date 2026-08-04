@@ -1,6 +1,7 @@
 package cataloggenerator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -95,14 +96,20 @@ func (e *BuildKitExtractor) Extract(ctx context.Context, tap catalog.TapID) (*ca
 	defer os.RemoveAll(outputDir)
 	status := make(chan *bkclient.SolveStatus)
 	statusDone := make(chan struct{})
+	var solveLogs bytes.Buffer
 	go func() {
-		for range status {
+		for update := range status {
+			appendSolveLogs(&solveLogs, update)
 		}
 		close(statusDone)
 	}()
 	_, err = e.client.Solve(ctx, definition, bkclient.SolveOpt{Exports: []bkclient.ExportEntry{{Type: bkclient.ExporterLocal, OutputDir: outputDir}}}, status)
 	<-statusDone
 	if err != nil {
+		message := strings.TrimSpace(solveLogs.String())
+		if message != "" {
+			return nil, fmt.Errorf("solve isolated tap extraction: %w: %s", err, message)
+		}
 		return nil, fmt.Errorf("solve isolated tap extraction: %w", err)
 	}
 	data, err := os.ReadFile(filepath.Join(outputDir, extractedTapFilename))
@@ -117,6 +124,32 @@ func (e *BuildKitExtractor) Extract(ctx context.Context, tap catalog.TapID) (*ca
 		return nil, errors.New("isolated tap extraction changed requested identity")
 	}
 	return extracted, nil
+}
+
+const maxExtractionSolveLogBytes = 1 << 20
+
+func appendSolveLogs(output *bytes.Buffer, status *bkclient.SolveStatus) {
+	if output == nil || status == nil || output.Len() >= maxExtractionSolveLogBytes {
+		return
+	}
+	for _, entry := range status.Logs {
+		if entry == nil || len(entry.Data) == 0 {
+			continue
+		}
+		remaining := maxExtractionSolveLogBytes - output.Len()
+		data := entry.Data
+		if len(data) > remaining {
+			data = data[:remaining]
+		}
+		_, _ = output.Write(data)
+		if output.Len() >= maxExtractionSolveLogBytes {
+			return
+		}
+	}
+}
+
+func linuxbrewWritableScratch() llb.State {
+	return llb.Scratch().File(llb.Mkdir("/data", 0o700, llb.WithUIDGID(1000, 1000)))
 }
 
 func (e *BuildKitExtractor) extractionState(tap catalog.TapID) (llb.State, error) {
@@ -160,6 +193,9 @@ func (e *BuildKitExtractor) extractionState(tap catalog.TapID) (llb.State, error
 		return llb.Scratch(), err
 	}
 	trustState := llb.Scratch().File(llb.Mkfile("/trust.json", 0o444, append(trustBytes, '\n')))
+	tmpState := linuxbrewWritableScratch()
+	varTmpState := linuxbrewWritableScratch()
+	cacheState := linuxbrewWritableScratch()
 	evaluator := worker.AddEnv("HOMEBREW_USER_CONFIG_HOME", "/input/config").AddEnv("HOMEBREW_REQUIRE_TAP_TRUST", "1")
 	run := evaluator.Run(
 		llb.Args([]string{
@@ -178,9 +214,9 @@ func (e *BuildKitExtractor) extractionState(tap catalog.TapID) (llb.State, error
 		llb.AddMount("/input/source", metadataState, llb.Readonly),
 		llb.AddMount("/input/config", trustState, llb.Readonly),
 		llb.AddMount("/out", llb.Scratch()),
-		llb.AddMount("/tmp", llb.Scratch()),
-		llb.AddMount("/var/tmp", llb.Scratch()),
-		llb.AddMount("/home/linuxbrew/.cache", llb.Scratch()),
+		llb.AddMount("/tmp", tmpState, llb.SourcePath("/data")),
+		llb.AddMount("/var/tmp", varTmpState, llb.SourcePath("/data")),
+		llb.AddMount("/home/linuxbrew/.cache", cacheState, llb.SourcePath("/data")),
 		llb.WithCustomName("extract Homebrew tap "+string(tap)),
 	)
 	untrustedState := run.GetMount("/out")
