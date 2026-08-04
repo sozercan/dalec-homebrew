@@ -21,12 +21,17 @@ def bottle_from_hash(hash)
   stable = hash.fetch("bottle", {}).fetch("stable", nil)
   return nil if stable.nil? || stable.empty?
 
-  files = stable.fetch("files", {}).map do |tag, value|
+  files = stable.fetch("files", {}).filter_map do |tag, value|
+    tag_name = tag.to_s
+    next unless SUPPORTED_TAGS.include?(tag_name)
+
+    cellar = value.fetch("cellar").to_s
+    cellar = ENV.fetch("HOMEBREW_CELLAR") if cellar == "/Cellar"
     {
-      "tag" => tag.to_s,
+      "tag" => tag_name,
       "url" => value.fetch("url"),
       "sha256" => "sha256:#{value.fetch('sha256')}",
-      "cellar" => value.fetch("cellar").to_s,
+      "cellar" => cellar,
     }
   end.sort_by { |file| file.fetch("tag") }
   {

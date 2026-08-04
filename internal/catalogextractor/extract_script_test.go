@@ -21,6 +21,8 @@ func TestRubyExtractorKeepsRuntimeDependenciesAndSourceContained(t *testing.T) {
 		`Utils.name_from_full_name(value)`,
 		`simulated_arch = { x86_64: :intel, arm64: :arm }.fetch(tag.arch)`,
 		`Homebrew::SimulateSystem.with(os: tag.system, arch: simulated_arch)`,
+		`next unless SUPPORTED_TAGS.include?(tag_name)`,
+		`cellar = ENV.fetch("HOMEBREW_CELLAR") if cellar == "/Cellar"`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("Ruby extractor is missing %q", required)
