@@ -2,6 +2,7 @@ package llbutil
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -11,6 +12,20 @@ import (
 	"github.com/sozercan/dalec-homebrew/internal/fetcher"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 )
+
+func TestPreparePrefixSeedUsesStateRoot(t *testing.T) {
+	data, err := os.ReadFile("v2.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `llb.Copy(worker, DefaultHomebrewPrefixV2, "/"`) {
+		t.Fatal("V2 prefix seed is not copied to the state root")
+	}
+	if strings.Contains(text, `llb.SourcePath("/prefix")`) {
+		t.Fatal("V2 prefix seed retains a nested /prefix source path")
+	}
+}
 
 func TestEnsurePreparedPrefixDirectoriesV2CreatesRootRelativeStructure(t *testing.T) {
 	state := ensurePreparedPrefixDirectoriesV2(llb.Scratch())

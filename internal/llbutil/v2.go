@@ -163,7 +163,7 @@ func PrepareMaterializationV2(materializerRef string, platform ocispec.Platform,
 		return PreparedV2{}, err
 	}
 	worker := llb.Image(materializerRef, llb.Platform(platform))
-	seed := llb.Scratch().File(llb.Copy(worker, DefaultHomebrewPrefixV2, "/prefix", &llb.CopyInfo{CopyDirContentsOnly: true, CreateDestPath: true}))
+	seed := llb.Scratch().File(llb.Copy(worker, DefaultHomebrewPrefixV2, "/", &llb.CopyInfo{CopyDirContentsOnly: true, CreateDestPath: true}))
 	recordState, _, err := ResolutionStateV2(record)
 	if err != nil {
 		return PreparedV2{}, err
@@ -174,7 +174,7 @@ func PrepareMaterializationV2(materializerRef string, platform ocispec.Platform,
 		llb.AddMount("/run/dalec-homebrew/input", recordState, llb.Readonly),
 		llb.AddMount("/run/dalec-homebrew/bottles", inputs.Bottles, llb.Readonly),
 		llb.AddMount("/run/dalec-homebrew/fetch-evidence", inputs.FetchEvidence, llb.Readonly),
-		llb.AddMount(DefaultHomebrewPrefixV2, seed, llb.SourcePath("/prefix")),
+		llb.AddMount(DefaultHomebrewPrefixV2, seed),
 		llb.AddMount("/prepared", llb.Scratch()),
 		llb.WithLinuxResources(llb.LinuxResources{Memory: 8 << 30, MemorySwap: 8 << 30, CPUQuota: 400000, CPUPeriod: 100000}),
 		llb.WithCustomName("prepare verified Homebrew V2 closure"),
