@@ -164,6 +164,7 @@ func PrepareMaterializationV2(materializerRef string, platform ocispec.Platform,
 	}
 	worker := llb.Image(materializerRef, llb.Platform(platform))
 	seed := llb.Scratch().File(llb.Copy(worker, DefaultHomebrewPrefixV2, "/prefix", &llb.CopyInfo{CopyDirContentsOnly: true, CreateDestPath: true}))
+	seed = ensureWritablePrefixDirectoriesV2(seed)
 	recordState, _, err := ResolutionStateV2(record)
 	if err != nil {
 		return PreparedV2{}, err
@@ -183,6 +184,27 @@ func PrepareMaterializationV2(materializerRef string, platform ocispec.Platform,
 }
 
 const DefaultHomebrewPrefixV2 = "/home/linuxbrew/.linuxbrew"
+
+var writablePrefixDirectoriesV2 = []string{
+	"Caskroom",
+	"Cellar",
+	"Frameworks",
+	"bin",
+	"etc",
+	"include",
+	"lib",
+	"opt",
+	"sbin",
+	"share",
+	"var",
+}
+
+func ensureWritablePrefixDirectoriesV2(state llb.State) llb.State {
+	for _, directory := range writablePrefixDirectoriesV2 {
+		state = state.File(llb.Mkdir(path.Join("/prefix", directory), 0o755, llb.WithParents(true), llb.WithUIDGID(1000, 1000)))
+	}
+	return state
+}
 
 // InstalledV2 contains the cumulative prefix state and one delta evidence file
 // per install-order entry.
