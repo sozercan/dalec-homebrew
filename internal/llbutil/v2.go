@@ -179,10 +179,32 @@ func PrepareMaterializationV2(materializerRef string, platform ocispec.Platform,
 		llb.WithLinuxResources(llb.LinuxResources{Memory: 8 << 30, MemorySwap: 8 << 30, CPUQuota: 400000, CPUPeriod: 100000}),
 		llb.WithCustomName("prepare verified Homebrew V2 closure"),
 	)
-	return PreparedV2{Prefix: run.GetMount(DefaultHomebrewPrefixV2), State: run.GetMount("/prepared")}, nil
+	prefix := ensurePreparedPrefixDirectoriesV2(run.GetMount(DefaultHomebrewPrefixV2))
+	return PreparedV2{Prefix: prefix, State: run.GetMount("/prepared")}, nil
 }
 
 const DefaultHomebrewPrefixV2 = "/home/linuxbrew/.linuxbrew"
+
+var preparedPrefixDirectoriesV2 = []string{
+	"Caskroom",
+	"Cellar",
+	"Frameworks",
+	"bin",
+	"etc",
+	"include",
+	"lib",
+	"opt",
+	"sbin",
+	"share",
+	"var",
+}
+
+func ensurePreparedPrefixDirectoriesV2(state llb.State) llb.State {
+	for _, directory := range preparedPrefixDirectoriesV2 {
+		state = state.File(llb.Mkdir("/"+directory, 0o755, llb.WithParents(true), llb.WithUIDGID(1000, 1000)))
+	}
+	return state
+}
 
 // InstalledV2 contains the cumulative prefix state and one delta evidence file
 // per install-order entry.
