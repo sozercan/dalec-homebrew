@@ -2443,8 +2443,10 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 			if actual.Mode&os.ModeSticky != 0 {
 				actualMode |= os.ModeSticky
 			}
-			if actualMode != expectedMode && !allowsPostInstallOwnerWrite(node, verified, entry, declaredChanged, expectedMode, actualMode) {
-				return fmt.Errorf("verified bottle path %s permissions changed", rel)
+			if actualMode != expectedMode &&
+				!allowsInstallerUmaskTightening(expectedMode, actualMode) &&
+				!allowsPostInstallOwnerWrite(node, verified, entry, declaredChanged, expectedMode, actualMode) {
+				return fmt.Errorf("verified bottle path %s permissions changed from %#o to %#o", rel, expectedMode, actualMode)
 			}
 		}
 	}
@@ -2588,6 +2590,15 @@ func allowedPostInstallKegPaths(node resolution.Node, base string, after map[str
 		allowed[rel] = struct{}{}
 	}
 	return allowed, nil
+}
+
+func allowsInstallerUmaskTightening(expectedMode, actualMode fs.FileMode) bool {
+	// Homebrew extracts bottles with tar --no-same-owner and without
+	// --same-permissions. The release-bound installer runs with umask 022, so
+	// group/other write bits present in the authenticated archive are removed.
+	// Accept only that exact permission tightening; no read, execute, sticky,
+	// setid, or owner permission may change here.
+	return actualMode != expectedMode && actualMode == expectedMode&^0o022
 }
 
 func allowsPostInstallOwnerWrite(node resolution.Node, verified bottle.Result, entry bottle.InventoryEntry, declaredChanged bool, expectedMode, actualMode fs.FileMode) bool {

@@ -1146,6 +1146,63 @@ func TestReconcileAllowsOwnerWriteForDeclaredChangedFile(t *testing.T) {
 	}
 }
 
+func TestAllowsInstallerUmaskTightening(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected fs.FileMode
+		actual   fs.FileMode
+		want     bool
+	}{
+		{name: "regular group write removed", expected: 0o664, actual: 0o644, want: true},
+		{name: "directory group write removed", expected: 0o775, actual: 0o755, want: true},
+		{name: "group and other write removed", expected: 0o777, actual: 0o755, want: true},
+		{name: "unchanged", expected: 0o755, actual: 0o755},
+		{name: "owner write removed", expected: 0o755, actual: 0o555},
+		{name: "group read removed", expected: 0o775, actual: 0o715},
+		{name: "group write added", expected: 0o755, actual: 0o775},
+		{name: "sticky removed", expected: os.ModeSticky | 0o775, actual: 0o755},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := allowsInstallerUmaskTightening(tc.expected, tc.actual); got != tc.want {
+				t.Fatalf("allowsInstallerUmaskTightening(%#o, %#o)=%t, want %t", tc.expected, tc.actual, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReconcileAllowsInstallerUmaskTighteningForBottleMetadata(t *testing.T) {
+	node := resolution.Node{Name: "libdf", PkgVersion: "0.5.6+d375b2d"}
+	verified := bottle.Result{
+		Name:       node.Name,
+		PkgVersion: node.PkgVersion,
+		KegPrefix:  node.Name + "/" + node.PkgVersion,
+		Inventory: []bottle.InventoryEntry{
+			{Path: "libdf/0.5.6+d375b2d/.brew", KegPath: ".brew", Type: bottle.EntryDirectory, Mode: 0o775},
+			{Path: "libdf/0.5.6+d375b2d/.brew/libdf.rb", KegPath: ".brew/libdf.rb", Type: bottle.EntryRegular, Mode: 0o664, SHA256: "sha256:" + strings.Repeat("a", 64)},
+			{Path: "libdf/0.5.6+d375b2d/INSTALL_RECEIPT.json", KegPath: "INSTALL_RECEIPT.json", Type: bottle.EntryRegular, Mode: 0o664, SHA256: "sha256:" + strings.Repeat("b", 64)},
+			{Path: "libdf/0.5.6+d375b2d/sbom.spdx.json", KegPath: "sbom.spdx.json", Type: bottle.EntryRegular, Mode: 0o664, SHA256: "sha256:" + strings.Repeat("c", 64)},
+		},
+	}
+	after := map[string]fileState{
+		"Cellar/libdf/0.5.6+d375b2d/.brew":                {Type: "directory", Mode: os.ModeDir | 0o755},
+		"Cellar/libdf/0.5.6+d375b2d/.brew/libdf.rb":       {Type: "regular", Mode: 0o644, Digest: strings.Repeat("a", 64)},
+		"Cellar/libdf/0.5.6+d375b2d/INSTALL_RECEIPT.json": {Type: "regular", Mode: 0o644, Digest: strings.Repeat("b", 64)},
+		"Cellar/libdf/0.5.6+d375b2d/sbom.spdx.json":       {Type: "regular", Mode: 0o644, Digest: strings.Repeat("c", 64)},
+	}
+	if err := reconcileInstalledKeg("/prefix", node, verified, after); err != nil {
+		t.Fatal(err)
+	}
+
+	mutated := maps.Clone(after)
+	formula := mutated["Cellar/libdf/0.5.6+d375b2d/.brew/libdf.rb"]
+	formula.Digest = strings.Repeat("d", 64)
+	mutated["Cellar/libdf/0.5.6+d375b2d/.brew/libdf.rb"] = formula
+	if err := reconcileInstalledKeg("/prefix", node, verified, mutated); err == nil {
+		t.Fatal("Formula metadata content mutation was accepted with umask tightening")
+	}
+}
+
 func TestReconcileRejectsOtherPermissionChangesForDeclaredChangedFile(t *testing.T) {
 	tests := []struct {
 		name     string
