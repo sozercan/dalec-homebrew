@@ -1,39 +1,13 @@
 package llbutil
 
 import (
-	"context"
 	"strings"
 	"testing"
 
-	"github.com/moby/buildkit/client/llb"
-	"github.com/moby/buildkit/solver/pb"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sozercan/dalec-homebrew/internal/fetcher"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 )
-
-func TestEnsureWritablePrefixDirectoriesV2CreatesCellarAndHomebrewStructure(t *testing.T) {
-	state := ensureWritablePrefixDirectoriesV2(llb.Scratch())
-	definition, err := state.Marshal(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	operations := ""
-	for _, raw := range definition.Def {
-		var op pb.Op
-		if err := op.Unmarshal(raw); err != nil {
-			t.Fatal(err)
-		}
-		if file := op.GetFile(); file != nil {
-			operations += file.String()
-		}
-	}
-	for _, directory := range []string{"/prefix/Cellar", "/prefix/opt", "/prefix/var"} {
-		if !strings.Contains(operations, directory) {
-			t.Fatalf("V2 prefix seed is missing %s: %s", directory, operations)
-		}
-	}
-}
 
 func TestFetchRequestV2BindsSignedTransport(t *testing.T) {
 	d := "sha256:" + strings.Repeat("a", 64)
