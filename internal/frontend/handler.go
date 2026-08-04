@@ -31,6 +31,10 @@ import (
 	speccontract "github.com/sozercan/dalec-homebrew/internal/spec"
 )
 
+func dalecLoadOptions() []dalecfrontend.LoadOpt {
+	return []dalecfrontend.LoadOpt{dalecfrontend.WithAllowArgs(config.DalecBuildArgs()...)}
+}
+
 type preflightPlatform struct {
 	platform      ocispec.Platform
 	selection     *speccontract.Selection
@@ -90,7 +94,7 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		if p.OS != "linux" || (p.Architecture != "amd64" && p.Architecture != "arm64") {
 			return nil, fmt.Errorf("unsupported target platform %s", platforms.Format(p))
 		}
-		dalecSpec, err := dalecfrontend.LoadSpec(ctx, dc, &p)
+		dalecSpec, err := dalecfrontend.LoadSpec(ctx, dc, &p, dalecLoadOptions()...)
 		if err != nil {
 			return nil, err
 		}

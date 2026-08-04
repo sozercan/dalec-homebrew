@@ -43,6 +43,36 @@ const (
 // tests. V2 values can be parsed from invocation options for diagnostics, but
 // only a complete compiled tuple enables non-core capability. Supported policy
 // version variables use comma-separated ASCII identifiers.
+var dalecBuildArgs = []string{
+	"DALEC_HOMEBREW_ALLOW_UNATTESTED",
+	"DALEC_HOMEBREW_ATTESTATION_WAIVER",
+	BottleFetcherBuildArg,
+	CatalogServiceOriginBuildArg,
+	"DALEC_HOMEBREW_COMMIT",
+	ExecutableRuntimePolicyDigestBuildArg,
+	"DALEC_HOMEBREW_FRONTEND_REF",
+	IngestionJWSKeyPolicyDigestBuildArg,
+	"DALEC_HOMEBREW_KEYS_DIGEST",
+	"DALEC_HOMEBREW_MATERIALIZER",
+	"DALEC_HOMEBREW_METADATA_MAX_AGE",
+	"DALEC_HOMEBREW_METADATA_NOT_BEFORE",
+	"DALEC_HOMEBREW_METADATA_URL",
+	"DALEC_HOMEBREW_MIGRATIONS_URL",
+	"DALEC_HOMEBREW_RUBY_VERSION",
+	"DALEC_HOMEBREW_RUNTIME_BASE",
+	SupportedCatalogPolicyVersionsBuildArg,
+	SupportedFetchPolicyVersionsBuildArg,
+	SupportedProvenancePolicyVersionsBuildArg,
+	TapPolicyDigestBuildArg,
+}
+
+// DalecBuildArgs returns the exact frontend-owned build arguments that Dalec
+// must ignore unless a spec explicitly references them. The frontend consumes
+// and validates these arguments before Dalec substitutes spec-defined args.
+func DalecBuildArgs() []string {
+	return slices.Clone(dalecBuildArgs)
+}
+
 var (
 	RuntimeBaseRef         string
 	MaterializerRef        string

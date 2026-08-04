@@ -4,8 +4,29 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/project-dalec/dalec"
+	dalecfrontend "github.com/project-dalec/dalec/frontend"
+	"github.com/sozercan/dalec-homebrew/internal/config"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 )
+
+func TestDalecLoadOptionsAllowFrontendOwnedBuildArgs(t *testing.T) {
+	args := make(map[string]string)
+	for _, name := range config.DalecBuildArgs() {
+		args[name] = "test-value"
+	}
+	if err := (&dalec.Spec{}).SubstituteArgs(args); err == nil || !strings.Contains(err.Error(), "unknown arg") {
+		t.Fatalf("frontend-owned args were unexpectedly accepted without load options: %v", err)
+	}
+
+	loadConfig := dalecfrontend.LoadConfig{}
+	for _, option := range dalecLoadOptions() {
+		option(&loadConfig)
+	}
+	if err := (&dalec.Spec{}).SubstituteArgs(args, loadConfig.SubstituteOpts...); err != nil {
+		t.Fatalf("frontend-owned args were rejected: %v", err)
+	}
+}
 
 func TestMetadataBaseURL(t *testing.T) {
 	got, err := metadataBaseURL("https://formulae.brew.sh/api/formula.jws.json", "https://formulae.brew.sh/api/formula_tap_migrations.jws.json")
