@@ -38,7 +38,7 @@ SERVICE_CONTAINER="dalec-homebrew-catalog-http-${RUN_ID}"
 PROXY_CONTAINER="dalec-homebrew-catalog-proxy-${RUN_ID}"
 REGISTRY="e2e-registry:5000"
 HOST_REGISTRY="localhost:5000"
-CATALOG_ORIGIN="https://${PROXY_CONTAINER}:8443"
+CATALOG_ORIGIN="https://${PROXY_CONTAINER}"
 KEY_ID="catalog-e2e-${RUN_ID}"
 
 cleanup() {
@@ -257,7 +257,7 @@ cat > "$WORK/nginx.conf" <<'EOF_NGINX'
 events {}
 http {
   server {
-    listen 8443 ssl;
+    listen 443 ssl;
     server_name catalog-service;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_certificate /etc/nginx/tls/server.pem;
@@ -277,7 +277,7 @@ EOF_NGINX
 docker run --detach \
   --name "$PROXY_CONTAINER" \
   --network "$NETWORK" \
-  --publish 127.0.0.1:18443:8443 \
+  --publish 127.0.0.1:18443:443 \
   --mount "type=bind,src=$WORK/nginx.conf,dst=/etc/nginx/nginx.conf,readonly" \
   --mount "type=bind,src=$WORK/tls/server.pem,dst=/etc/nginx/tls/server.pem,readonly" \
   --mount "type=bind,src=$WORK/tls/server-key.pem,dst=/etc/nginx/tls/server-key.pem,readonly" \
