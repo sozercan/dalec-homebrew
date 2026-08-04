@@ -38,7 +38,8 @@ end
 
 def platform_formula(path, tag_name)
   tag = Utils::Bottles::Tag.from_symbol(tag_name.to_sym)
-  Homebrew::SimulateSystem.with_tag(tag) do
+  simulated_arch = { x86_64: :intel, arm64: :arm }.fetch(tag.arch)
+  Homebrew::SimulateSystem.with(os: tag.system, arch: simulated_arch) do
     Formulary.clear_cache
     formula = Formulary.factory(path, :stable, force_bottle: true)
     hash = formula.to_hash

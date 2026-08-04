@@ -124,10 +124,6 @@ func ExtractFile(tapID, repository, tapRoot, sourceMetadata, homebrewCommit, out
 	if source.Tap.ID != tap || source.Tap.Repository != repository {
 		return errors.New("tap source metadata changed requested identity")
 	}
-	ruby, err := portableRuby()
-	if err != nil {
-		return err
-	}
 	script := os.Getenv("DALEC_HOMEBREW_CATALOG_EXTRACT_SCRIPT")
 	if script == "" {
 		script = DefaultRubyScript
@@ -138,13 +134,10 @@ func ExtractFile(tapID, repository, tapRoot, sourceMetadata, homebrewCommit, out
 		}
 		return fmt.Errorf("catalog extract script: %w", err)
 	}
-	command := exec.Command(ruby, "-I", filepath.Join(os.Getenv("HOMEBREW_REPOSITORY"), "Library", "Homebrew"), script, tapID, repository, tapRoot, sourceMetadata)
-	command.Env = append(os.Environ(),
-		"HOMEBREW_NO_AUTO_UPDATE=1",
-		"HOMEBREW_NO_ANALYTICS=1",
-		"HOMEBREW_NO_INSTALL_FROM_API=1",
-		"HOMEBREW_NO_ENV_HINTS=1",
-	)
+	command, err := brewRubyCommand(script, tapID, repository, tapRoot, sourceMetadata)
+	if err != nil {
+		return err
+	}
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &limitedWriter{writer: &stdout, remaining: catalog.MaxCatalogDocumentBytes + 1}
 	command.Stderr = &limitedWriter{writer: &stderr, remaining: maxExtractorStderr}
@@ -267,27 +260,29 @@ func (w *limitedWriter) Write(data []byte) (int, error) {
 	return w.writer.Write(data)
 }
 
-func portableRuby() (string, error) {
-	if configured := os.Getenv("DALEC_HOMEBREW_PORTABLE_RUBY"); configured != "" {
-		if info, err := os.Stat(configured); err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
-			return configured, nil
-		}
-		return "", errors.New("configured portable Ruby is unavailable")
-	}
+func brewRubyCommand(script string, args ...string) (*exec.Cmd, error) {
 	repository := os.Getenv("HOMEBREW_REPOSITORY")
 	if repository == "" {
 		repository = "/home/linuxbrew/.linuxbrew/Homebrew"
 	}
-	matches, err := filepath.Glob(filepath.Join(repository, "Library", "Homebrew", "vendor", "portable-ruby", "*", "bin", "ruby"))
+	brew := filepath.Join(repository, "bin", "brew")
+	info, err := os.Lstat(brew)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("Homebrew entrypoint: %w", err)
 	}
-	for _, candidate := range matches {
-		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
-			return candidate, nil
-		}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 {
+		return nil, errors.New("Homebrew entrypoint is not a non-symlink executable regular file")
 	}
-	return "", errors.New("pinned portable Ruby is unavailable")
+	commandArgs := append([]string{"ruby", script}, args...)
+	command := exec.Command(brew, commandArgs...)
+	command.Env = append(os.Environ(),
+		"HOMEBREW_DEVELOPER=1",
+		"HOMEBREW_NO_AUTO_UPDATE=1",
+		"HOMEBREW_NO_ANALYTICS=1",
+		"HOMEBREW_NO_INSTALL_FROM_API=1",
+		"HOMEBREW_NO_ENV_HINTS=1",
+	)
+	return command, nil
 }
 
 func jsonMarshalExtracted(extracted *ExtractedTap) ([]byte, error) {

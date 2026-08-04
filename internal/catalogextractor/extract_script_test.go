@@ -19,6 +19,8 @@ func TestRubyExtractorKeepsRuntimeDependenciesAndSourceContained(t *testing.T) {
 		`resolved.to_s.start_with?(tap_prefix)`,
 		`Digest::SHA256.hexdigest(source)`,
 		`Utils.name_from_full_name(value)`,
+		`simulated_arch = { x86_64: :intel, arm64: :arm }.fetch(tag.arch)`,
+		`Homebrew::SimulateSystem.with(os: tag.system, arch: simulated_arch)`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("Ruby extractor is missing %q", required)
