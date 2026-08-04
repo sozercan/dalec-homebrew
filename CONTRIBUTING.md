@@ -121,6 +121,34 @@ Use `DALEC_HOMEBREW_LIVE_SPEC` to run the same helper with a focused example:
 - [`examples/live-redis.yaml`](examples/live-redis.yaml) — a stateful non-root lifecycle
 - [`examples/live-graphviz.yaml`](examples/live-graphviz.yaml) — plugins and generated shared runtime indexes
 
+## Run the non-core production-path E2E
+
+Pull requests run [`scripts/noncore-e2e.sh`](scripts/noncore-e2e.sh) on
+`linux/amd64`. Unlike the core-only live helper, this test assembles the full V2
+path: a local registry, a component BuildKit worker, a separate catalog
+extraction worker, the production catalog-service generator, an ephemeral PS512
+signer and key policy, HTTPS service termination, the bottle fetcher, and
+release-bound V2 materializer/frontend images. It then builds
+[`examples/ci-noncore-multi-package.yaml`](examples/ci-noncore-multi-package.yaml)
+from two bottled public-tap Formulae plus a core Formula and reruns runtime
+checks with networking disabled.
+
+The script is CI-oriented and requires explicit digest-pinned BuildKit,
+registry, and TLS-proxy image inputs:
+
+```console
+DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE=docker.io/moby/buildkit@sha256:<digest> \
+DALEC_HOMEBREW_E2E_REGISTRY_IMAGE=docker.io/library/registry@sha256:<digest> \
+DALEC_HOMEBREW_E2E_NGINX_IMAGE=docker.io/library/nginx@sha256:<digest> \
+DALEC_HOMEBREW_E2E_RUN_ID=local-1 \
+./scripts/noncore-e2e.sh
+```
+
+It needs Docker privilege to start the dedicated ingestion worker, public
+network access to GitHub, Homebrew metadata, GHCR, and the selected tap bottle
+hosts, and unused loopback ports `1234`, `5000`, and `18443`. All signing and TLS
+private keys are invocation-local and are never added to a build context.
+
 ## Validate a published image on a VM
 
 For a pushed image using the default `linuxbrew` identity (`1000:1000`), pass

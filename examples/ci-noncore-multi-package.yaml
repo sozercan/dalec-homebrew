@@ -1,0 +1,46 @@
+# syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
+name: homebrew-ci-noncore-multi-package
+version: 0.1.0
+revision: 1
+description: CI validation image with public-tap and core Homebrew packages
+website: https://brew.sh/
+license: Apache-2.0
+
+dependencies:
+  runtime:
+    svt/avtools/libdf: {}
+    svt/avtools/libsrf-proxy-filter: {}
+    hello: {}
+
+image:
+  entrypoint: /home/linuxbrew/.linuxbrew/bin/hello
+  user: linuxbrew
+
+tests:
+  - name: noncore-multi-package-runtime
+    steps:
+      - command: hello
+        stdout:
+          contains: ["Hello, world!"]
+      - command: test -s /home/linuxbrew/.linuxbrew/opt/libdf/lib/libdf.so && echo libdf-ok
+        stdout:
+          equals: "libdf-ok\n"
+      - command: test -s /home/linuxbrew/.linuxbrew/opt/libsrf-proxy-filter/lib/libsrf_filter.so && echo libsrf-ok
+        stdout:
+          equals: "libsrf-ok\n"
+    files:
+      /home/linuxbrew/.linuxbrew/bin/hello: {}
+      /home/linuxbrew/.linuxbrew/opt/libdf/lib/libdf.so: {}
+      /home/linuxbrew/.linuxbrew/opt/libsrf-proxy-filter/lib/libsrf_filter.so: {}
+      /home/linuxbrew/.linuxbrew/bin/brew:
+        not_exist: true
+      /home/linuxbrew/.linuxbrew/Homebrew:
+        not_exist: true
+      /home/linuxbrew/.cache/Homebrew:
+        not_exist: true
+      /usr/share/dalec-homebrew/resolution.json:
+        contains:
+          - dalec-homebrew-resolution/v2
+          - svt/avtools/libdf
+          - svt/avtools/libsrf-proxy-filter
+          - homebrew/core/hello

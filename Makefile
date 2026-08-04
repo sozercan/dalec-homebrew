@@ -24,3 +24,4 @@ build:
 	go build -trimpath -o bin/dalec-homebrew-bottle-fetcher ./cmd/bottle-fetcher
 	go build -trimpath -o bin/dalec-homebrew-catalog-service ./cmd/catalog-service
 	go build -trimpath -o bin/dalec-homebrew-catalog-extractor ./cmd/catalog-extractor
+	go build -trimpath -o bin/dalec-homebrew-v2-bindings ./cmd/v2-bindings

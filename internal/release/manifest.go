@@ -311,9 +311,9 @@ func validateV2Bindings(m *Manifest) error {
 		values []string
 		want   []string
 	}{
-		{name: "catalog", values: m.SupportedCatalogPolicyVersions, want: []string{CatalogPolicyVersionV1}},
-		{name: "fetch", values: m.SupportedFetchPolicyVersions, want: []string{BottleFetchPolicyVersionV1}},
-		{name: "provenance", values: m.SupportedProvenancePolicyVersions, want: []string{SigstoreProvenancePolicyVersionV1, ChecksumWaiverPolicyVersionV1, HTTPSSourceWaiverPolicyVersionV1, CoreWaiverPolicyVersionV1}},
+		{name: "catalog", values: m.SupportedCatalogPolicyVersions, want: v2CatalogPolicyVersions()},
+		{name: "fetch", values: m.SupportedFetchPolicyVersions, want: v2FetchPolicyVersions()},
+		{name: "provenance", values: m.SupportedProvenancePolicyVersions, want: v2ProvenancePolicyVersions()},
 	} {
 		if err := validateExactPolicyVersions(field.name, field.values, field.want); err != nil {
 			errs = append(errs, err)
