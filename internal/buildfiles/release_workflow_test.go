@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,7 +33,7 @@ func TestReleaseTagWorkflowDispatcher(t *testing.T) {
 	jobs := yamlMappingValue(t, workflow, "jobs")
 	requireYAMLMappingKeys(t, jobs, "dispatch")
 	dispatch := yamlMappingValue(t, jobs, "dispatch")
-	if got := yamlScalarValue(t, yamlMappingValue(t, dispatch, "if")); got != "github.ref_type == 'tag' && startsWith(github.ref_name, 'v')" {
+	if got := yamlScalarValue(t, yamlMappingValue(t, dispatch, "if")); got != "github.event.created && !github.event.deleted && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')" {
 		t.Fatalf("release tag dispatcher guard = %q", got)
 	}
 	jobPermissions := yamlMappingValue(t, dispatch, "permissions")
@@ -60,6 +61,8 @@ func TestReleaseTagWorkflowDispatcher(t *testing.T) {
 		"EXPECTED_SHA": "${{ github.sha }}",
 		"GH_TOKEN":     "${{ github.token }}",
 		"RELEASE_TAG":  "${{ github.ref_name }}",
+		"TAG_CREATED":  "${{ github.event.created }}",
+		"TAG_DELETED":  "${{ github.event.deleted }}",
 	}
 	wantEnvironmentKeys := make([]string, 0, len(wantEnvironment))
 	for key := range wantEnvironment {
@@ -80,7 +83,7 @@ func TestReleaseTagWorkflowDispatcher(t *testing.T) {
 	}
 	expectedSHA := strings.Repeat("a", 40)
 	dispatchScript := yamlScalarValue(t, yamlMappingValue(t, dispatchStep, "run"))
-	output, err := runWorkflowShell(t, dispatchScript, map[string]string{
+	baseEnvironment := map[string]string{
 		"EXPECTED_SHA":      expectedSHA,
 		"GH_ARGUMENTS":      argumentsPath,
 		"GH_TOKEN":          "unused",
@@ -90,7 +93,10 @@ func TestReleaseTagWorkflowDispatcher(t *testing.T) {
 		"GITHUB_REPOSITORY": "sozercan/dalec-homebrew",
 		"PATH":              temporary + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"RELEASE_TAG":       "v1.2.3",
-	})
+		"TAG_CREATED":       "true",
+		"TAG_DELETED":       "false",
+	}
+	output, err := runWorkflowShell(t, dispatchScript, baseEnvironment)
 	if err != nil {
 		t.Fatalf("release tag dispatcher failed: %v\n%s", err, output)
 	}
@@ -104,6 +110,24 @@ func TestReleaseTagWorkflowDispatcher(t *testing.T) {
 	requireArgumentSequence(t, arguments, "-f", "ref=main")
 	requireArgumentSequence(t, arguments, "-f", "inputs[tag]=v1.2.3")
 	requireArgumentSequence(t, arguments, "-f", "inputs[expected_sha]="+expectedSHA)
+
+	for _, tt := range []struct {
+		name    string
+		created string
+		deleted string
+	}{
+		{name: "tag update", created: "false", deleted: "false"},
+		{name: "tag deletion", created: "false", deleted: "true"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			environment := maps.Clone(baseEnvironment)
+			environment["TAG_CREATED"] = tt.created
+			environment["TAG_DELETED"] = tt.deleted
+			if output, err := runWorkflowShell(t, dispatchScript, environment); err == nil {
+				t.Fatalf("non-creation tag event dispatched a release\n%s", output)
+			}
+		})
+	}
 }
 
 func TestReleaseWorkflowRequestTriggers(t *testing.T) {

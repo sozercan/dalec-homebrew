@@ -10,7 +10,7 @@ permissions: {}
 jobs:
   dispatch:
     name: Dispatch trusted release
-    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    if: github.event.created && !github.event.deleted && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -21,11 +21,13 @@ jobs:
           EXPECTED_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
+          TAG_CREATED: ${{ github.event.created }}
+          TAG_DELETED: ${{ github.event.deleted }}
         run: |
           set -euo pipefail
 
-          if [[ "$GITHUB_EVENT_NAME" != push || "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" ]]; then
-            echo "release tag dispatcher requires a tag push" >&2
+          if [[ "$GITHUB_EVENT_NAME" != push || "$GITHUB_REF_TYPE" != tag || "$TAG_CREATED" != true || "$TAG_DELETED" != false || "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" ]]; then
+            echo "release tag dispatcher requires an initial tag push" >&2
             exit 1
           fi
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || {

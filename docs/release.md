@@ -137,7 +137,8 @@ creation of `v*.*.*` tags to trusted release operators. The checked-in
 not check out source and requests only `actions: write`; it dispatches
 `release.yml` explicitly on `main` with both the pushed tag and pushed commit.
 Tag protection, rather than the tag-scoped workflow itself, is the authorization
-boundary.
+boundary. The workflow accepts only the initial tag push; later tag updates or
+deletions do not dispatch a release.
 
 A new tuple is built only when the tag names the exact commit that contains the
 trusted `main` workflow, so the checked-in path receiving registry write access
