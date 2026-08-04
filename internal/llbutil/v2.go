@@ -206,6 +206,10 @@ func ensurePreparedPrefixDirectoriesV2(state llb.State) llb.State {
 	return state
 }
 
+func linuxbrewWritableScratchV2() llb.State {
+	return llb.Scratch().File(llb.Mkdir("/data", 0o700, llb.WithUIDGID(1000, 1000)))
+}
+
 // InstalledV2 contains the cumulative prefix state and one delta evidence file
 // per install-order entry.
 type InstalledV2 struct {
@@ -238,6 +242,9 @@ func InstallPreparedV2(materializerRef string, platform ocispec.Platform, record
 			return InstalledV2{}, fmt.Errorf("install node %q is missing", id)
 		}
 		worker := llb.Image(materializerRef, llb.Platform(platform))
+		cacheState := linuxbrewWritableScratchV2()
+		tmpState := linuxbrewWritableScratchV2()
+		varTmpState := linuxbrewWritableScratchV2()
 		installInput := llb.Scratch().
 			File(llb.Copy(prepared.State, "/bottles/"+node.Bottle.Filename, "/bottles/"+node.Bottle.Filename, &llb.CopyInfo{CreateDestPath: true})).
 			File(llb.Copy(prepared.State, "/homebrew-config", "/homebrew-config", &llb.CopyInfo{CopyDirContentsOnly: true, CreateDestPath: true})).
@@ -250,9 +257,9 @@ func InstallPreparedV2(materializerRef string, platform ocispec.Platform, record
 			llb.AddMount("/run/dalec-homebrew/prepared", installInput, llb.Readonly),
 			llb.AddMount(DefaultHomebrewPrefixV2, prefix),
 			llb.AddMount("/evidence", evidence),
-			llb.AddMount("/home/linuxbrew/.cache", llb.Scratch()),
-			llb.AddMount("/tmp", llb.Scratch()),
-			llb.AddMount("/var/tmp", llb.Scratch()),
+			llb.AddMount("/home/linuxbrew/.cache", cacheState, llb.SourcePath("/data")),
+			llb.AddMount("/tmp", tmpState, llb.SourcePath("/data")),
+			llb.AddMount("/var/tmp", varTmpState, llb.SourcePath("/data")),
 			llb.WithLinuxResources(llb.LinuxResources{Memory: 8 << 30, MemorySwap: 8 << 30, CPUQuota: 400000, CPUPeriod: 100000}),
 			llb.WithCustomName("offline install Homebrew bottle "+id.String()),
 		)

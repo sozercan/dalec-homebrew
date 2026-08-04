@@ -27,6 +27,63 @@ func TestPreparePrefixSeedUsesStateRoot(t *testing.T) {
 	}
 }
 
+func TestLinuxbrewWritableScratchV2IsPrivateAndOwnedByInstaller(t *testing.T) {
+	state := linuxbrewWritableScratchV2()
+	definition, err := state.Marshal(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, raw := range definition.Def {
+		var op pb.Op
+		if err := op.Unmarshal(raw); err != nil {
+			t.Fatal(err)
+		}
+		file := op.GetFile()
+		if file == nil {
+			continue
+		}
+		for _, action := range file.Actions {
+			directory := action.GetMkdir()
+			if directory == nil || directory.Path != "/data" {
+				continue
+			}
+			found = true
+			if directory.Mode != 0o700 {
+				t.Fatalf("writable scratch mode=%#o, want 0700", directory.Mode)
+			}
+			if directory.Owner == nil || directory.Owner.User.GetByID() != 1000 || directory.Owner.Group.GetByID() != 1000 {
+				t.Fatalf("writable scratch owner=%v, want 1000:1000", directory.Owner)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("writable scratch does not create /data")
+	}
+}
+
+func TestInstallPreparedV2MountsInstallerWritableScratch(t *testing.T) {
+	data, err := os.ReadFile("v2.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, destination := range []string{"/home/linuxbrew/.cache", "/tmp", "/var/tmp"} {
+		want := `llb.AddMount("` + destination + `", `
+		start := strings.Index(text, want)
+		if start < 0 {
+			t.Fatalf("V2 install does not mount %s", destination)
+		}
+		line := text[start:]
+		if end := strings.IndexByte(line, '\n'); end >= 0 {
+			line = line[:end]
+		}
+		if !strings.Contains(line, `llb.SourcePath("/data")`) || strings.Contains(line, "llb.Scratch()") {
+			t.Fatalf("V2 install mount %s is not backed by installer-owned scratch: %s", destination, line)
+		}
+	}
+}
+
 func TestEnsurePreparedPrefixDirectoriesV2CreatesRootRelativeStructure(t *testing.T) {
 	state := ensurePreparedPrefixDirectoriesV2(llb.Scratch())
 	definition, err := state.Marshal(context.Background())
