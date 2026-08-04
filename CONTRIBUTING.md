@@ -130,7 +130,7 @@ extraction worker, the production catalog-service generator, an ephemeral PS512
 signer and key policy, HTTPS service termination, the bottle fetcher, and
 release-bound V2 materializer/frontend images. It then builds
 [`examples/ci-noncore-multi-package.yaml`](examples/ci-noncore-multi-package.yaml)
-from two bottled public-tap Formulae plus a core Formula and reruns runtime
+from a bottled public-tap Formula plus a core Formula and reruns runtime
 checks with networking disabled.
 
 The script is CI-oriented and requires explicit digest-pinned BuildKit,

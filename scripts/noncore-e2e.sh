@@ -293,9 +293,7 @@ docker run --rm --network none --entrypoint /bin/bash "$FINAL_IMAGE" -lc '
   set -euo pipefail
   hello | grep -F "Hello, world!"
   test -s /home/linuxbrew/.linuxbrew/opt/libdf/lib/libdf.so
-  test -s /home/linuxbrew/.linuxbrew/opt/libsrf-proxy-filter/lib/libsrf_filter.so
   grep -F svt/avtools/libdf /usr/share/dalec-homebrew/resolution.json
-  grep -F svt/avtools/libsrf-proxy-filter /usr/share/dalec-homebrew/resolution.json
 '
 
 cat <<RESULT

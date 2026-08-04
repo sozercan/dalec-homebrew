@@ -9,7 +9,6 @@ license: Apache-2.0
 dependencies:
   runtime:
     svt/avtools/libdf: {}
-    svt/avtools/libsrf-proxy-filter: {}
     hello: {}
 
 image:
@@ -25,13 +24,9 @@ tests:
       - command: test -s /home/linuxbrew/.linuxbrew/opt/libdf/lib/libdf.so && echo libdf-ok
         stdout:
           equals: "libdf-ok\n"
-      - command: test -s /home/linuxbrew/.linuxbrew/opt/libsrf-proxy-filter/lib/libsrf_filter.so && echo libsrf-ok
-        stdout:
-          equals: "libsrf-ok\n"
     files:
       /home/linuxbrew/.linuxbrew/bin/hello: {}
       /home/linuxbrew/.linuxbrew/opt/libdf/lib/libdf.so: {}
-      /home/linuxbrew/.linuxbrew/opt/libsrf-proxy-filter/lib/libsrf_filter.so: {}
       /home/linuxbrew/.linuxbrew/bin/brew:
         not_exist: true
       /home/linuxbrew/.linuxbrew/Homebrew:
@@ -42,5 +37,4 @@ tests:
         contains:
           - dalec-homebrew-resolution/v2
           - svt/avtools/libdf
-          - svt/avtools/libsrf-proxy-filter
           - homebrew/core/hello

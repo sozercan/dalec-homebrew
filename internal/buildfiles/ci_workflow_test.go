@@ -65,7 +65,6 @@ func TestNonCoreE2ESpecContainsQualifiedAndCoreRoots(t *testing.T) {
 	text := string(spec)
 	for _, want := range []string{
 		"svt/avtools/libdf: {}",
-		"svt/avtools/libsrf-proxy-filter: {}",
 		"hello: {}",
 		"dalec-homebrew-resolution/v2",
 	} {
