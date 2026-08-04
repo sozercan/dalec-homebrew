@@ -119,6 +119,7 @@ wait_for_https() {
 }
 
 mkdir -p "$WORK/tls" "$WORK/service-store"
+chmod 0700 "$WORK/service-store"
 inputs="$WORK/release-inputs.json"
 ./scripts/release-inputs.sh > "$inputs"
 SOURCE_DATE_EPOCH=$(jq -er .source_date_epoch "$inputs")
@@ -253,6 +254,12 @@ docker run --detach \
   --max-concurrent-generations 1 \
   --max-pending-generations 4 \
   --max-stored-operations 8 >/dev/null
+sleep 1
+if [[ $(docker inspect --format '{{.State.Running}}' "$SERVICE_CONTAINER") != true ]]; then
+  echo "catalog service exited during startup" >&2
+  docker logs "$SERVICE_CONTAINER" >&2 || true
+  exit 1
+fi
 
 cat > "$WORK/nginx.conf" <<'EOF_NGINX'
 events {}
