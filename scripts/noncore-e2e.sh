@@ -36,9 +36,10 @@ BUILDER="dalec-homebrew-e2e-${RUN_ID}"
 INGESTION_CONTAINER="dalec-homebrew-catalog-worker-${RUN_ID}"
 SERVICE_CONTAINER="dalec-homebrew-catalog-http-${RUN_ID}"
 PROXY_CONTAINER="dalec-homebrew-catalog-proxy-${RUN_ID}"
+CATALOG_HOST="catalog.e2e.example.com"
 REGISTRY="e2e-registry:5000"
 HOST_REGISTRY="localhost:5000"
-CATALOG_ORIGIN="https://${PROXY_CONTAINER}"
+CATALOG_ORIGIN="https://${CATALOG_HOST}"
 KEY_ID="catalog-e2e-${RUN_ID}"
 
 cleanup() {
@@ -185,10 +186,10 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj '/CN=dalec-homebrew-e2e-ca' \
   -keyout "$WORK/tls/ca-key.pem" -out "$WORK/tls/ca.pem" >/dev/null 2>&1
 openssl req -newkey rsa:2048 -nodes \
-  -subj "/CN=$PROXY_CONTAINER" \
+  -subj "/CN=$CATALOG_HOST" \
   -keyout "$WORK/tls/server-key.pem" -out "$WORK/tls/server.csr" >/dev/null 2>&1
 cat > "$WORK/tls/server.ext" <<EOF_CERT
-subjectAltName=DNS:$PROXY_CONTAINER,DNS:localhost
+subjectAltName=DNS:$CATALOG_HOST,DNS:localhost
 extendedKeyUsage=serverAuth
 EOF_CERT
 openssl x509 -req -days 1 \
@@ -258,7 +259,7 @@ events {}
 http {
   server {
     listen 443 ssl;
-    server_name catalog-service;
+    server_name catalog.e2e.example.com;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_certificate /etc/nginx/tls/server.pem;
     ssl_certificate_key /etc/nginx/tls/server-key.pem;
@@ -277,6 +278,7 @@ EOF_NGINX
 docker run --detach \
   --name "$PROXY_CONTAINER" \
   --network "$NETWORK" \
+  --network-alias "$CATALOG_HOST" \
   --publish 127.0.0.1:18443:443 \
   --mount "type=bind,src=$WORK/nginx.conf,dst=/etc/nginx/nginx.conf,readonly" \
   --mount "type=bind,src=$WORK/tls/server.pem,dst=/etc/nginx/tls/server.pem,readonly" \
