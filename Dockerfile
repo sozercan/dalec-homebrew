@@ -424,26 +424,6 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -o /out/dalec-homebrew-frontend ./cmd/frontend \
     && touch -d "@${SOURCE_DATE_EPOCH}" /out/dalec-homebrew-frontend
 
-# Test-only frontend trust bundle augmentation. The production frontend
-# continues to use the unmodified distribution CA bundle and remains the
-# Dockerfile's default final target below.
-FROM ca-bundle AS frontend-test-ca-bundle
-ARG FRONTEND_TEST_CA_CERTIFICATE_BASE64
-RUN set -eu; \
-    test -n "${FRONTEND_TEST_CA_CERTIFICATE_BASE64}"; \
-    install -d /out; \
-    printf '%s' "${FRONTEND_TEST_CA_CERTIFICATE_BASE64}" | base64 --decode > /out/test-ca.crt; \
-    test -s /out/test-ca.crt; \
-    cat /etc/ssl/certs/ca-certificates.crt > /out/ca-certificates.crt; \
-    printf '\n' >> /out/ca-certificates.crt; \
-    cat /out/test-ca.crt >> /out/ca-certificates.crt
-
-FROM scratch AS frontend-test-ca
-COPY --from=frontend-test-ca-bundle /out/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=frontend-build /out/dalec-homebrew-frontend /dalec-homebrew-frontend
-LABEL moby.buildkit.frontend.caps="moby.buildkit.frontend.inputs"
-ENTRYPOINT ["/dalec-homebrew-frontend"]
-
 FROM scratch AS frontend
 COPY --from=ca-bundle /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=frontend-build /out/dalec-homebrew-frontend /dalec-homebrew-frontend

@@ -134,20 +134,21 @@ from two bottled public-tap Formulae plus a core Formula and reruns runtime
 checks with networking disabled.
 
 The script is CI-oriented and requires explicit digest-pinned BuildKit,
-registry, and TLS-proxy image inputs:
+registry, and HTTPS-tunnel image inputs:
 
 ```console
 DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE=docker.io/moby/buildkit@sha256:<digest> \
 DALEC_HOMEBREW_E2E_REGISTRY_IMAGE=docker.io/library/registry@sha256:<digest> \
-DALEC_HOMEBREW_E2E_NGINX_IMAGE=docker.io/library/nginx@sha256:<digest> \
+DALEC_HOMEBREW_E2E_CLOUDFLARED_IMAGE=docker.io/cloudflare/cloudflared@sha256:<digest> \
 DALEC_HOMEBREW_E2E_RUN_ID=local-1 \
 ./scripts/noncore-e2e.sh
 ```
 
 It needs Docker privilege to start the dedicated ingestion worker, public
 network access to GitHub, Homebrew metadata, GHCR, and the selected tap bottle
-hosts, and unused loopback ports `1234`, `5000`, and `18443`. All signing and TLS
-private keys are invocation-local and are never added to a build context.
+hosts, and unused loopback ports `1234` and `5000`. The catalog origin is an
+ephemeral Cloudflare Quick Tunnel; the catalog signing private key is
+invocation-local and is never added to a build context.
 
 ## Validate a published image on a VM
 

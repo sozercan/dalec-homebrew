@@ -16,7 +16,7 @@ func TestCIExercisesProductionPathNonCoreV2(t *testing.T) {
 	text := string(workflow)
 	for _, want := range []string{
 		"Non-core multi-package container E2E",
-		"docker.io/library/nginx:1.29.1-alpine@sha256:42a516af16b852e33b7682d5ef8acbd5d13fe08fecadc7ed98605ba5e3b26ab8",
+		"docker.io/cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf",
 		"DALEC_HOMEBREW_E2E_SPEC: examples/ci-noncore-multi-package.yaml",
 		"run: ./scripts/noncore-e2e.sh",
 	} {
@@ -43,8 +43,8 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 		"--extractor-ref \"$EXTRACTOR_REF\"",
 		"--service-digest \"$SERVICE_DIGEST\"",
 		"--extractor-digest \"$EXTRACTOR_DIGEST\"",
-		"frontend-test-ca",
-		"FRONTEND_TEST_CA_CERTIFICATE_BASE64",
+		"cloudflared did not publish a valid HTTPS catalog origin",
+		"trycloudflare",
 		"docker run --rm --network none",
 	} {
 		if !strings.Contains(text, want) {

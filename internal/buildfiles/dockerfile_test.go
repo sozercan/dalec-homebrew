@@ -36,7 +36,7 @@ func dockerfileText(t *testing.T) string {
 
 func dockerfileStage(t *testing.T, data, marker string) string {
 	t.Helper()
-	start := strings.Index(data, marker+"\n")
+	start := strings.Index(data, marker)
 	if start < 0 {
 		t.Fatalf("Dockerfile stage marker %q is absent", marker)
 	}
@@ -78,66 +78,6 @@ func TestFrontendImageContainsOnlyGatewayAndCABundle(t *testing.T) {
 			t.Fatalf("frontend stage unexpectedly contains %q", forbidden)
 		}
 	}
-	for _, forbidden := range []string{"FRONTEND_TEST_CA_CERTIFICATE_BASE64", "frontend-test-ca-bundle", "/out/test-ca.crt"} {
-		if strings.Contains(stage, forbidden) {
-			t.Fatalf("production frontend stage unexpectedly contains test-only CA input %q", forbidden)
-		}
-	}
-}
-
-func TestFrontendTestCATargetReusesProductionBinaryAndIsolatesTrustBundle(t *testing.T) {
-	data := dockerfileText(t)
-	stage := dockerfileStage(t, data, "FROM scratch AS frontend-test-ca")
-	for _, want := range []string{
-		"COPY --from=frontend-test-ca-bundle /out/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt",
-		"COPY --from=frontend-build /out/dalec-homebrew-frontend /dalec-homebrew-frontend",
-		`moby.buildkit.frontend.caps="moby.buildkit.frontend.inputs"`,
-		`ENTRYPOINT ["/dalec-homebrew-frontend"]`,
-	} {
-		if !strings.Contains(stage, want) {
-			t.Fatalf("test-only frontend stage is missing %q", want)
-		}
-	}
-	if got := strings.Count(stage, "\nCOPY "); got != 2 {
-		t.Fatalf("test-only frontend stage has %d COPY instructions, want 2", got)
-	}
-	if strings.Contains(stage, "ARG FRONTEND_TEST_CA_CERTIFICATE_BASE64") {
-		t.Fatal("test-only CA input must be consumed by the bundle stage, not retained in the final frontend stage")
-	}
-	lastStage := data[strings.LastIndex(data, "\nFROM ")+1:]
-	if !strings.HasPrefix(lastStage, "FROM scratch AS frontend\n") {
-		t.Fatal("production frontend must remain the Dockerfile's default final target")
-	}
-}
-
-func TestFrontendTestCABundleRequiresNonEmptyBase64Certificate(t *testing.T) {
-	stage := dockerfileStage(t, dockerfileText(t), "FROM ca-bundle AS frontend-test-ca-bundle")
-	for _, want := range []string{
-		"ARG FRONTEND_TEST_CA_CERTIFICATE_BASE64",
-		`test -n "${FRONTEND_TEST_CA_CERTIFICATE_BASE64}"`,
-		`printf '%s' "${FRONTEND_TEST_CA_CERTIFICATE_BASE64}" | base64 --decode > /out/test-ca.crt`,
-		"test -s /out/test-ca.crt",
-		"cat /etc/ssl/certs/ca-certificates.crt > /out/ca-certificates.crt",
-		"cat /out/test-ca.crt >> /out/ca-certificates.crt",
-	} {
-		if !strings.Contains(stage, want) {
-			t.Fatalf("test-only CA bundle stage is missing validation or append step %q", want)
-		}
-	}
-	if strings.Contains(stage, "ARG FRONTEND_TEST_CA_CERTIFICATE_BASE64=") {
-		t.Fatal("test-only CA certificate build argument must not have a default value")
-	}
-	requireBefore := func(first, second string) {
-		t.Helper()
-		firstIndex := strings.Index(stage, first)
-		secondIndex := strings.Index(stage, second)
-		if firstIndex < 0 || secondIndex < 0 || firstIndex >= secondIndex {
-			t.Fatalf("test-only CA bundle stage must place %q before %q", first, second)
-		}
-	}
-	requireBefore(`test -n "${FRONTEND_TEST_CA_CERTIFICATE_BASE64}"`, "base64 --decode")
-	requireBefore("base64 --decode", "test -s /out/test-ca.crt")
-	requireBefore("test -s /out/test-ca.crt", "cat /out/test-ca.crt >> /out/ca-certificates.crt")
 }
 
 func TestMaterializerIsFlattenedAfterAddingHelpers(t *testing.T) {

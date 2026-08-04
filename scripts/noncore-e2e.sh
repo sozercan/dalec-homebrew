@@ -6,7 +6,7 @@ cd "$ROOT"
 
 BUILDKIT_IMAGE=${DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE:-}
 REGISTRY_IMAGE=${DALEC_HOMEBREW_E2E_REGISTRY_IMAGE:-}
-NGINX_IMAGE=${DALEC_HOMEBREW_E2E_NGINX_IMAGE:-}
+CLOUDFLARED_IMAGE=${DALEC_HOMEBREW_E2E_CLOUDFLARED_IMAGE:-}
 RUN_ID=${DALEC_HOMEBREW_E2E_RUN_ID:-$(date -u +%Y%m%d%H%M%S)}
 FINAL_IMAGE=${DALEC_HOMEBREW_E2E_IMAGE:-dalec-homebrew-noncore-e2e:dev}
 SPEC=${DALEC_HOMEBREW_E2E_SPEC:-examples/ci-noncore-multi-package.yaml}
@@ -19,12 +19,12 @@ fail_usage() {
   exit 64
 }
 
-for tool in docker jq go openssl curl base64; do
+for tool in docker jq go openssl curl; do
   command -v "$tool" >/dev/null 2>&1 || fail_usage "required tool is unavailable: $tool"
 done
 [[ -n "$BUILDKIT_IMAGE" ]] || fail_usage "DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE is required"
 [[ -n "$REGISTRY_IMAGE" ]] || fail_usage "DALEC_HOMEBREW_E2E_REGISTRY_IMAGE is required"
-[[ -n "$NGINX_IMAGE" ]] || fail_usage "DALEC_HOMEBREW_E2E_NGINX_IMAGE is required"
+[[ -n "$CLOUDFLARED_IMAGE" ]] || fail_usage "DALEC_HOMEBREW_E2E_CLOUDFLARED_IMAGE is required"
 [[ "$PLATFORM" == linux/amd64 ]] || fail_usage "only linux/amd64 is supported by the CI non-core E2E"
 [[ "$RUN_ID" =~ ^[0-9A-Za-z][0-9A-Za-z_.-]{0,63}$ ]] || fail_usage "invalid E2E run ID"
 [[ -f "$SPEC" ]] || fail_usage "E2E spec does not exist: $SPEC"
@@ -35,11 +35,10 @@ REGISTRY_CONTAINER="dalec-homebrew-e2e-registry-${RUN_ID}"
 BUILDER="dalec-homebrew-e2e-${RUN_ID}"
 INGESTION_CONTAINER="dalec-homebrew-catalog-worker-${RUN_ID}"
 SERVICE_CONTAINER="dalec-homebrew-catalog-http-${RUN_ID}"
-PROXY_CONTAINER="dalec-homebrew-catalog-proxy-${RUN_ID}"
-CATALOG_HOST="catalog.e2e.example.com"
+TUNNEL_CONTAINER="dalec-homebrew-catalog-tunnel-${RUN_ID}"
 REGISTRY="e2e-registry:5000"
 HOST_REGISTRY="localhost:5000"
-CATALOG_ORIGIN="https://${CATALOG_HOST}"
+CATALOG_ORIGIN=
 KEY_ID="catalog-e2e-${RUN_ID}"
 
 cleanup() {
@@ -47,7 +46,7 @@ cleanup() {
   trap - EXIT
   set +e
   if (( status != 0 )); then
-    for container in "$SERVICE_CONTAINER" "$PROXY_CONTAINER" "$INGESTION_CONTAINER"; do
+    for container in "$SERVICE_CONTAINER" "$TUNNEL_CONTAINER" "$INGESTION_CONTAINER"; do
       if docker inspect "$container" >/dev/null 2>&1; then
         echo "==> Logs from $container" >&2
         docker logs "$container" >&2 || true
@@ -55,7 +54,7 @@ cleanup() {
     done
   fi
   docker buildx rm --force "$BUILDER" >/dev/null 2>&1 || true
-  for container in "$SERVICE_CONTAINER" "$PROXY_CONTAINER" "$INGESTION_CONTAINER" "$REGISTRY_CONTAINER"; do
+  for container in "$SERVICE_CONTAINER" "$TUNNEL_CONTAINER" "$INGESTION_CONTAINER" "$REGISTRY_CONTAINER"; do
     docker rm --force "$container" >/dev/null 2>&1 || true
   done
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
@@ -105,20 +104,7 @@ host_ref() {
   printf '%s/%s\n' "$HOST_REGISTRY" "${ref#"${REGISTRY}"/}"
 }
 
-wait_for_https() {
-  local expected
-  for _ in $(seq 1 60); do
-    expected=$(curl --cacert "$WORK/tls/ca.pem" --silent --output /dev/null --write-out '%{http_code}' \
-      https://localhost:18443/v1/operations/not-an-operation || true)
-    if [[ "$expected" == 404 ]]; then
-      return 0
-    fi
-    sleep 1
-  done
-  return 1
-}
-
-mkdir -p "$WORK/tls" "$WORK/service-store"
+mkdir -p "$WORK/service-store"
 chmod 0700 "$WORK/service-store"
 inputs="$WORK/release-inputs.json"
 ./scripts/release-inputs.sh > "$inputs"
@@ -183,23 +169,6 @@ CATALOG_POLICY_VERSIONS=$(jq -er .supported_catalog_policy_versions "$WORK/v2-bi
 FETCH_POLICY_VERSIONS=$(jq -er .supported_fetch_policy_versions "$WORK/v2-bindings.json")
 PROVENANCE_POLICY_VERSIONS=$(jq -er .supported_provenance_policy_versions "$WORK/v2-bindings.json")
 
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-  -subj '/CN=dalec-homebrew-e2e-ca' \
-  -keyout "$WORK/tls/ca-key.pem" -out "$WORK/tls/ca.pem" >/dev/null 2>&1
-openssl req -newkey rsa:2048 -nodes \
-  -subj "/CN=$CATALOG_HOST" \
-  -keyout "$WORK/tls/server-key.pem" -out "$WORK/tls/server.csr" >/dev/null 2>&1
-cat > "$WORK/tls/server.ext" <<EOF_CERT
-subjectAltName=DNS:$CATALOG_HOST,DNS:localhost
-extendedKeyUsage=serverAuth
-EOF_CERT
-openssl x509 -req -days 1 \
-  -in "$WORK/tls/server.csr" \
-  -CA "$WORK/tls/ca.pem" -CAkey "$WORK/tls/ca-key.pem" -CAcreateserial \
-  -extfile "$WORK/tls/server.ext" \
-  -out "$WORK/tls/server.pem" >/dev/null 2>&1
-chmod 0600 "$WORK/tls/ca-key.pem" "$WORK/tls/server-key.pem"
-
 cat > "$WORK/ingestion-buildkitd.toml" <<EOF_INGESTION
 [registry."$REGISTRY"]
   http = true
@@ -228,6 +197,22 @@ done
   exit 1
 }
 exec 3>&-
+
+docker run --detach \
+  --name "$TUNNEL_CONTAINER" \
+  --network "$NETWORK" \
+  "$CLOUDFLARED_IMAGE" \
+  tunnel --no-autoupdate --url http://catalog-service-http:8080 >/dev/null
+for _ in $(seq 1 120); do
+  CATALOG_ORIGIN=$(docker logs "$TUNNEL_CONTAINER" 2>&1 | grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' | tail -1 || true)
+  [[ -n "$CATALOG_ORIGIN" ]] && break
+  sleep 1
+done
+[[ "$CATALOG_ORIGIN" =~ ^https://[a-z0-9-]+\.trycloudflare\.com$ ]] || {
+  echo "cloudflared did not publish a valid HTTPS catalog origin" >&2
+  exit 1
+}
+echo "==> Catalog service origin: $CATALOG_ORIGIN"
 
 SERVICE_HOST_REF=$(host_ref "$SERVICE_REF")
 docker pull "$SERVICE_HOST_REF" >/dev/null
@@ -261,38 +246,14 @@ if [[ $(docker inspect --format '{{.State.Running}}' "$SERVICE_CONTAINER") != tr
   exit 1
 fi
 
-cat > "$WORK/nginx.conf" <<'EOF_NGINX'
-events {}
-http {
-  server {
-    listen 443 ssl;
-    server_name catalog.e2e.example.com;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_certificate /etc/nginx/tls/server.pem;
-    ssl_certificate_key /etc/nginx/tls/server-key.pem;
-    client_max_body_size 2m;
-    location / {
-      proxy_http_version 1.1;
-      proxy_set_header Host $host;
-      proxy_set_header Connection "";
-      proxy_buffering off;
-      proxy_pass http://catalog-service-http:8080;
-    }
-  }
-}
-EOF_NGINX
-
-docker run --detach \
-  --name "$PROXY_CONTAINER" \
-  --network "$NETWORK" \
-  --network-alias "$CATALOG_HOST" \
-  --publish 127.0.0.1:18443:443 \
-  --mount "type=bind,src=$WORK/nginx.conf,dst=/etc/nginx/nginx.conf,readonly" \
-  --mount "type=bind,src=$WORK/tls/server.pem,dst=/etc/nginx/tls/server.pem,readonly" \
-  --mount "type=bind,src=$WORK/tls/server-key.pem,dst=/etc/nginx/tls/server-key.pem,readonly" \
-  "$NGINX_IMAGE" >/dev/null
-wait_for_https || {
-  echo "catalog HTTPS proxy did not become ready" >&2
+for _ in $(seq 1 120); do
+  status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    "$CATALOG_ORIGIN/v1/operations/not-an-operation" || true)
+  [[ "$status" == 404 ]] && break
+  sleep 1
+done
+[[ "$status" == 404 ]] || {
+  echo "catalog service was not reachable through the HTTPS tunnel" >&2
   exit 1
 }
 
@@ -311,11 +272,9 @@ V2_BUILD_ARGS=(
 MATERIALIZER_REF=$(build_component materializer materializer dalec-homebrew-materializer \
   --build-arg "RUNTIME_BASE=$RUNTIME_BASE" \
   "${V2_BUILD_ARGS[@]}")
-CA_CERT_BASE64=$(base64 < "$WORK/tls/ca.pem" | tr -d '\n')
-FRONTEND_REF=$(build_component "V2 frontend" frontend-test-ca dalec-homebrew \
+FRONTEND_REF=$(build_component "V2 frontend" frontend dalec-homebrew \
   --build-arg "RUNTIME_BASE_REF=$RUNTIME_BASE_REF" \
   --build-arg "MATERIALIZER_REF=$MATERIALIZER_REF" \
-  --build-arg "FRONTEND_TEST_CA_CERTIFICATE_BASE64=$CA_CERT_BASE64" \
   "${V2_BUILD_ARGS[@]}")
 
 DALEC_HOMEBREW_LIVE_BUILDER="$BUILDER" \
