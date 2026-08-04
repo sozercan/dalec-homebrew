@@ -1,24 +1,48 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	digest "github.com/opencontainers/go-digest"
+	"github.com/sozercan/dalec-homebrew/internal/catalog"
+	"github.com/sozercan/dalec-homebrew/internal/catalogkeys"
 	"github.com/sozercan/dalec-homebrew/internal/homebrew/metadata"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
+	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
 const (
-	DefaultAttestationWaiver = "homebrew-jws-and-verified-oci-chain-v1"
-	DefaultFormulaURL        = "https://formulae.brew.sh/api/formula.jws.json"
-	DefaultMigrationsURL     = "https://formulae.brew.sh/api/formula_tap_migrations.jws.json"
+	DefaultAttestationWaiver          = "homebrew-jws-and-verified-oci-chain-v1"
+	DefaultFormulaURL                 = "https://formulae.brew.sh/api/formula.jws.json"
+	DefaultMigrationsURL              = "https://formulae.brew.sh/api/formula_tap_migrations.jws.json"
+	CatalogPolicyVersionV1            = "tap-catalog-v1"
+	BottleFetchPolicyVersionV1        = policyv2.FetchPolicyVersion
+	SigstoreProvenancePolicyVersionV1 = "sigstore-in-toto-v1"
+	ChecksumWaiverPolicyVersionV1     = policyv2.NonCoreProvenanceWaiver
+	HTTPSSourceWaiverPolicyVersionV1  = catalog.HTTPSBottleSourceWaiver
+	CoreWaiverPolicyVersionV1         = DefaultAttestationWaiver
+
+	BottleFetcherBuildArg                     = "DALEC_HOMEBREW_BOTTLE_FETCHER"
+	CatalogServiceOriginBuildArg              = "DALEC_HOMEBREW_CATALOG_SERVICE_ORIGIN"
+	IngestionJWSKeyPolicyDigestBuildArg       = "DALEC_HOMEBREW_INGESTION_JWS_KEY_POLICY_DIGEST"
+	TapPolicyDigestBuildArg                   = "DALEC_HOMEBREW_TAP_POLICY_DIGEST"
+	ExecutableRuntimePolicyDigestBuildArg     = "DALEC_HOMEBREW_EXECUTABLE_RUNTIME_POLICY_DIGEST"
+	SupportedCatalogPolicyVersionsBuildArg    = "DALEC_HOMEBREW_SUPPORTED_CATALOG_POLICY_VERSIONS"
+	SupportedFetchPolicyVersionsBuildArg      = "DALEC_HOMEBREW_SUPPORTED_FETCH_POLICY_VERSIONS"
+	SupportedProvenancePolicyVersionsBuildArg = "DALEC_HOMEBREW_SUPPORTED_PROVENANCE_POLICY_VERSIONS"
 )
 
-// These are populated in release frontend builds with -X. Digest-pinned build
-// args remain available for local development and reproducibility tests.
+// These are populated in release frontend builds with -X. Existing V1
+// bindings may still be supplied for local development and reproducibility
+// tests. V2 values can be parsed from invocation options for diagnostics, but
+// only a complete compiled tuple enables non-core capability. Supported policy
+// version variables use comma-separated ASCII identifiers.
 var (
 	RuntimeBaseRef         string
 	MaterializerRef        string
@@ -26,6 +50,20 @@ var (
 	HomebrewCommit         string
 	VerificationKeysDigest string
 	PortableRubyVersion    string
+
+	BottleFetcherRef            string
+	CatalogServiceOrigin        string
+	IngestionJWSKeyPolicyDigest string
+	// IngestionJWSKeyPolicyBase64 contains the release-pinned public-key
+	// policy bytes. It is compiled into capable frontends and is never accepted
+	// as an invocation build option.
+	IngestionJWSKeyPolicyBase64       string
+	TapPolicyDigest                   string
+	ExecutableRuntimePolicyDigest     string
+	SupportedCatalogPolicyVersions    string
+	SupportedFetchPolicyVersions      string
+	SupportedProvenancePolicyVersions string
+	MaterializerV2BindingsRequired    string
 )
 
 type Config struct {
@@ -42,6 +80,21 @@ type Config struct {
 	SkipTests              bool
 	AllowUnattested        bool
 	AttestationWaiver      string
+
+	BottleFetcherRef            string
+	CatalogServiceOrigin        string
+	IngestionJWSKeyPolicyDigest string
+	// IngestionJWSKeyPolicyBase64 contains the release-pinned public-key
+	// policy bytes. It is compiled into capable frontends and is never accepted
+	// as an invocation build option.
+	IngestionJWSKeyPolicyBase64       string
+	TapPolicyDigest                   string
+	ExecutableRuntimePolicyDigest     string
+	SupportedCatalogPolicyVersions    []string
+	SupportedFetchPolicyVersions      []string
+	SupportedProvenancePolicyVersions []string
+
+	compiledNonCoreTaps bool
 }
 
 func FromBuildOpts(opts map[string]string) (Config, error) {
@@ -62,13 +115,57 @@ func FromBuildOpts(opts map[string]string) (Config, error) {
 		}
 		return supplied
 	}
+	releaseBound := compiledReleaseBound()
+	bindCapability := func(key, compiled string) string {
+		supplied := opts["build-arg:"+key]
+		if releaseBound {
+			if supplied != "" && supplied != compiled {
+				errs = append(errs, fmt.Errorf("%s differs from the release-bound value", key))
+			}
+			return compiled
+		}
+		return supplied
+	}
+
+	catalogPolicyVersionsRaw := bindCapability(SupportedCatalogPolicyVersionsBuildArg, SupportedCatalogPolicyVersions)
+	fetchPolicyVersionsRaw := bindCapability(SupportedFetchPolicyVersionsBuildArg, SupportedFetchPolicyVersions)
+	provenancePolicyVersionsRaw := bindCapability(SupportedProvenancePolicyVersionsBuildArg, SupportedProvenancePolicyVersions)
+	catalogPolicyVersions, err := parsePolicyVersions("catalog", catalogPolicyVersionsRaw)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	fetchPolicyVersions, err := parsePolicyVersions("fetch", fetchPolicyVersionsRaw)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	provenancePolicyVersions, err := parsePolicyVersions("provenance", provenancePolicyVersionsRaw)
+	if err != nil {
+		errs = append(errs, err)
+	}
+
 	frontendBinding := firstNonEmpty(FrontendRef, opts["source"])
-	releaseBound := RuntimeBaseRef != "" || MaterializerRef != "" || HomebrewCommit != "" || VerificationKeysDigest != ""
 	cfg := Config{
-		FormulaURL: get("DALEC_HOMEBREW_METADATA_URL", DefaultFormulaURL), MigrationsURL: get("DALEC_HOMEBREW_MIGRATIONS_URL", DefaultMigrationsURL), MetadataMaxAge: 7 * 24 * time.Hour,
-		RuntimeBaseRef: bind("DALEC_HOMEBREW_RUNTIME_BASE", RuntimeBaseRef), MaterializerRef: bind("DALEC_HOMEBREW_MATERIALIZER", MaterializerRef), FrontendRef: bind("DALEC_HOMEBREW_FRONTEND_REF", frontendBinding),
-		HomebrewCommit: bind("DALEC_HOMEBREW_COMMIT", HomebrewCommit), VerificationKeysDigest: bind("DALEC_HOMEBREW_KEYS_DIGEST", VerificationKeysDigest), PortableRubyVersion: bind("DALEC_HOMEBREW_RUBY_VERSION", firstNonEmpty(PortableRubyVersion, "4.0.6")),
-		AttestationWaiver: get("DALEC_HOMEBREW_ATTESTATION_WAIVER", DefaultAttestationWaiver),
+		FormulaURL:             get("DALEC_HOMEBREW_METADATA_URL", DefaultFormulaURL),
+		MigrationsURL:          get("DALEC_HOMEBREW_MIGRATIONS_URL", DefaultMigrationsURL),
+		MetadataMaxAge:         7 * 24 * time.Hour,
+		RuntimeBaseRef:         bind("DALEC_HOMEBREW_RUNTIME_BASE", RuntimeBaseRef),
+		MaterializerRef:        bind("DALEC_HOMEBREW_MATERIALIZER", MaterializerRef),
+		FrontendRef:            bind("DALEC_HOMEBREW_FRONTEND_REF", frontendBinding),
+		HomebrewCommit:         bind("DALEC_HOMEBREW_COMMIT", HomebrewCommit),
+		VerificationKeysDigest: bind("DALEC_HOMEBREW_KEYS_DIGEST", VerificationKeysDigest),
+		PortableRubyVersion:    bind("DALEC_HOMEBREW_RUBY_VERSION", firstNonEmpty(PortableRubyVersion, "4.0.6")),
+		AttestationWaiver:      get("DALEC_HOMEBREW_ATTESTATION_WAIVER", DefaultAttestationWaiver),
+
+		BottleFetcherRef:                  bindCapability(BottleFetcherBuildArg, BottleFetcherRef),
+		CatalogServiceOrigin:              bindCapability(CatalogServiceOriginBuildArg, CatalogServiceOrigin),
+		IngestionJWSKeyPolicyDigest:       bindCapability(IngestionJWSKeyPolicyDigestBuildArg, IngestionJWSKeyPolicyDigest),
+		TapPolicyDigest:                   bindCapability(TapPolicyDigestBuildArg, TapPolicyDigest),
+		ExecutableRuntimePolicyDigest:     bindCapability(ExecutableRuntimePolicyDigestBuildArg, ExecutableRuntimePolicyDigest),
+		SupportedCatalogPolicyVersions:    catalogPolicyVersions,
+		SupportedFetchPolicyVersions:      fetchPolicyVersions,
+		SupportedProvenancePolicyVersions: provenancePolicyVersions,
+
+		compiledNonCoreTaps: SupportsCompiledNonCoreTaps(),
 	}
 	if source := opts["source"]; source != "" && cfg.FrontendRef != source {
 		errs = append(errs, errors.New("frontend binding differs from the invoking gateway source"))
@@ -126,7 +223,256 @@ func FromBuildOpts(opts map[string]string) (Config, error) {
 	if cfg.AttestationWaiver != DefaultAttestationWaiver {
 		errs = append(errs, fmt.Errorf("unsupported V1 attestation waiver %q", cfg.AttestationWaiver))
 	}
+	if err := validateNonCoreBindings(cfg); err != nil {
+		errs = append(errs, err)
+	}
+	if hasCompiledNonCoreBindings() {
+		if _, err := CompiledCatalogKeyPolicy(); err != nil {
+			errs = append(errs, fmt.Errorf("compiled ingestion JWS key policy: %w", err))
+		}
+	}
 	return cfg, errors.Join(errs...)
+}
+
+// SupportsNonCoreTaps reports whether this parsed configuration exactly
+// retains a complete capability tuple compiled into the frontend. Invocation-
+// filled values never enable the capability.
+func (c Config) SupportsNonCoreTaps() bool {
+	if !c.compiledNonCoreTaps || !supportsNonCoreBindings(c) {
+		return false
+	}
+	compiled, ok := compiledNonCoreConfig()
+	return ok &&
+		c.RuntimeBaseRef == compiled.RuntimeBaseRef &&
+		c.MaterializerRef == compiled.MaterializerRef &&
+		c.HomebrewCommit == compiled.HomebrewCommit &&
+		c.VerificationKeysDigest == compiled.VerificationKeysDigest &&
+		c.PortableRubyVersion == compiled.PortableRubyVersion &&
+		c.BottleFetcherRef == compiled.BottleFetcherRef &&
+		c.CatalogServiceOrigin == compiled.CatalogServiceOrigin &&
+		c.IngestionJWSKeyPolicyDigest == compiled.IngestionJWSKeyPolicyDigest &&
+		c.TapPolicyDigest == compiled.TapPolicyDigest &&
+		c.ExecutableRuntimePolicyDigest == compiled.ExecutableRuntimePolicyDigest &&
+		slices.Equal(c.SupportedCatalogPolicyVersions, compiled.SupportedCatalogPolicyVersions) &&
+		slices.Equal(c.SupportedFetchPolicyVersions, compiled.SupportedFetchPolicyVersions) &&
+		slices.Equal(c.SupportedProvenancePolicyVersions, compiled.SupportedProvenancePolicyVersions)
+}
+
+// SupportsCompiledNonCoreTaps reports whether the linked frontend binary has a
+// complete V2 capability tuple, independent of invocation build options.
+func SupportsCompiledNonCoreTaps() bool {
+	_, ok := compiledNonCoreConfig()
+	return ok
+}
+
+func compiledNonCoreConfig() (Config, bool) {
+	catalog, err := parsePolicyVersions("catalog", SupportedCatalogPolicyVersions)
+	if err != nil {
+		return Config{}, false
+	}
+	fetch, err := parsePolicyVersions("fetch", SupportedFetchPolicyVersions)
+	if err != nil {
+		return Config{}, false
+	}
+	provenance, err := parsePolicyVersions("provenance", SupportedProvenancePolicyVersions)
+	if err != nil {
+		return Config{}, false
+	}
+	if _, err := CompiledCatalogKeyPolicy(); err != nil {
+		return Config{}, false
+	}
+	if RuntimeBaseRef == "" || MaterializerRef == "" || HomebrewCommit == "" || VerificationKeysDigest == "" || PortableRubyVersion == "" {
+		return Config{}, false
+	}
+	cfg := Config{
+		RuntimeBaseRef: RuntimeBaseRef, MaterializerRef: MaterializerRef, HomebrewCommit: HomebrewCommit,
+		VerificationKeysDigest: VerificationKeysDigest, PortableRubyVersion: PortableRubyVersion,
+		BottleFetcherRef:                  BottleFetcherRef,
+		CatalogServiceOrigin:              CatalogServiceOrigin,
+		IngestionJWSKeyPolicyDigest:       IngestionJWSKeyPolicyDigest,
+		TapPolicyDigest:                   TapPolicyDigest,
+		ExecutableRuntimePolicyDigest:     ExecutableRuntimePolicyDigest,
+		SupportedCatalogPolicyVersions:    catalog,
+		SupportedFetchPolicyVersions:      fetch,
+		SupportedProvenancePolicyVersions: provenance,
+	}
+	return cfg, supportsNonCoreBindings(cfg)
+}
+
+func supportsNonCoreBindings(cfg Config) bool {
+	return hasNonCoreBindings(cfg) && validateNonCoreBindings(cfg) == nil
+}
+
+func validateNonCoreBindings(cfg Config) error {
+	if !hasNonCoreBindings(cfg) {
+		return nil
+	}
+	var errs []error
+	if err := validatePinnedRef(cfg.BottleFetcherRef); err != nil {
+		errs = append(errs, fmt.Errorf("bottle fetcher: %w", err))
+	}
+	if err := validateHTTPSOrigin(cfg.CatalogServiceOrigin); err != nil {
+		errs = append(errs, fmt.Errorf("catalog service origin: %w", err))
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{name: "ingestion JWS key policy", value: cfg.IngestionJWSKeyPolicyDigest},
+		{name: "tap policy", value: cfg.TapPolicyDigest},
+		{name: "executable runtime policy", value: cfg.ExecutableRuntimePolicyDigest},
+	} {
+		if err := validateDigest(field.value); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", field.name, err))
+		}
+	}
+	for _, field := range []struct {
+		name   string
+		values []string
+	}{
+		{name: "catalog", values: cfg.SupportedCatalogPolicyVersions},
+		{name: "fetch", values: cfg.SupportedFetchPolicyVersions},
+		{name: "provenance", values: cfg.SupportedProvenancePolicyVersions},
+	} {
+		if err := validatePolicyVersions(field.name, field.values); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for _, field := range []struct {
+		name   string
+		values []string
+		want   []string
+	}{
+		{name: "catalog", values: cfg.SupportedCatalogPolicyVersions, want: []string{CatalogPolicyVersionV1}},
+		{name: "fetch", values: cfg.SupportedFetchPolicyVersions, want: []string{BottleFetchPolicyVersionV1}},
+		{name: "provenance", values: cfg.SupportedProvenancePolicyVersions, want: []string{SigstoreProvenancePolicyVersionV1, ChecksumWaiverPolicyVersionV1, HTTPSSourceWaiverPolicyVersionV1, CoreWaiverPolicyVersionV1}},
+	} {
+		if err := validateExactPolicyVersions(field.name, field.values, field.want); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	tapDigest, err := policyv2.TapPolicyDigest()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("load embedded tap policy digest: %w", err))
+	} else if cfg.TapPolicyDigest != tapDigest {
+		errs = append(errs, fmt.Errorf("tap policy digest %q does not match embedded V2 tap policy %q", cfg.TapPolicyDigest, tapDigest))
+	}
+	runtimeDigest, err := policyv2.Digest()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("load embedded executable runtime policy digest: %w", err))
+	} else if cfg.ExecutableRuntimePolicyDigest != runtimeDigest {
+		errs = append(errs, fmt.Errorf("executable runtime policy digest %q does not match embedded V2 policy %q", cfg.ExecutableRuntimePolicyDigest, runtimeDigest))
+	}
+	return errors.Join(errs...)
+}
+
+func hasNonCoreBindings(cfg Config) bool {
+	return cfg.BottleFetcherRef != "" ||
+		cfg.CatalogServiceOrigin != "" ||
+		cfg.IngestionJWSKeyPolicyDigest != "" ||
+		cfg.TapPolicyDigest != "" ||
+		cfg.ExecutableRuntimePolicyDigest != "" ||
+		len(cfg.SupportedCatalogPolicyVersions) != 0 ||
+		len(cfg.SupportedFetchPolicyVersions) != 0 ||
+		len(cfg.SupportedProvenancePolicyVersions) != 0
+}
+
+func compiledReleaseBound() bool {
+	return RuntimeBaseRef != "" ||
+		MaterializerRef != "" ||
+		HomebrewCommit != "" ||
+		VerificationKeysDigest != "" ||
+		BottleFetcherRef != "" ||
+		CatalogServiceOrigin != "" ||
+		IngestionJWSKeyPolicyDigest != "" ||
+		IngestionJWSKeyPolicyBase64 != "" ||
+		TapPolicyDigest != "" ||
+		ExecutableRuntimePolicyDigest != "" ||
+		SupportedCatalogPolicyVersions != "" ||
+		SupportedFetchPolicyVersions != "" ||
+		SupportedProvenancePolicyVersions != ""
+}
+
+// CompiledCatalogKeyPolicy returns the concrete release-pinned public-key
+// policy after verifying its canonical digest against the compiled tuple.
+func CompiledCatalogKeyPolicy() (*catalogkeys.Policy, error) {
+	if IngestionJWSKeyPolicyBase64 == "" {
+		return nil, errors.New("embedded catalog key policy is absent")
+	}
+	data, err := base64.StdEncoding.Strict().DecodeString(IngestionJWSKeyPolicyBase64)
+	if err != nil {
+		return nil, fmt.Errorf("decode embedded catalog key policy: %w", err)
+	}
+	policy, err := catalogkeys.Decode(data)
+	if err != nil {
+		return nil, err
+	}
+	digest, err := catalogkeys.Digest(policy)
+	if err != nil {
+		return nil, err
+	}
+	if IngestionJWSKeyPolicyDigest == "" || digest.String() != IngestionJWSKeyPolicyDigest {
+		return nil, fmt.Errorf("embedded catalog key policy digest %s does not match compiled %s", digest, IngestionJWSKeyPolicyDigest)
+	}
+	return policy, nil
+}
+
+func hasCompiledNonCoreBindings() bool {
+	return BottleFetcherRef != "" || CatalogServiceOrigin != "" || IngestionJWSKeyPolicyDigest != "" ||
+		IngestionJWSKeyPolicyBase64 != "" || TapPolicyDigest != "" || ExecutableRuntimePolicyDigest != "" ||
+		SupportedCatalogPolicyVersions != "" || SupportedFetchPolicyVersions != "" || SupportedProvenancePolicyVersions != ""
+}
+
+func parsePolicyVersions(name, raw string) ([]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	values := strings.Split(raw, ",")
+	if err := validatePolicyVersions(name, values); err != nil {
+		return nil, err
+	}
+	slices.Sort(values)
+	return values, nil
+}
+
+func validateExactPolicyVersions(name string, values, want []string) error {
+	got := append([]string(nil), values...)
+	expected := append([]string(nil), want...)
+	slices.Sort(got)
+	slices.Sort(expected)
+	if !slices.Equal(got, expected) {
+		return fmt.Errorf("supported %s policy versions must be exactly %v", name, expected)
+	}
+	return nil
+}
+
+func validatePolicyVersions(name string, values []string) error {
+	if len(values) == 0 {
+		return fmt.Errorf("supported %s policy versions are required", name)
+	}
+	if len(values) > 32 {
+		return fmt.Errorf("supported %s policy versions exceed 32 entries", name)
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value == "" || len(value) > 128 {
+			return fmt.Errorf("supported %s policy version %q has invalid length", name, value)
+		}
+		for _, b := range []byte(value) {
+			if b < 0x21 || b > 0x7e || b == ',' {
+				return fmt.Errorf("supported %s policy version %q is not a printable comma-free ASCII identifier", name, value)
+			}
+		}
+		if _, ok := seen[value]; ok {
+			return fmt.Errorf("supported %s policy version %q is duplicated", name, value)
+		}
+		seen[value] = struct{}{}
+	}
+	return nil
+}
+
+func validateHTTPSOrigin(raw string) error {
+	return catalog.ValidateServiceOrigin(raw)
 }
 
 func parseBool(s string) bool {

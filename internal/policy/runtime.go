@@ -7,6 +7,7 @@ import (
 
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 	"github.com/sozercan/dalec-homebrew/internal/runtimefs"
+	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
 const (
@@ -32,7 +33,7 @@ func RuntimeAllowlist(record *resolution.Record) (runtimefs.Allowlist, []string)
 			runtimefs.PathRule{Path: node.Name + ".conf", Package: node.Name},
 			runtimefs.PathRule{Path: node.Name + ".d", Package: node.Name},
 		)
-		if node.Name == "fontconfig" {
+		if runtimePolicyAllows(node, "shared-etc-fonts", "fontconfig") {
 			// Fontconfig's default runtime configuration uses the shared
 			// HOMEBREW_PREFIX/etc/fonts layout rather than a formula-named
 			// subtree. The files are still verified bottle content and remain
@@ -45,7 +46,7 @@ func RuntimeAllowlist(record *resolution.Record) (runtimefs.Allowlist, []string)
 		}
 		allow.Var = append(allow.Var, runtimefs.PathRule{Path: node.Name, Package: node.Name, Writable: true, Required: true})
 		writable = append(writable, path.Join(runtimefs.DefaultInstallPrefix, "var", node.Name))
-		if node.Name == "gdk-pixbuf" {
+		if runtimePolicyAllows(node, "gdk-pixbuf-loader-cache", "gdk-pixbuf") {
 			// Homebrew's authenticated gdk-pixbuf install step generates this
 			// runtime module registry below the enabled global lib root. The
 			// materializer validates its complete structure and binds every
@@ -56,7 +57,7 @@ func RuntimeAllowlist(record *resolution.Record) (runtimefs.Allowlist, []string)
 				Required: true,
 			})
 		}
-		if node.Name == "node" {
+		if runtimePolicyAllows(node, "generated-node-npm", "node") {
 			// Node's verified post-install step copies its bottled private npm
 			// tree into the global lib tree and writes one prefix-bound npmrc.
 			// The materializer validates the complete copy before this fallback
@@ -67,7 +68,7 @@ func RuntimeAllowlist(record *resolution.Record) (runtimefs.Allowlist, []string)
 				Required: true,
 			})
 		}
-		if node.Name == "shared-mime-info" {
+		if runtimePolicyAllows(node, "generated-shared-mime", "shared-mime-info") {
 			// update-mime-database expands the verified package XML into a
 			// shared runtime database. The materializer validates the complete
 			// generated tree and rejects unverified writers before this fallback
@@ -80,6 +81,13 @@ func RuntimeAllowlist(record *resolution.Record) (runtimefs.Allowlist, []string)
 		}
 	}
 	return allow, writable
+}
+
+func runtimePolicyAllows(node resolution.Node, rule, legacyName string) bool {
+	if node.PolicyFormulaID != "" {
+		return policyv2.HasEmbeddedRule(node.PolicyFormulaID, rule)
+	}
+	return node.Name == legacyName && node.FullName == "homebrew/core/"+legacyName
 }
 
 func BindRuntimePolicy(record *resolution.Record) (runtimefs.Allowlist, error) {

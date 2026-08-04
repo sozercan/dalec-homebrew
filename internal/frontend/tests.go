@@ -85,3 +85,20 @@ func AddRuntimeVerification(state llb.State, materializerRef string, platform oc
 	sum := sha256.Sum256(data)
 	return state.Requires("runtime-verification/"+hex.EncodeToString(sum[:]), run.Root()), nil
 }
+
+func AddRuntimeVerificationV2(state llb.State, materializerRef string, platform ocispec.Platform, record *resolution.RecordV2) (llb.State, error) {
+	if record == nil {
+		return llb.Scratch(), fmt.Errorf("nil V2 resolution for runtime verification")
+	}
+	epoch := time.Unix(record.SourceDateEpoch, 0).UTC()
+	toolImage := llb.Image(materializerRef, llb.Platform(platform))
+	tool := llb.Scratch().File(llb.Copy(toolImage, "/usr/local/bin/dalec-homebrew-materializer", "/dalec-homebrew-materializer", &llb.CopyInfo{CreateDestPath: true, CreatedTime: &epoch}))
+	recordState, data, err := llbutil.ResolutionStateV2(record)
+	if err != nil {
+		return llb.Scratch(), err
+	}
+	branch := state.File(llb.Copy(tool, "/dalec-homebrew-materializer", "/__dalec_homebrew/materializer", &llb.CopyInfo{CreateDestPath: true, CreatedTime: &epoch})).File(llb.Copy(recordState, "/resolution.json", "/__dalec_homebrew/resolution.json", &llb.CopyInfo{CreateDestPath: true, CreatedTime: &epoch}))
+	run := branch.Run(llb.Args([]string{"/__dalec_homebrew/materializer", "verify-runtime", "--resolution", "/__dalec_homebrew/resolution.json", "--root", "/", "--prefix", "/home/linuxbrew/.linuxbrew"}), llb.Network(llb.NetModeNone), llb.User("root"), llb.Dir("/"), llb.WithLinuxResources(llb.LinuxResources{Memory: 2 << 30, MemorySwap: 2 << 30, CPUQuota: 200000, CPUPeriod: 100000}))
+	sum := sha256.Sum256(data)
+	return state.Requires("runtime-verification-v2/"+hex.EncodeToString(sum[:]), run.Root()), nil
+}

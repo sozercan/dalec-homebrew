@@ -7,9 +7,9 @@
 - A Linux `amd64` or `arm64` target
 - Docker Buildx or `buildctl` backed by BuildKit 0.31.2 or newer
 - A `dalec-homebrew` frontend reference pinned by digest
-- Network access from the BuildKit daemon to the frontend and its bound components, `formulae.brew.sh`, and `ghcr.io`
+- Network access from the BuildKit daemon to the frontend and its bound components, `formulae.brew.sh`, and `ghcr.io`; V2 non-core builds also require the release-bound catalog-service origin and selected public bottle hosts
 
-The frontend, runtime base, and materializer are treated as one release component tuple. Mutable image tags are not accepted as trusted inputs.
+The frontend, runtime base, materializer, and—when V2 non-core support is compiled—bottle fetcher, catalog-service origin, ingestion key policy, tap policy, and executable runtime policy are treated as one release component tuple. Mutable image tags are not accepted as trusted inputs.
 
 ## Build an image
 
@@ -46,8 +46,9 @@ The map form supports the V1 per-Formula options:
 ```yaml
 dependencies:
   runtime:
-    hello: {}
-    jq: {}
+    hello: {}                 # homebrew/core/hello
+    homebrew/core/jq: {}       # identical canonical core form
+    acme/tools/widget: {}      # V2: github.com/acme/homebrew-tools
     ripgrep:
       arch: [amd64, arm64]
 ```
@@ -63,8 +64,11 @@ Dependency rules:
 
 - An omitted or empty `version` list selects the current stable Formula in the authenticated Homebrew snapshot. Any non-empty version constraint is rejected; historical versions and version ranges are not supported.
 - Explicit canonical versioned Formula names such as `python@3.14` are supported. Version-looking requests must be exact canonical names; they do not select arbitrary historical releases.
-- Authenticated `homebrew/core` aliases, old names, and in-core migrations may resolve to the current canonical Formula. Cask or third-party migration targets are rejected.
-- Formula names must start with a lowercase letter or digit and contain only lowercase letters, digits, `+`, `_`, `.`, `@`, or `-`. Whitespace, uppercase characters, tap/path syntax, colons, and malformed `@` syntax are rejected before metadata access.
+- A bare name canonicalizes to `homebrew/core/<name>`; explicit `homebrew/core/<name>` is identical, and duplicate canonical roots such as both forms of `hello` are rejected.
+- A qualified V2 name has exactly `owner/tap/formula`. URL-like input, arbitrary remotes, casks, credentials, uppercase or non-ASCII components, colons, backslashes, control characters, and malformed or overlong components are rejected before metadata access.
+- Qualified roots are rejected before network access unless the frontend binary has the complete release-bound V2 capability tuple.
+- Authenticated `homebrew/core` aliases, old names, and in-core migrations may resolve to the current canonical Formula. V2 additionally supports signed same-tap aliases and renames plus fully qualified cross-tap migrations; dependency lookup never searches unrelated taps.
+- Formula short names must start with a lowercase letter or digit and contain only lowercase letters, digits, `+`, `_`, `.`, `@`, or `-`. Malformed `@` syntax is rejected before metadata access.
 - `arch` may contain `amd64`, `arm64`, or both. Duplicate or unsupported entries are rejected. A root omitted by `arch` is not part of that platform's closure.
 - A non-empty selected-target `dependencies.runtime` map replaces the global runtime map as a group; it is not merged per Formula. If the target omits runtime dependencies, the global map is inherited. Both scopes are still validated fail-closed.
 - Every selected platform must have at least one applicable runtime root.
@@ -167,7 +171,7 @@ See the files under [`../examples/`](../examples/) for command output, filesyste
 
 Package metadata fields such as `name`, `description`, `website`, `version`, `revision`, and `license` may be supplied, but they are optional and do not drive dependency resolution for this runtime-only frontend.
 
-V1 behavior is limited to global and selected-target `dependencies.runtime`, the image fields listed above, and tests without mounts. Unknown non-extension Dalec fields are rejected by the strict decoder. The following known Dalec features are also rejected:
+V1 behavior is limited to core-only global and selected-target `dependencies.runtime`, the image fields listed above, and tests without mounts. V2 retains that contract and adds public default GitHub taps addressed only as `owner/tap/formula`; runtime input still cannot provide repository URLs, keys, or endpoint configuration. Unknown non-extension Dalec fields are rejected by the strict decoder. The following known Dalec features are also rejected:
 
 - build, recommended, test, or sysext dependencies
 - extra package repositories
@@ -177,7 +181,7 @@ V1 behavior is limited to global and selected-target `dependencies.runtime`, the
 - `provides`, `replaces`, or `conflicts`
 - target frontend forwarding
 - image base overrides or post-install image steps
-- casks, third-party taps, source builds, historical versions, and version ranges
+- casks, private or authenticated taps, arbitrary Git remotes, source builds, historical versions, version ranges, and bottles whose embedded Formula requires unstaged tap-local Ruby helper files
 - test mounts or networked tests
 
 Unsupported or malformed Dalec document fields are rejected before Homebrew metadata or bottle registry access.
@@ -193,7 +197,7 @@ The output contains the selected Formulae, their verified runtime closure, a con
 | `runtime-inventory.json` | Selected runtime paths, ownership, modes, digests, and package attribution |
 | `prune-manifest.json` | Versioned record of the runtime pruning decision |
 | `sbom.spdx.json` | SPDX 2.3 software bill of materials |
-| `materialization.json` | Offline installation and verified-bottle results |
+| `materialization.json` / `materialization-v2.json` | Offline installation and per-bottle V2 preparation/install evidence |
 | `runtime-base-packages.tsv` | Chisel package versions, architectures, selected regular payload bytes, and verified source `.deb` SHA-256 values |
 | `runtime-base-artifacts.tsv` | Deliberate non-package files included in the runtime base |
 | `runtime-base-chisel.manifest.wall` | Chisel's authoritative path and slice manifest |

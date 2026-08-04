@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 )
@@ -278,4 +279,76 @@ func (e *VerificationError) Unwrap() error { return e.Err }
 
 func verificationError(code ErrorCode, path string, format string, args ...any) error {
 	return &VerificationError{Code: code, Path: path, Err: fmt.Errorf(format, args...)}
+}
+
+// ExpectationFromNodeV2 projects a V2 node into the static archive verifier.
+// Full Formula IDs remain evidence identities; short rack names are used only
+// for verified Cellar/opt path translation.
+func ExpectationFromNodeV2(node resolution.NodeV2, closure []resolution.NodeV2) (Expectation, error) {
+	byID := make(map[resolution.FormulaID]resolution.NodeV2, len(closure))
+	byRack := make(map[string]resolution.FormulaID, len(closure))
+	for _, candidate := range closure {
+		if _, duplicate := byID[candidate.ID]; duplicate {
+			return Expectation{}, fmt.Errorf("duplicate V2 closure Formula ID %q", candidate.ID)
+		}
+		if previous, collision := byRack[candidate.Name]; collision && previous != candidate.ID {
+			return Expectation{}, fmt.Errorf("V2 closure rack %q is shared by %q and %q", candidate.Name, previous, candidate.ID)
+		}
+		byID[candidate.ID] = candidate
+		byRack[candidate.Name] = candidate.ID
+	}
+	if selected, ok := byID[node.ID]; !ok || selected.Name != node.Name || selected.PkgVersion != node.PkgVersion {
+		return Expectation{}, fmt.Errorf("V2 node %q is absent from or inconsistent with the verified closure", node.ID)
+	}
+	deps := make([]ReceiptDependency, 0, len(node.Bottle.Tab.Dependencies))
+	for _, dep := range node.Bottle.Tab.Dependencies {
+		fullName := dep.HomebrewFullName.String()
+		if strings.HasPrefix(fullName, "homebrew/core/") {
+			fullName = strings.TrimPrefix(fullName, "homebrew/core/")
+		}
+		deps = append(deps, ReceiptDependency{
+			FullName: fullName, Version: dep.Version, Revision: dep.Revision,
+			BottleRebuild: dep.BottleRebuild, PkgVersion: dep.PkgVersion, DeclaredDirectly: dep.DeclaredDirectly,
+		})
+	}
+	allowed := make([]string, 0, len(node.Dependencies))
+	for _, requirement := range node.Dependencies {
+		if !requirement.Direct {
+			continue
+		}
+		dependency, ok := byID[requirement.ID]
+		if !ok {
+			return Expectation{}, fmt.Errorf("V2 node %q has missing direct dependency %q", node.ID, requirement.ID)
+		}
+		allowed = append(allowed, dependency.Name)
+	}
+	slices.Sort(allowed)
+	compressedDigest := node.Bottle.SHA256
+	compressedSize := node.Bottle.Size
+	if node.Bottle.Transport.OCI != nil {
+		compressedDigest = node.Bottle.Transport.OCI.Layer.Digest
+		compressedSize = node.Bottle.Transport.OCI.Layer.Size
+	}
+	formulaIdentity := node.UpstreamFormulaID.String()
+	if formulaIdentity == "" {
+		formulaIdentity = node.ID.String()
+	}
+	return Expectation{
+		Name: node.Name, FullName: node.HomebrewFullName.String(), FormulaVersion: node.FormulaVersion,
+		FormulaRevision: node.FormulaRevision, PkgVersion: node.PkgVersion, VersionScheme: node.VersionScheme,
+		BottleRebuild: node.BottleRebuild, BottleTag: node.Bottle.Tag, CompressedSHA256: compressedDigest,
+		CompressedSize: compressedSize, HomebrewSHA256: node.Bottle.SHA256, HomebrewVersion: node.Bottle.Tab.HomebrewVersion,
+		Arch: node.Bottle.Tab.Arch, Compiler: node.Bottle.Tab.Compiler, ExpectedTap: node.Tap.String(), Dependencies: deps,
+		FormulaIdentity: formulaIdentity, AllowedExternalSymlinkFormulae: allowed,
+	}, nil
+}
+
+// VerifyNodeV2 verifies a fetched V2 bottle against its exact graph and rack
+// identities.
+func VerifyNodeV2(r io.Reader, node resolution.NodeV2, closure []resolution.NodeV2, opts Options) (*Result, error) {
+	expectation, err := ExpectationFromNodeV2(node, closure)
+	if err != nil {
+		return nil, err
+	}
+	return Verify(r, expectation, opts)
 }

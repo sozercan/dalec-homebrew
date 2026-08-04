@@ -150,3 +150,80 @@ func TestMaterializerUsesFullUbuntuButChiselEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestV2ComponentImagesAreExplicitAndMinimal(t *testing.T) {
+	data := dockerfileText(t)
+	helper := dockerfileStage(t, data, "FROM go-source AS helper-build")
+	if !strings.Contains(helper, "internal/catalogextractor.PinnedHomebrewCommit=${HOMEBREW_COMMIT}") {
+		t.Fatal("catalog extractor binary is not bound to the release Homebrew commit")
+	}
+	for _, binding := range []string{
+		"internal/config.MaterializerV2BindingsRequired=1",
+		"internal/config.IngestionJWSKeyPolicyDigest=${INGESTION_JWS_KEY_POLICY_DIGEST}",
+		"internal/config.TapPolicyDigest=${TAP_POLICY_DIGEST}",
+		"internal/config.ExecutableRuntimePolicyDigest=${EXECUTABLE_RUNTIME_POLICY_DIGEST}",
+		"internal/config.SupportedCatalogPolicyVersions=${SUPPORTED_CATALOG_POLICY_VERSIONS}",
+		"internal/config.SupportedFetchPolicyVersions=${SUPPORTED_FETCH_POLICY_VERSIONS}",
+		"internal/config.SupportedProvenancePolicyVersions=${SUPPORTED_PROVENANCE_POLICY_VERSIONS}",
+	} {
+		if !strings.Contains(helper, binding) {
+			t.Fatalf("materializer build is missing release policy binding %q", binding)
+		}
+	}
+	fetcher := dockerfileStage(t, data, "FROM scratch AS bottle-fetcher")
+	for _, want := range []string{
+		"COPY --from=ca-bundle /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt",
+		"COPY --from=helper-build /out/dalec-homebrew-bottle-fetcher /dalec-homebrew-bottle-fetcher",
+		`ENTRYPOINT ["/dalec-homebrew-bottle-fetcher"]`,
+	} {
+		if !strings.Contains(fetcher, want) {
+			t.Fatalf("bottle-fetcher stage is missing %q", want)
+		}
+	}
+	if got := strings.Count(fetcher, "\nCOPY "); got != 2 {
+		t.Fatalf("bottle-fetcher stage has %d COPY instructions, want 2", got)
+	}
+
+	service := dockerfileStage(t, data, "FROM scratch AS catalog-service")
+	for _, want := range []string{
+		"COPY --from=ca-bundle /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt",
+		"COPY --from=helper-build /out/dalec-homebrew-catalog-service /dalec-homebrew-catalog-service",
+		"COPY --from=helper-build --chown=65532:65532 /out/catalog-service-rootfs/ /",
+		`ENTRYPOINT ["/dalec-homebrew-catalog-service"]`,
+	} {
+		if !strings.Contains(service, want) {
+			t.Fatalf("catalog-service stage is missing %q", want)
+		}
+	}
+	if got := strings.Count(service, "\nCOPY "); got != 3 {
+		t.Fatalf("catalog-service stage has %d COPY instructions, want 3", got)
+	}
+
+	extractorRoot := dockerfileStage(t, data, "FROM materializer-rootfs AS catalog-extractor-rootfs")
+	if !strings.Contains(extractorRoot, "COPY --chmod=0444 internal/catalogextractor/extract.rb /usr/local/libexec/dalec-homebrew-catalog-extract.rb") {
+		t.Fatal("catalog-extractor rootfs is missing the pinned Ruby extraction adapter")
+	}
+	extractor := dockerfileStage(t, data, "FROM scratch AS catalog-extractor")
+	if !strings.Contains(extractor, "COPY --from=catalog-extractor-rootfs / /") || !strings.Contains(extractor, `ENTRYPOINT ["/usr/local/bin/dalec-homebrew-catalog-extractor"]`) || !strings.Contains(extractor, "HOMEBREW_REQUIRE_TAP_TRUST=1") {
+		t.Fatal("catalog-extractor stage does not bind the isolated Homebrew/Ruby extractor rootfs")
+	}
+}
+
+func TestFrontendBuildBindsCompleteNonCoreTuple(t *testing.T) {
+	stage := dockerfileStage(t, dockerfileText(t), "FROM go-source AS frontend-build")
+	for _, want := range []string{
+		"internal/config.BottleFetcherRef=${BOTTLE_FETCHER_REF}",
+		"internal/config.CatalogServiceOrigin=${CATALOG_SERVICE_ORIGIN}",
+		"internal/config.IngestionJWSKeyPolicyDigest=${INGESTION_JWS_KEY_POLICY_DIGEST}",
+		"internal/config.IngestionJWSKeyPolicyBase64=${INGESTION_JWS_KEY_POLICY_BASE64}",
+		"internal/config.TapPolicyDigest=${TAP_POLICY_DIGEST}",
+		"internal/config.ExecutableRuntimePolicyDigest=${EXECUTABLE_RUNTIME_POLICY_DIGEST}",
+		"internal/config.SupportedCatalogPolicyVersions=${SUPPORTED_CATALOG_POLICY_VERSIONS}",
+		"internal/config.SupportedFetchPolicyVersions=${SUPPORTED_FETCH_POLICY_VERSIONS}",
+		"internal/config.SupportedProvenancePolicyVersions=${SUPPORTED_PROVENANCE_POLICY_VERSIONS}",
+	} {
+		if !strings.Contains(stage, want) {
+			t.Fatalf("frontend build stage is missing %q", want)
+		}
+	}
+}

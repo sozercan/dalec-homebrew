@@ -11,12 +11,29 @@ import (
 	"strings"
 
 	"github.com/project-dalec/dalec"
+	"github.com/sozercan/dalec-homebrew/internal/homebrew/formulaid"
 )
 
 var supportedArches = map[string]struct{}{"amd64": {}, "arm64": {}}
 
+const (
+	maxRuntimeRoots    = 256
+	maxNonCoreRootTaps = 16
+)
+
 type Root struct {
-	Name string
+	// Name is the legacy core lookup name or, for non-core roots, the canonical
+	// Formula ID. New code should use ID for identity decisions.
+	Name      string
+	Requested string
+	ID        formulaid.FormulaID
+}
+
+// Capabilities are release-bound frontend features. They are passed as a
+// variadic option so existing V1 callers remain source compatible and default
+// to the fail-closed core-only contract.
+type Capabilities struct {
+	NonCoreTaps bool
 }
 
 type Selection struct {
@@ -25,7 +42,8 @@ type Selection struct {
 	Image *dalec.ImageConfig
 }
 
-func Validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string) (*Selection, error) {
+func Validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string, capability ...Capabilities) (*Selection, error) {
+	caps := effectiveCapabilities(capability)
 	if s == nil {
 		return nil, errors.New("nil Dalec spec")
 	}
@@ -80,8 +98,11 @@ func Validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string) 
 			errs = append(errs, fmt.Errorf("%s extra package repositories are not supported", scope))
 		}
 		for name, constraint := range deps.Runtime {
-			if err := ValidateFormulaName(name); err != nil {
+			id, err := formulaid.Parse(name)
+			if err != nil {
 				errs = append(errs, fmt.Errorf("%s runtime dependency: %w", scope, err))
+			} else if !caps.NonCoreTaps && !isCoreFormula(id) {
+				errs = append(errs, fmt.Errorf("%s runtime dependency %q requires release-bound non-core capability bindings", scope, name))
 			}
 			if len(constraint.Version) > 0 {
 				errs = append(errs, fmt.Errorf("%s runtime dependency %q has version constraints; historical and ranged resolution is a V2 feature", scope, name))
@@ -144,14 +165,30 @@ func Validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string) 
 
 	deps := s.GetPackageDeps(targetKey).GetRuntime()
 	order := orderedNames(deps, declarationOrder)
+	orderedIDs, err := formulaid.ParseRoots(order)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("runtime roots: %w", err))
+	} else if err := validateRuntimeRootLimits(orderedIDs); err != nil {
+		errs = append(errs, fmt.Errorf("runtime roots: %w", err))
+	}
 	roots := make([]Root, 0, len(order))
-	for _, name := range order {
-		constraint, ok := deps[name]
-		if !ok {
-			continue
-		}
-		if appliesTo(constraint.Arch, arch) {
-			roots = append(roots, Root{Name: name})
+	if err == nil {
+		for i, name := range order {
+			constraint, ok := deps[name]
+			if !ok {
+				continue
+			}
+			id := orderedIDs[i]
+			if !caps.NonCoreTaps && !isCoreFormula(id) {
+				continue
+			}
+			if appliesTo(constraint.Arch, arch) {
+				lookup := id.String()
+				if isCoreFormula(id) {
+					lookup = id.Name()
+				}
+				roots = append(roots, Root{Name: lookup, Requested: name, ID: id})
+			}
 		}
 	}
 	if len(roots) == 0 {
@@ -164,24 +201,36 @@ func Validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string) 
 }
 
 func ValidateFormulaName(name string) error {
-	if strings.TrimSpace(name) != name || name == "" {
-		return fmt.Errorf("invalid Formula name %q", name)
+	_, err := formulaid.Parse(name)
+	return err
+}
+
+func isCoreFormula(id formulaid.FormulaID) bool {
+	return id.Tap() == formulaid.CoreTap()
+}
+
+func validateRuntimeRootLimits(ids []formulaid.FormulaID) error {
+	var errs []error
+	if len(ids) > maxRuntimeRoots {
+		errs = append(errs, fmt.Errorf("%d canonical runtime roots exceed maximum %d", len(ids), maxRuntimeRoots))
 	}
-	if strings.ContainsAny(name, `/\\:`) {
-		return fmt.Errorf("Formula name %q contains tap or path syntax", name)
-	}
-	if strings.Count(name, "@") > 1 || strings.HasPrefix(name, "@") || strings.HasSuffix(name, "@") {
-		return fmt.Errorf("Formula name %q has invalid versioned-Formula syntax", name)
-	}
-	for _, r := range name {
-		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || strings.ContainsRune("+_.@-", r)) {
-			return fmt.Errorf("Formula name %q contains unsupported character %q", name, r)
+	nonCoreTaps := make(map[formulaid.Tap]struct{})
+	for _, id := range ids {
+		if !isCoreFormula(id) {
+			nonCoreTaps[id.Tap()] = struct{}{}
 		}
 	}
-	if !((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= '0' && name[0] <= '9')) {
-		return fmt.Errorf("Formula name %q has invalid first character", name)
+	if len(nonCoreTaps) > maxNonCoreRootTaps {
+		errs = append(errs, fmt.Errorf("%d distinct non-core root taps exceed maximum %d", len(nonCoreTaps), maxNonCoreRootTaps))
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+func effectiveCapabilities(values []Capabilities) Capabilities {
+	if len(values) == 0 {
+		return Capabilities{}
+	}
+	return values[0]
 }
 
 func ValidateImage(scope string, img *dalec.ImageConfig) error {

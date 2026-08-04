@@ -10,8 +10,8 @@ import (
 
 func TestRuntimeAllowlistBindsGdkPixbufLoaderCache(t *testing.T) {
 	record := &resolution.Record{Nodes: []resolution.Node{
-		{Name: "gdk-pixbuf", PkgVersion: "2.44.7"},
-		{Name: "librsvg", PkgVersion: "2.62.3"},
+		{Name: "gdk-pixbuf", FullName: "homebrew/core/gdk-pixbuf", PkgVersion: "2.44.7"},
+		{Name: "librsvg", FullName: "homebrew/core/librsvg", PkgVersion: "2.62.3"},
 	}}
 
 	allow, writable := RuntimeAllowlist(record)
@@ -29,14 +29,14 @@ func TestRuntimeAllowlistBindsGdkPixbufLoaderCache(t *testing.T) {
 }
 
 func TestRuntimeAllowlistDoesNotAddGdkPixbufOwnerWithoutFormula(t *testing.T) {
-	allow, _ := RuntimeAllowlist(&resolution.Record{Nodes: []resolution.Node{{Name: "hello", PkgVersion: "1"}}})
+	allow, _ := RuntimeAllowlist(&resolution.Record{Nodes: []resolution.Node{{Name: "hello", FullName: "homebrew/core/hello", PkgVersion: "1"}}})
 	if len(allow.Owners) != 0 {
 		t.Fatalf("unexpected owner rules: %#v", allow.Owners)
 	}
 }
 
 func TestRuntimeAllowlistBindsSharedMimeDatabase(t *testing.T) {
-	record := &resolution.Record{Nodes: []resolution.Node{{Name: "shared-mime-info", PkgVersion: "2.5.1"}}}
+	record := &resolution.Record{Nodes: []resolution.Node{{Name: "shared-mime-info", FullName: "homebrew/core/shared-mime-info", PkgVersion: "2.5.1"}}}
 	allow, _ := RuntimeAllowlist(record)
 	want := runtimefs.PathRule{Path: sharedMimeDatabasePath, Package: "shared-mime-info", Required: true}
 	if !slices.Contains(allow.Owners, want) {
@@ -45,7 +45,7 @@ func TestRuntimeAllowlistBindsSharedMimeDatabase(t *testing.T) {
 }
 
 func TestRuntimeAllowlistBindsNodeNPMRuntime(t *testing.T) {
-	record := &resolution.Record{Nodes: []resolution.Node{{Name: "node", PkgVersion: "26.5.1"}}}
+	record := &resolution.Record{Nodes: []resolution.Node{{Name: "node", FullName: "homebrew/core/node", PkgVersion: "26.5.1"}}}
 	allow, _ := RuntimeAllowlist(record)
 	want := runtimefs.PathRule{Path: nodeNPMRuntimePath, Package: "node", Required: true}
 	if !slices.Contains(allow.Owners, want) {
@@ -54,10 +54,25 @@ func TestRuntimeAllowlistBindsNodeNPMRuntime(t *testing.T) {
 }
 
 func TestRuntimeAllowlistRetainsSharedFontconfigConfiguration(t *testing.T) {
-	record := &resolution.Record{Nodes: []resolution.Node{{Name: "fontconfig", PkgVersion: "2.18.2"}}}
+	record := &resolution.Record{Nodes: []resolution.Node{{Name: "fontconfig", FullName: "homebrew/core/fontconfig", PkgVersion: "2.18.2"}}}
 	allow, _ := RuntimeAllowlist(record)
 	want := runtimefs.PathRule{Path: "fonts", Package: "fontconfig", Required: true}
 	if !slices.Contains(allow.Etc, want) {
 		t.Fatalf("etc rules %#v do not contain %#v", allow.Etc, want)
+	}
+}
+
+func TestRuntimeAllowlistDoesNotGrantCoreCapabilityToNonCoreRackSpoof(t *testing.T) {
+	record := &resolution.Record{Nodes: []resolution.Node{{Name: "node", FullName: "acme/tools/node", PkgVersion: "1"}, {Name: "fontconfig", FullName: "acme/tools/fontconfig", PkgVersion: "1"}}}
+	allow, _ := RuntimeAllowlist(record)
+	for _, rule := range allow.Owners {
+		if rule.Path == nodeNPMRuntimePath {
+			t.Fatalf("non-core node received npm owner capability: %+v", rule)
+		}
+	}
+	for _, rule := range allow.Etc {
+		if rule.Path == "fonts" {
+			t.Fatalf("non-core fontconfig received shared etc capability: %+v", rule)
+		}
 	}
 }

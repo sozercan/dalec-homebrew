@@ -209,3 +209,19 @@ The repository workflow has no rollback trigger or rollback job. Rollback is an
 operator or downstream release-system action that selects an earlier signed
 component, index, and resolution tuple together with its mirrored blobs. It
 must not reconstruct an old release from current Homebrew metadata.
+
+## V2 component tuple
+
+V2 manifests use `dalec-homebrew-components/v2` and add:
+
+- a multi-platform `bottle_fetcher` component;
+- `catalog_service_origin`;
+- `ingestion_jws_key_policy_digest` plus the concrete public-key policy compiled into the frontend;
+- `tap_policy_digest` and `executable_runtime_policy_digest`;
+- exact supported catalog, fetch, provenance, and receiptless HTTPS source-waiver policy-version sets.
+
+The illustrative V1 manifest remains [`../release/components.example.json`](../release/components.example.json). The V2 shape is [`../release/components-v2.example.json`](../release/components-v2.example.json).
+
+Build V2 components in this order: runtime-base children/index, bottle-fetcher children/index, catalog extractor, and catalog service; assemble the ingestion key policy from the resulting authorized service/extractor digests; then build materializer children/index and the frontend with the complete service origin, key-policy, fetcher, tap-policy, runtime-policy, and supported-version bindings compiled in. The catalog service requires a persistent volume, one active signing writer, a mode-0600-or-stricter RSA key file, a dedicated BuildKit worker address, a digest-pinned extractor reference whose digest matches the authorized extractor identity, and the release-pinned Homebrew commit. `--fixture` remains local/test-only and is mutually exclusive with the production BuildKit route.
+
+Key rotation is an overlap release: first publish a frontend key policy containing both public keys and list the not-yet-primary signer in `overlap_key_ids`, then switch the service signer, and remove the old key only in a later frontend release. During that bounded overlap the frontend accepts a valid PS512 signature from either explicitly listed key; unrelated or unknown signers remain rejected unless the separate unknown-signature transition flag is intentionally enabled. Promotion and rollback retain the signed catalog set, catalog documents, fetch evidence, selected bottle bytes, V2 resolution, and final image digests; they never re-ingest or rebuild an old release.

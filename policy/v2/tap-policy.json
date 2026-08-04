@@ -1,0 +1,12 @@
+{
+  "schema_version": "dalec-homebrew-tap-policy/v1",
+  "repository_template": "https://github.com/<owner>/homebrew-<tap>",
+  "default_branch_only": true,
+  "public_only": true,
+  "authenticated_endpoints": false,
+  "user_supplied_remotes": false,
+  "max_non_core_taps": 16,
+  "sigstore_trusted_root_digest": "sha256:4364d7724c04cc912ce2a6c45ed2610e8d8d1c4dc857fb500292738d4d9c8d2c",
+  "sigstore_issuer": "https://token.actions.githubusercontent.com",
+  "sigstore_identity_template": "^https://github.com/<owner>/homebrew-<tap>/"
+}

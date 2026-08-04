@@ -1,5 +1,5 @@
-// Package resolution defines the immutable, canonical record that binds a
-// Dalec input to the exact Homebrew metadata and OCI objects used to build a
+// Package resolution defines immutable, canonical records that bind a Dalec
+// input to the exact Homebrew metadata and bottle artifacts used to build a
 // runtime image.
 package resolution
 
@@ -22,8 +22,16 @@ import (
 )
 
 const (
-	SchemaVersion = "dalec-homebrew-resolution/v1"
-	PolicyVersion = "homebrew-runtime-v1"
+	SchemaVersionV1 = "dalec-homebrew-resolution/v1"
+	SchemaVersionV2 = "dalec-homebrew-resolution/v2"
+	PolicyVersionV1 = "homebrew-runtime-v1"
+	PolicyVersionV2 = "homebrew-runtime-v2"
+
+	// SchemaVersion and PolicyVersion retain their V1 values for source
+	// compatibility with the existing resolver and materializer. V2 callers use
+	// the explicitly versioned constants and RecordV2 APIs.
+	SchemaVersion = SchemaVersionV1
+	PolicyVersion = PolicyVersionV1
 )
 
 // Platform is the normalized OCI target platform. V1 intentionally excludes
@@ -101,6 +109,9 @@ type Node struct {
 	Bottle            Bottle        `json:"bottle"`
 	ExecutablePaths   []string      `json:"executable_paths,omitempty"`
 	UpstreamFormulaID string        `json:"upstream_formula_identity,omitempty"`
+	// PolicyFormulaID is an in-memory V2 projection marker. It is never
+	// serialized in immutable V1 records.
+	PolicyFormulaID string `json:"-"`
 }
 
 type Requirement struct {

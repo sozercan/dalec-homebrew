@@ -21,3 +21,6 @@ build:
 	go build -trimpath -o bin/dalec-homebrew-release-manifest ./cmd/release-manifest
 	go build -trimpath -o bin/dalec-homebrew-test-runner ./cmd/test-runner
 	go build -trimpath -o bin/dalec-homebrew-resolve ./cmd/resolve
+	go build -trimpath -o bin/dalec-homebrew-bottle-fetcher ./cmd/bottle-fetcher
+	go build -trimpath -o bin/dalec-homebrew-catalog-service ./cmd/catalog-service
+	go build -trimpath -o bin/dalec-homebrew-catalog-extractor ./cmd/catalog-extractor

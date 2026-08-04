@@ -10,7 +10,7 @@
 
 ## What you get
 
-- Choose packages from `homebrew/core`.
+- Choose packages from `homebrew/core` or public default GitHub taps in a release-bound V2 frontend.
 - Get a minimal, non-root image without Homebrew or package managers.
 - Keep an SBOM and a record of everything included in the image.
 
@@ -78,8 +78,24 @@ See the [usage reference](docs/usage.md) for image settings, tests, dependency r
 | Supported | Not supported |
 | --- | --- |
 | Linux `amd64` and `arm64` | Other platforms |
-| Current `homebrew/core` bottles | Casks, third-party taps, and source builds |
+| Current stable `homebrew/core` bottles and public default GitHub taps in V2-capable releases | Casks, private/authenticated taps, arbitrary Git remotes, source builds, and non-self-contained bottle Formulae |
 | Non-root images | Custom base images and networked tests |
+
+## Public taps (V2)
+
+A V2-capable frontend accepts `owner/tap/formula` and derives only the public default GitHub repository `https://github.com/<owner>/homebrew-<tap>`. Bare names and explicit `homebrew/core/formula` canonicalize to the same core identity. The capability is compiled into the signed component tuple; build arguments cannot enable it on a core-only frontend.
+
+Non-core builds use the release-bound catalog service and bottle fetcher. Core-only builds continue to use the official Homebrew JWS and GHCR path and do not contact the catalog service.
+
+The catalog service verifies exact tap commits, bottle checksums and sizes, hostile-archive structure, embedded Formula bytes, and any digest-advertised Sigstore/in-toto bundle covered by the release tap policy. Missing provenance is recorded as an explicit per-bottle waiver; invalid advertised provenance fails the build.
+
+```yaml
+dependencies:
+  runtime:
+    acme/tools/widget: {}
+```
+
+The example identity above is illustrative; use a Formula present in the public tap selected by your release/test environment.
 
 ## Examples
 

@@ -10,17 +10,42 @@
 require "formulary"
 require "formula_installer"
 
-abort "usage: dalec-homebrew-pour.rb <bottle>" unless ARGV.length == 1
+unless [1, 3].include?(ARGV.length)
+  abort "usage: dalec-homebrew-pour.rb <bottle> OR <formula-id> <staged-formula> <bottle>"
+end
 
-bottle_path = Pathname(ARGV.fetch(0)).realpath
-abort "bottle path is not a regular file" unless bottle_path.file?
+if ARGV.length == 1
+  bottle_path = Pathname(ARGV.fetch(0)).realpath
+  abort "bottle path is not a regular file" unless bottle_path.file?
 
-# brew.sh intentionally clears this internal variable at process startup, so
-# set it inside the isolated adapter immediately before loading the verified
-# local bottle. Unlike HOMEBREW_DEVELOPER, this does not alter installer error
-# handling for missing conflict Formulae in the intentionally empty core tap.
-ENV["HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS"] = "1"
-formula = Formulary.factory(bottle_path, force_bottle: true)
+  # V1 compatibility: the legacy adapter loads the verified local bottle path
+  # directly. V2 never enables this broad path-loader switch.
+  ENV["HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS"] = "1"
+  formula = Formulary.factory(bottle_path, force_bottle: true)
+else
+  formula_id = ARGV.fetch(0)
+  formula_path = Pathname(ARGV.fetch(1)).realpath
+  bottle_path = Pathname(ARGV.fetch(2)).realpath
+  abort "staged Formula path is not a regular file" unless formula_path.file?
+  abort "bottle path is not a regular file" unless bottle_path.file?
+
+  # The staged file contains the independently verified bottle-embedded
+  # Formula source, but lives under its explicit synthetic Tap path. Loading
+  # this path preserves Homebrew's tap-trust check and exact Tap identity.
+  formula = Formulary.factory(formula_path, force_bottle: true)
+  actual_id = if formula.tap&.core_tap?
+    "homebrew/core/#{formula.name}"
+  else
+    formula.full_name
+  end
+  abort "staged Formula identity mismatch" unless actual_id == formula_id
+
+  # FormulaInstaller treats this exact local path as the only bottle source.
+  # Network and dependency/source fallback remain disabled by the enclosing
+  # materializer execution and installer options.
+  formula.local_bottle_path = bottle_path
+end
+
 installer = FormulaInstaller.new(
   formula,
   installed_on_request: true,

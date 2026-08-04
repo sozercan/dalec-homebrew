@@ -38,10 +38,54 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 FROM go-source AS helper-build
 ARG TARGETOS TARGETARCH
+ARG SOURCE_DATE_EPOCH
+ARG HOMEBREW_COMMIT
+ARG HOMEBREW_KEYS_DIGEST
+ARG HOMEBREW_RUBY_VERSION
+ARG BOTTLE_FETCHER_REF
+ARG CATALOG_SERVICE_ORIGIN
+ARG INGESTION_JWS_KEY_POLICY_DIGEST
+ARG INGESTION_JWS_KEY_POLICY_BASE64
+ARG TAP_POLICY_DIGEST
+ARG EXECUTABLE_RUNTIME_POLICY_DIGEST
+ARG SUPPORTED_CATALOG_POLICY_VERSIONS
+ARG SUPPORTED_FETCH_POLICY_VERSIONS
+ARG SUPPORTED_PROVENANCE_POLICY_VERSIONS
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags='-s -w -buildid=' -o /out/dalec-homebrew-materializer ./cmd/materializer && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags='-s -w -buildid=' -o /out/dalec-homebrew-test-runner ./cmd/test-runner
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -buildid= \
+      -X github.com/sozercan/dalec-homebrew/internal/config.HomebrewCommit=${HOMEBREW_COMMIT} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.VerificationKeysDigest=${HOMEBREW_KEYS_DIGEST} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.PortableRubyVersion=${HOMEBREW_RUBY_VERSION} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.BottleFetcherRef=${BOTTLE_FETCHER_REF} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.CatalogServiceOrigin=${CATALOG_SERVICE_ORIGIN} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.IngestionJWSKeyPolicyDigest=${INGESTION_JWS_KEY_POLICY_DIGEST} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.IngestionJWSKeyPolicyBase64=${INGESTION_JWS_KEY_POLICY_BASE64} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.TapPolicyDigest=${TAP_POLICY_DIGEST} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.ExecutableRuntimePolicyDigest=${EXECUTABLE_RUNTIME_POLICY_DIGEST} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.SupportedCatalogPolicyVersions=${SUPPORTED_CATALOG_POLICY_VERSIONS} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.SupportedFetchPolicyVersions=${SUPPORTED_FETCH_POLICY_VERSIONS} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.SupportedProvenancePolicyVersions=${SUPPORTED_PROVENANCE_POLICY_VERSIONS} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.MaterializerV2BindingsRequired=1" -o /out/dalec-homebrew-materializer ./cmd/materializer && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags='-s -w -buildid=' -o /out/dalec-homebrew-test-runner ./cmd/test-runner && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags='-s -w -buildid=' -o /out/dalec-homebrew-bottle-fetcher ./cmd/bottle-fetcher && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags='-s -w -buildid=' -o /out/dalec-homebrew-catalog-service ./cmd/catalog-service && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -buildid= -X github.com/sozercan/dalec-homebrew/internal/catalogextractor.PinnedHomebrewCommit=${HOMEBREW_COMMIT}" -o /out/dalec-homebrew-catalog-extractor ./cmd/catalog-extractor && \
+    install -d -m 1777 /out/catalog-service-rootfs/tmp && \
+    touch -d "@${SOURCE_DATE_EPOCH}" /out/dalec-homebrew-*
+
+FROM scratch AS bottle-fetcher
+COPY --from=ca-bundle /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=helper-build /out/dalec-homebrew-bottle-fetcher /dalec-homebrew-bottle-fetcher
+USER 65532:65532
+ENTRYPOINT ["/dalec-homebrew-bottle-fetcher"]
+
+FROM scratch AS catalog-service
+COPY --from=ca-bundle /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=helper-build /out/dalec-homebrew-catalog-service /dalec-homebrew-catalog-service
+COPY --from=helper-build --chown=65532:65532 /out/catalog-service-rootfs/ /
+USER 65532:65532
+ENTRYPOINT ["/dalec-homebrew-catalog-service"]
 
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS runtime-base-rootfs
 ARG BUILDARCH TARGETARCH
@@ -313,10 +357,32 @@ ENV PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/usr/loc
     HOMEBREW_NO_AUTO_UPDATE=1 \
     HOMEBREW_NO_ANALYTICS=1 \
     HOMEBREW_NO_INSTALL_FROM_API=1 \
+    HOMEBREW_REQUIRE_TAP_TRUST=1 \
     HOMEBREW_NO_INSTALL_CLEANUP=1 \
     HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
 WORKDIR /home/linuxbrew
 ENTRYPOINT ["/usr/local/bin/dalec-homebrew-materializer"]
+
+FROM materializer-rootfs AS catalog-extractor-rootfs
+COPY --chmod=0555 --from=helper-build /out/dalec-homebrew-catalog-extractor /usr/local/bin/dalec-homebrew-catalog-extractor
+COPY --chmod=0444 internal/catalogextractor/extract.rb /usr/local/libexec/dalec-homebrew-catalog-extract.rb
+RUN rm -f /usr/local/bin/dalec-homebrew-materializer \
+    /usr/local/bin/dalec-homebrew-test-runner \
+    /usr/local/libexec/dalec-homebrew-pour.rb
+
+FROM scratch AS catalog-extractor
+COPY --from=catalog-extractor-rootfs / /
+USER root
+ENV PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    HOME=/home/linuxbrew \
+    HOMEBREW_PREFIX=/home/linuxbrew/.linuxbrew \
+    HOMEBREW_REPOSITORY=/home/linuxbrew/.linuxbrew/Homebrew \
+    HOMEBREW_CELLAR=/home/linuxbrew/.linuxbrew/Cellar \
+    HOMEBREW_NO_AUTO_UPDATE=1 \
+    HOMEBREW_NO_ANALYTICS=1 \
+    HOMEBREW_NO_INSTALL_FROM_API=1 \
+    HOMEBREW_REQUIRE_TAP_TRUST=1
+ENTRYPOINT ["/usr/local/bin/dalec-homebrew-catalog-extractor"]
 
 FROM go-source AS frontend-build
 ARG TARGETOS TARGETARCH
@@ -327,6 +393,15 @@ ARG FRONTEND_REF
 ARG HOMEBREW_COMMIT
 ARG HOMEBREW_KEYS_DIGEST
 ARG HOMEBREW_RUBY_VERSION
+ARG BOTTLE_FETCHER_REF
+ARG CATALOG_SERVICE_ORIGIN
+ARG INGESTION_JWS_KEY_POLICY_DIGEST
+ARG INGESTION_JWS_KEY_POLICY_BASE64
+ARG TAP_POLICY_DIGEST
+ARG EXECUTABLE_RUNTIME_POLICY_DIGEST
+ARG SUPPORTED_CATALOG_POLICY_VERSIONS
+ARG SUPPORTED_FETCH_POLICY_VERSIONS
+ARG SUPPORTED_PROVENANCE_POLICY_VERSIONS
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
@@ -336,7 +411,16 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -X github.com/sozercan/dalec-homebrew/internal/config.FrontendRef=${FRONTEND_REF} \
       -X github.com/sozercan/dalec-homebrew/internal/config.HomebrewCommit=${HOMEBREW_COMMIT} \
       -X github.com/sozercan/dalec-homebrew/internal/config.VerificationKeysDigest=${HOMEBREW_KEYS_DIGEST} \
-      -X github.com/sozercan/dalec-homebrew/internal/config.PortableRubyVersion=${HOMEBREW_RUBY_VERSION}" \
+      -X github.com/sozercan/dalec-homebrew/internal/config.PortableRubyVersion=${HOMEBREW_RUBY_VERSION} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.BottleFetcherRef=${BOTTLE_FETCHER_REF} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.CatalogServiceOrigin=${CATALOG_SERVICE_ORIGIN} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.IngestionJWSKeyPolicyDigest=${INGESTION_JWS_KEY_POLICY_DIGEST} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.IngestionJWSKeyPolicyBase64=${INGESTION_JWS_KEY_POLICY_BASE64} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.TapPolicyDigest=${TAP_POLICY_DIGEST} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.ExecutableRuntimePolicyDigest=${EXECUTABLE_RUNTIME_POLICY_DIGEST} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.SupportedCatalogPolicyVersions=${SUPPORTED_CATALOG_POLICY_VERSIONS} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.SupportedFetchPolicyVersions=${SUPPORTED_FETCH_POLICY_VERSIONS} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.SupportedProvenancePolicyVersions=${SUPPORTED_PROVENANCE_POLICY_VERSIONS}" \
       -o /out/dalec-homebrew-frontend ./cmd/frontend \
     && touch -d "@${SOURCE_DATE_EPOCH}" /out/dalec-homebrew-frontend
 

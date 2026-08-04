@@ -49,3 +49,18 @@ Reports that demonstrate a practical violation of the properties above are in sc
 ## Reporting
 
 Please report vulnerabilities privately to the repository maintainers. Include a minimal Dalec spec or resolution record, the affected platform and component digests, and a reproduction where possible. Do not include credentials or private registry tokens.
+
+## V2 non-core tap properties
+
+A release may accept `owner/tap/formula` only when its frontend binary contains the complete V2 capability tuple: bottle-fetcher reference, catalog-service HTTPS origin, concrete ingestion-key policy and digest, tap-policy digest, executable runtime-policy digest, and the exact supported catalog/fetch/provenance policy versions. Invocation build arguments cannot upgrade a core-only frontend.
+
+V2 additionally enforces:
+
+1. Formula graph identity is always `owner/tap/formula`; Cellar rack names are separate and collisions fail closed.
+2. Catalog-set PS512 signatures bind the canonical per-platform request, verified core snapshot, reached tap commits and catalog digests, closure, artifacts, source evidence, static bottle verification, and verified Sigstore/in-toto provenance or the explicit checksum waiver. Advertised Sigstore bundles are checked against the release-bound trusted root and repository-scoped GitHub Actions identity; malformed advertised evidence cannot fall back to a waiver.
+3. Catalog documents are fetched only from the compiled service origin with signed size, 64 MiB per-document and 256 MiB aggregate limits, duplicate-member rejection, and SHA-256 verification.
+4. Non-core GHCR bottles repeat the full descriptor and annotation validation. Other bottles pass through the release-bound HTTPS fetcher; private, authenticated, IP-literal, non-public, downgraded, oversized, or unapproved-redirect sources are rejected.
+5. Preparation re-verifies every bottle and fetch-evidence file before Homebrew executes. Bottle-embedded Formula source is staged under its exact synthetic Tap identity; current catalog source and embedded bottle source remain distinct evidence. GHCR historical source annotations are checked against the exact GitHub commit/path bytes. Receiptless generic HTTPS bottles carry explicit receiptless-tab and historical-source-waiver markers rather than fabricated provenance.
+6. One network-disabled exec installs each bottle. Protected tap trees and the exact Formula trust store cannot be replaced or modified by the runtime user.
+7. Core-only generated-runtime and post-install capabilities are keyed by full Formula ID. A non-core Formula that reuses a core rack name receives no core-specific exception.
+8. V1 records remain immutable and V1-only materializers continue to reject V2. Verification tooling decodes both schemas explicitly.

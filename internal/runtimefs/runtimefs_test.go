@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -338,7 +339,7 @@ func TestBrewedGlibcLoaderIsRetained(t *testing.T) {
 		installPrefix: DefaultInstallPrefix,
 		architecture:  "amd64",
 		allowlist:     normalizedAllowlist{Lib: true},
-		nodes:         map[string]resolution.Node{"glibc": {Name: "glibc", PkgVersion: "2"}},
+		nodes:         map[string]resolution.Node{"glibc": {Name: "glibc", FullName: "homebrew/core/glibc", PkgVersion: "2"}},
 	}
 	entry := &sourceEntry{rel: "lib/ld.so", typeName: TypeSymlink, linkSource: DefaultInstallPrefix + "/opt/glibc/bin/ld.so"}
 	if err := classifyRetention(entry, policy); err != nil {
@@ -438,14 +439,14 @@ func TestPruneOptionalDependencyTooling(t *testing.T) {
 	}
 	t.Run("transitive llvm tooling", func(t *testing.T) {
 		scan := &sourceScan{entries: []*sourceEntry{entry()}}
-		pruneOptionalDependencyTooling(scan, &normalizedPolicy{requested: map[string]struct{}{}})
+		pruneOptionalDependencyTooling(scan, &normalizedPolicy{nodes: map[string]resolution.Node{"llvm@21": {Name: "llvm@21", FullName: "homebrew/core/llvm@21"}}, requested: map[string]struct{}{}})
 		if scan.entries[0].retain || scan.entries[0].pruneReason != PruneOptionalTooling {
 			t.Fatalf("optional LLVM tool was not pruned: %#v", scan.entries[0])
 		}
 	})
 	t.Run("requested llvm tooling", func(t *testing.T) {
 		scan := &sourceScan{entries: []*sourceEntry{entry()}}
-		pruneOptionalDependencyTooling(scan, &normalizedPolicy{requested: map[string]struct{}{"llvm@21": {}}})
+		pruneOptionalDependencyTooling(scan, &normalizedPolicy{nodes: map[string]resolution.Node{"llvm@21": {Name: "llvm@21", FullName: "homebrew/core/llvm@21"}}, requested: map[string]struct{}{"llvm@21": {}}})
 		if !scan.entries[0].retain {
 			t.Fatal("requested LLVM tool was pruned")
 		}
@@ -727,7 +728,7 @@ func TestSymlinkCanInheritOwnerAttributedGeneratedTarget(t *testing.T) {
 	link := &sourceEntry{rel: "bin/npm", typeName: TypeSymlink, retain: true, linkResolved: target.rel}
 	scan := &sourceScan{entries: []*sourceEntry{link, target}, byPath: map[string]*sourceEntry{target.rel: target, link.rel: link}}
 	policy := &normalizedPolicy{
-		nodes:     map[string]resolution.Node{"node": {Name: "node", PkgVersion: "26.5.1"}},
+		nodes:     map[string]resolution.Node{"node": {Name: "node", FullName: "homebrew/core/node", PkgVersion: "26.5.1"}},
 		allowlist: normalizedAllowlist{Owners: []normalizedRule{{Path: "lib/node_modules/npm", Package: "node"}}},
 	}
 	if err := attributeEntries(scan, policy); err != nil {
@@ -745,7 +746,7 @@ func TestOwnerRulesDoNotOverrideExactGlobalCopyPackage(t *testing.T) {
 	policy := &normalizedPolicy{
 		nodes: map[string]resolution.Node{
 			"jq":               {Name: "jq", PkgVersion: "1"},
-			"shared-mime-info": {Name: "shared-mime-info", PkgVersion: "1"},
+			"shared-mime-info": {Name: "shared-mime-info", FullName: "homebrew/core/shared-mime-info", PkgVersion: "1"},
 		},
 		allowlist: normalizedAllowlist{Owners: []normalizedRule{{Path: "share/mime", Package: "shared-mime-info"}}},
 	}
@@ -806,5 +807,21 @@ func TestGlobalExecutableCanResolveThroughOptSymlink(t *testing.T) {
 	output := testOutput(t, "runtime")
 	if _, err := Assemble(fx.source, output, fx.record, fx.opts); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestNonCoreRackSpoofsDoNotReceiveCoreRuntimeFSExceptions(t *testing.T) {
+	glibc := resolution.Node{Name: "glibc", FullName: "acme/tools/glibc", PkgVersion: "2"}
+	policy := &normalizedPolicy{architecture: "amd64", installPrefix: DefaultInstallPrefix, allowlist: normalizedAllowlist{Lib: true}, nodes: map[string]resolution.Node{"glibc": glibc}}
+	entry := &sourceEntry{rel: "lib/ld.so", typeName: TypeSymlink, linkSource: path.Join(DefaultInstallPrefix, "opt/glibc/bin/ld.so")}
+	if err := classifyRetention(entry, policy); err == nil {
+		t.Fatal("non-core glibc retained brewed loader exception")
+	}
+
+	scan := &sourceScan{entries: []*sourceEntry{{rel: "bin/scan-build-py", typeName: TypeSymlink, retain: true, packageName: "llvm@21"}}}
+	prunePolicy := &normalizedPolicy{nodes: map[string]resolution.Node{"llvm@21": {Name: "llvm@21", FullName: "acme/tools/llvm@21"}}, requested: map[string]struct{}{}}
+	pruneOptionalDependencyTooling(scan, prunePolicy)
+	if !scan.entries[0].retain {
+		t.Fatal("non-core llvm received optional-tooling prune exception")
 	}
 }

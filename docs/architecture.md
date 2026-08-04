@@ -133,3 +133,32 @@ The installed prefix is scanned into an inventory. Only allowlist-selected prefi
 Each declared Dalec test runs on an independent branch derived from the final pruned state. The frontend injects an ephemeral test runner and plan under `/__dalec_homebrew`; those files are not exported. Commands inherit the final image user, environment, and working directory, after which the supported test-level directory, test environment, and step environment overrides apply. BuildKit disables networking for each branch. Development frontends may set `DALEC_SKIP_TESTS`; release-bound frontends reject that bypass.
 
 The image contents and evidence files are listed in the [usage reference](usage.md).
+
+## V2 public-tap flow
+
+V2 keeps the V1 core path intact and adds a release-bound path only when a root uses `owner/tap/formula`:
+
+```text
+all-platform raw/typed preflight
+  -> official core JWS authentication
+  -> one per-invocation catalog-set request
+  -> PS512 catalog-set verification and digest-addressed catalog fetches
+  -> independent cross-tap normalization, cycle/order, platform, and rack-collision checks
+  -> independent GHCR descriptor resolution or one bounded HTTPS fetch exec per bottle
+  -> canonical resolution V2
+  -> prepare (all bottles and fetch evidence verified; synthetic taps and trust store sealed)
+  -> one network-disabled install exec per install-order node
+  -> finalize onto the clean runtime base with V2 inventory, prune, manifest, and SPDX evidence
+```
+
+Core-only builds bypass the catalog client. Catalog requests bind each target platform to its effective core and external root sets, the pinned Homebrew commit, and the verified core snapshot digest.
+
+The catalog service persists canonical catalogs by digest, operation state, monotonic per-tap sequences, repository+commit extraction snapshots, and artifact-verification records under a single-writer file lock. Tap indexes refresh after one hour; immutable repository and artifact records are content-keyed, revalidated before reuse, and namespaced by the authorized service/extractor identities, tap-policy digest, and Homebrew commit so policy or verifier rotation cannot reuse stale evidence. The service signs completed set manifests with a mounted PS512 key whose public-key policy and authorized service/extractor identities are compiled into the frontend release. Production deployments configure the repository-contained generator with `--buildkit-address`, a digest-pinned `--extractor-ref`, and the release Homebrew commit. The BuildKit Git source fetches only the derived public default repository, while Formula evaluation runs in a separate network-disabled, read-only extractor exec with disposable cache and temporary mounts. Fixture generation is local/test-only; production does not delegate catalog construction to an unspecified executable.
+
+HTTPS bottles never use `llb.HTTP`. A minimal CA-plus-static-binary fetcher enforces public DNS/IP destinations, HTTPS port 443, redirect allowlists, exact positive size up to 1 GiB, a 15-minute deadline, and SHA-256 before atomically publishing mode-0444 output and redacted evidence.
+
+During ingestion, GHCR source annotations are used to recover the exact historical bottle-source commit and Formula path. The source file is fetched at that immutable revision and compared byte-for-byte with the embedded Formula after the deterministic Homebrew bottle block (which is intentionally omitted from bottle Formula copies) is removed. Generic HTTPS bottles do not expose an equivalent authenticated source revision, so V2 leaves the historical repository/commit/path fields empty and requires the explicit `https-bottle-embedded-formula-digest-only-v1` bottle-source waiver. The current signed tap source and the separately verified embedded-Formula digest remain distinct evidence.
+
+GHCR artifacts may advertise a Sigstore bundle through an OCI 1.1 referrer or the digest-bound `dev.sigstore.bundle.url` and `dev.sigstore.bundle.digest` annotations; generic HTTPS bottles use the deterministic `<bottle-path>.sigstore.json` sidecar convention. When present, ingestion fetches the bounded bundle, verifies its SHA-256, in-toto subject, transparency evidence, GitHub Actions issuer, and repository-scoped identity against the Sigstore trusted root embedded in the V2 tap policy. If no supported discovery route exposes evidence, the artifact records the explicit checksum/JWS provenance waiver; partial, ambiguous, or invalid advertised evidence fails closed.
+
+V2 materialization seeds the protected Homebrew prefix once, stages bottle-embedded Formula source under exact synthetic tap paths, and writes a read-only `trust.json` containing only selected non-core Formula IDs. Each install starts from a fresh materializer rootfs with networking disabled; only the cumulative prefix and explicit delta evidence persist. Formula-specific runtime exceptions are granted only to exact `homebrew/core/...` identities.
