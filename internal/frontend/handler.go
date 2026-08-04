@@ -88,7 +88,7 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		if p.OS != "linux" || (p.Architecture != "amd64" && p.Architecture != "arm64") {
 			return nil, fmt.Errorf("unsupported target platform %s", platforms.Format(p))
 		}
-		dalecSpec, err := dalecfrontend.LoadSpec(ctx, dc, &p)
+		dalecSpec, err := dalecfrontend.LoadSpec(ctx, dc, &p, dalecfrontend.WithAllowArgs(config.BuildArgNames()...))
 		if err != nil {
 			return nil, err
 		}
