@@ -293,8 +293,57 @@ docker run --rm --network none --entrypoint /bin/bash "$FINAL_IMAGE" -lc '
   set -euo pipefail
   hello | grep -F "Hello, world!"
   test -s /home/linuxbrew/.linuxbrew/opt/libdf/lib/libdf.so
-  grep -F svt/avtools/libdf /usr/share/dalec-homebrew/resolution.json
 '
+
+for name in resolution.json materialization-v2.json runtime-inventory.json; do
+  docker run --rm --network none --entrypoint /bin/cat "$FINAL_IMAGE" \
+    "/usr/share/dalec-homebrew/$name" > "$WORK/$name"
+done
+
+NONCORE_ID=svt/avtools/libdf
+NONCORE_TAP=svt/avtools
+jq -e --arg id "$NONCORE_ID" --arg tap "$NONCORE_TAP" '
+  .schema_version == "dalec-homebrew-resolution/v2" and
+  (([.requested[] | select(.requested == $id and .id == $id)] | length) == 1) and
+  (([.nodes[] | select(
+    .id == $id and
+    .tap == $tap and
+    .name == "libdf" and
+    .homebrew_full_name == $id and
+    .bottle.transport.oci == null and
+    .bottle.transport.https.fetch_policy_version == "homebrew-bottle-fetch-v1"
+  )] | length) == 1) and
+  (([.metadata_sources[] | select(
+    .tap == $tap and
+    .catalog_policy_version == "tap-catalog-v1" and
+    .signer.algorithm == "PS512" and
+    .signer.verified == true
+  )] | length) == 1) and
+  ((.install_order | index($id)) != null)
+' "$WORK/resolution.json" >/dev/null
+
+jq -e --arg id "$NONCORE_ID" --arg tap "$NONCORE_TAP" '
+  .schema_version == "dalec-homebrew-materialization/v2" and
+  .preparation.schema_version == "dalec-homebrew-preparation/v2" and
+  (([.preparation.verified_bottles[] | select(.id == $id)] | length) == 1) and
+  (([.preparation.fetch_evidence[] | select(
+    .artifact_id == $id and
+    .schema_version == "bottle-fetch-evidence/v1" and
+    .fetch_policy_version == "homebrew-bottle-fetch-v1"
+  )] | length) == 1) and
+  (([.preparation.staged_formulae[] | select(.id == $id and .tap == $tap and .name == "libdf")] | length) == 1) and
+  (([.install_deltas[] | select(.schema_version == "dalec-homebrew-install-delta/v2" and .id == $id)] | length) == 1)
+' "$WORK/materialization-v2.json" >/dev/null
+
+jq -e --arg id "$NONCORE_ID" '
+  .schema_version == "dalec-homebrew-runtime-inventory/v2" and
+  (([.entries[] | select(
+    .formula_id == $id and
+    .type == "file" and
+    (.path | endswith("/libdf.so")) and
+    .size > 0
+  )] | length) >= 1)
+' "$WORK/runtime-inventory.json" >/dev/null
 
 cat <<RESULT
 DALEC_HOMEBREW_E2E_RUNTIME_BASE_REF=$RUNTIME_BASE_REF

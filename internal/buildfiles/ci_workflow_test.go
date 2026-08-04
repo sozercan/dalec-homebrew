@@ -46,6 +46,12 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 		"cloudflared did not publish a valid HTTPS catalog origin",
 		"trycloudflare",
 		"docker run --rm --network none",
+		".requested == $id and .id == $id",
+		".tap == $tap",
+		".bottle.transport.https.fetch_policy_version == \"homebrew-bottle-fetch-v1\"",
+		".signer.algorithm == \"PS512\"",
+		".artifact_id == $id",
+		".formula_id == $id",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("non-core E2E script is missing %q", want)
