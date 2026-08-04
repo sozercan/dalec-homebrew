@@ -1,0 +1,40 @@
+# syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
+name: homebrew-ci-multi-package
+version: 0.1.0
+revision: 1
+description: CI validation image with multiple verified Homebrew packages
+website: https://brew.sh/
+license: Apache-2.0
+
+dependencies:
+  runtime:
+    hello: {}
+    jq: {}
+    ripgrep: {}
+
+image:
+  entrypoint: /home/linuxbrew/.linuxbrew/bin/hello
+  user: linuxbrew
+
+tests:
+  - name: multi-package-runtime
+    steps:
+      - command: hello
+        stdout:
+          contains: ["Hello, world!"]
+      - command: printf '{"answer":42}' | jq -r .answer
+        stdout:
+          equals: "42\n"
+      - command: printf 'alpha\nbeta\n' | rg '^beta$'
+        stdout:
+          equals: "beta\n"
+    files:
+      /home/linuxbrew/.linuxbrew/bin/hello: {}
+      /home/linuxbrew/.linuxbrew/bin/jq: {}
+      /home/linuxbrew/.linuxbrew/bin/rg: {}
+      /home/linuxbrew/.linuxbrew/bin/brew:
+        not_exist: true
+      /home/linuxbrew/.linuxbrew/Homebrew:
+        not_exist: true
+      /home/linuxbrew/.cache/Homebrew:
+        not_exist: true

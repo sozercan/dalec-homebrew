@@ -20,6 +20,7 @@ env:
   BUILDX_SHA256_ARM64: 70382de03915c07c488ae4ddc4f7e169ee978f953e754ecfce110ba017e0132b
   BUILDKIT_IMAGE: docker.io/moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2
   ACTIONLINT_IMAGE: docker.io/rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+  REGISTRY_IMAGE: docker.io/library/registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
 
 jobs:
   go:
@@ -115,3 +116,124 @@ jobs:
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  e2e:
+    name: Multi-package container E2E
+    needs: [go, dockerfile]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      E2E_BUILDER: dalec-homebrew-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+      E2E_REGISTRY_CONTAINER: dalec-homebrew-e2e-registry-${{ github.run_id }}-${{ github.run_attempt }}
+      E2E_REGISTRY: localhost:5000
+      E2E_IMAGE: dalec-homebrew-e2e:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install checksum-pinned Buildx
+        run: |
+          set -euo pipefail
+          [[ "$BUILDX_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case "$(uname -m)" in
+            x86_64|amd64)
+              arch=amd64
+              expected=$BUILDX_SHA256_AMD64
+              ;;
+            aarch64|arm64)
+              arch=arm64
+              expected=$BUILDX_SHA256_ARM64
+              ;;
+            *)
+              echo "unsupported Buildx host architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+          asset="buildx-${BUILDX_VERSION}.linux-${arch}"
+          binary="$RUNNER_TEMP/$asset"
+          curl --fail --location --silent --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --max-filesize 134217728 \
+            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/${asset}" \
+            --output "$binary"
+          printf '%s  %s\n' "$expected" "$binary" | sha256sum -c -
+          plugin_dir="${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins"
+          install -d -m 0755 "$plugin_dir"
+          install -m 0755 "$binary" "$plugin_dir/docker-buildx"
+          docker buildx version | grep -F " $BUILDX_VERSION "
+
+      - name: Set up isolated registry and BuildKit
+        run: |
+          set -euo pipefail
+          config="$RUNNER_TEMP/dalec-homebrew-e2e-buildkitd.toml"
+
+          docker run --detach \
+            --name "$E2E_REGISTRY_CONTAINER" \
+            --publish 127.0.0.1:5000:5000 \
+            "$REGISTRY_IMAGE"
+
+          cat > "$config" <<EOF
+          [registry."$E2E_REGISTRY"]
+            http = true
+            insecure = true
+          EOF
+
+          ready=false
+          for _ in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:5000/v2/ >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          [[ "$ready" == true ]]
+
+          docker buildx create \
+            --name "$E2E_BUILDER" \
+            --driver docker-container \
+            --driver-opt "image=$BUILDKIT_IMAGE" \
+            --driver-opt network=host \
+            --buildkitd-config "$config" \
+            --use \
+            --bootstrap
+
+      - name: Build and test a multi-package runtime image
+        run: |
+          set -euo pipefail
+          DALEC_HOMEBREW_LIVE_BUILDER="$E2E_BUILDER" \
+          DALEC_HOMEBREW_LIVE_REGISTRY="$E2E_REGISTRY" \
+          DALEC_HOMEBREW_LIVE_PLATFORM=linux/amd64 \
+          DALEC_HOMEBREW_LIVE_SPEC=examples/ci-multi-package.yaml \
+          DALEC_HOMEBREW_LIVE_IMAGE="$E2E_IMAGE" \
+          DALEC_HOMEBREW_LIVE_OUTPUT=load \
+          DALEC_HOMEBREW_LIVE_PROGRESS=plain \
+            ./scripts/live-test.sh
+
+      - name: Smoke-test the loaded image without networking
+        run: |
+          set -euo pipefail
+          docker image inspect "$E2E_IMAGE" >/dev/null
+          docker run --rm --network none \
+            --entrypoint /home/linuxbrew/.linuxbrew/bin/hello \
+            "$E2E_IMAGE" | grep -F 'Hello, world!'
+          docker run --rm --network none \
+            --entrypoint /home/linuxbrew/.linuxbrew/bin/jq \
+            "$E2E_IMAGE" --version | grep -E '^jq-[0-9]'
+          docker run --rm --network none \
+            --entrypoint /home/linuxbrew/.linuxbrew/bin/rg \
+            "$E2E_IMAGE" --version | grep -E '^ripgrep [0-9]'
+
+      - name: Clean up E2E resources
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -n "${E2E_BUILDER:-}" ]]; then
+            docker buildx rm --force "$E2E_BUILDER" || true
+          fi
+          if [[ -n "${E2E_REGISTRY_CONTAINER:-}" ]]; then
+            docker rm --force "$E2E_REGISTRY_CONTAINER" || true
+          fi
