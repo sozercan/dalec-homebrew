@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -105,7 +106,7 @@ func StageFormulaeV2(prefix string, record *resolution.RecordV2, verified map[re
 		if !ok {
 			return nil, fmt.Errorf("Formula %q has no verified bottle result", node.ID)
 		}
-		expectedBottlePath := filepath.ToSlash(filepath.Join("Cellar", node.Name, node.PkgVersion, ".brew", node.Name+".rb"))
+		expectedBottlePath := path.Join(result.KegPrefix, ".brew", node.Name+".rb")
 		if result.Name != node.Name || result.PkgVersion != node.PkgVersion || result.Formula.Path != expectedBottlePath {
 			return nil, fmt.Errorf("Formula %q verified source identity is inconsistent", node.ID)
 		}
