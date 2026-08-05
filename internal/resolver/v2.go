@@ -170,6 +170,10 @@ func convertCatalogNodeV2(node catalog.Node, artifact catalog.BottleArtifact, no
 	if artifact.Transport.HTTPS != nil {
 		bottle.Transport.HTTPS = convertCatalogHTTPSTransportV2(*artifact.Transport.HTTPS)
 	}
+	if artifact.Transport.Local != nil {
+		transport := artifact.Transport.Local
+		bottle.Transport.Local = &resolution.LocalTransport{PolicyVersion: transport.PolicyVersion, SHA256: transport.SHA256, Size: transport.Size, Filename: transport.Filename}
+	}
 	if artifact.PrebuiltDerivation != nil {
 		bottle.PrebuiltDerivation = convertCatalogPrebuiltDerivationV2(*artifact.PrebuiltDerivation)
 	}

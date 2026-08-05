@@ -139,9 +139,9 @@ func buildV2(ctx context.Context, client gwclient.Client, dc *dockerui.Client, c
 			if !ok {
 				return nil, fmt.Errorf("missing verified catalog result for %s", key)
 			}
-			requested, err := v2RequestedRoots(snapshot, nonCore.Catalogs, platformResult, input.selection.Roots)
-			if err != nil {
-				return nil, err
+			requested, requestErr := v2RequestedRoots(snapshot, nonCore.Catalogs, platformResult, input.selection.Roots)
+			if requestErr != nil {
+				return nil, requestErr
 			}
 			record, err = resolver.RecordV2FromCatalog(platformResult, requested, resolver.V2Options{
 				SpecDigest: "sha256:" + sha256Hex(input.effectiveSpec), TargetKey: targetKey, ResolvedAt: time.Now().UTC().Round(0),

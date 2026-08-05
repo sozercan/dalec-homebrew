@@ -26,7 +26,7 @@ func TestConvertCatalogPrebuiltDerivationV2CopiesEverySignedField(t *testing.T) 
 			SHA256:    digest("7"), Size: 123,
 		},
 		RecipeDigest:  digest("8"),
-		DerivedBottle: catalog.PrebuiltDerivedBottleRelation{Tag: "x86_64_linux", Filename: "a365--0.3.3.x86_64_linux.bottle.tar.gz", SHA256: digest("9"), Size: 13, Verification: catalog.BottleVerification{PolicyVersion: resolution.BottleVerificationPolicyV1, InventoryDigest: digest("a"), EntryCount: 2, ExpandedSize: 14}, FormulaSourceDigest: digest("7")},
+		DerivedBottle: catalog.PrebuiltDerivedBottleRelation{Tag: "x86_64_linux", Filename: "a365--0.3.3.x86_64_linux.bottle.tar.gz", SHA256: digest("9"), Size: 13, Verification: catalog.BottleVerification{PolicyVersion: resolution.BottleVerificationPolicyV1, InventoryDigest: "sha256:" + strings.Repeat("a", 64), EntryCount: 2, ExpandedSize: 14}, FormulaSourceDigest: digest("7")},
 	}
 	want := &resolution.PrebuiltDerivationV2{
 		PolicyVersion: input.PolicyVersion, PolicyDigest: input.PolicyDigest,
@@ -50,7 +50,7 @@ func TestConvertCatalogPrebuiltDerivationV2CopiesEverySignedField(t *testing.T) 
 
 func TestConvertCatalogNodeV2UsesDedicatedPrebuiltWaiver(t *testing.T) {
 	node := catalog.Node{ID: "sozercan/repo/a365", Tap: "sozercan/repo", Name: "a365", HomebrewFullName: "sozercan/repo/a365", FormulaVersion: "0.3.3", PkgVersion: "0.3.3"}
-	artifact := catalog.BottleArtifact{ID: node.ID, PrebuiltDerivation: &catalog.PrebuiltDerivation{}, Provenance: catalog.Provenance{Waiver: &catalog.ProvenanceWaiver{Policy: catalog.PrebuiltProvenanceWaiver}}}
+	artifact := catalog.BottleArtifact{ID: node.ID, PrebuiltDerivation: &catalog.PrebuiltDerivation{}, Transport: catalog.Transport{Local: &catalog.LocalTransport{PolicyVersion: catalog.BuildLocalArtifactPolicyVersion, SHA256: "sha256:" + strings.Repeat("a", 64), Size: 1, Filename: "a365.tgz"}}, Provenance: catalog.Provenance{Waiver: &catalog.ProvenanceWaiver{Policy: catalog.PrebuiltProvenanceWaiver}}}
 	got, err := convertCatalogNodeV2(node, artifact, map[catalog.FormulaID]catalog.Node{node.ID: node})
 	if err != nil {
 		t.Fatal(err)
@@ -60,5 +60,8 @@ func TestConvertCatalogNodeV2UsesDedicatedPrebuiltWaiver(t *testing.T) {
 	}
 	if got.Bottle.PrebuiltDerivation == nil {
 		t.Fatal("prebuilt derivation was dropped")
+	}
+	if got.Bottle.Transport.Local == nil || got.Bottle.Transport.Local.PolicyVersion != catalog.BuildLocalArtifactPolicyVersion {
+		t.Fatalf("build-local transport was dropped: %+v", got.Bottle.Transport)
 	}
 }
