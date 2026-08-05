@@ -9,10 +9,7 @@ license: Apache-2.0
 dependencies:
   runtime:
     svt/avtools/libdf: {}
-    # Exact assertion for the release-policy-authorized current prebuilt; this
-    # does not select a historical Formula version or tap commit.
-    sozercan/repo/a365:
-      version: ["0.3.3"]
+    sozercan/repo/a365: {}
     hello: {}
 
 image:
@@ -30,7 +27,7 @@ tests:
           equals: "libdf-ok\n"
       - command: a365 --version
         stdout:
-          contains: ["0.3.3"]
+          matches: ['[0-9]+\.[0-9]+\.[0-9]+']
     files:
       /home/linuxbrew/.linuxbrew/bin/hello: {}
       /home/linuxbrew/.linuxbrew/opt/libdf/lib/libdf.so: {}

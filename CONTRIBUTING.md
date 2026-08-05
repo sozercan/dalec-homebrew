@@ -131,9 +131,8 @@ signer and key policy, HTTPS service termination, the bottle fetcher, and
 release-bound V2 materializer/frontend images. It then builds
 [`examples/ci-noncore-multi-package.yaml`](examples/ci-noncore-multi-package.yaml)
 from public-tap Formulae plus a core Formula and reruns runtime checks with
-networking disabled. The fixture uses an exact policy-backed version assertion
-for `sozercan/repo/a365` while the catalog service still resolves each tap's
-default branch and records the exact observed commit.
+networking disabled. The catalog service resolves each tap's default branch
+and records the exact observed commit in authenticated evidence.
 
 The script is CI-oriented and requires explicit digest-pinned BuildKit,
 registry, and HTTPS-tunnel image inputs:

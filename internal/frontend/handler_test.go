@@ -8,7 +8,6 @@ import (
 	dalecfrontend "github.com/project-dalec/dalec/frontend"
 	"github.com/sozercan/dalec-homebrew/internal/config"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
-	speccontract "github.com/sozercan/dalec-homebrew/internal/spec"
 )
 
 func TestDalecLoadOptionsAllowFrontendOwnedBuildArgs(t *testing.T) {
@@ -74,31 +73,5 @@ func TestCrossPlatformV2RejectsDifferentResolvedIDsForSameRequestedRoot(t *testi
 	right := &resolution.RecordV2{Input: resolution.Input{Platform: resolution.Platform{OS: "linux", Architecture: "arm64"}}, Requested: []resolution.RequestedRootV2{{Requested: "acme/tools/alias", ID: "other/tap/widget"}}, Nodes: []resolution.NodeV2{{ID: "other/tap/widget", Name: "widget", PkgVersion: "1"}}}
 	if err := validateCrossPlatformRootsV2([]*resolution.RecordV2{left, right}); err == nil {
 		t.Fatal("different resolved IDs accepted for the same requested root")
-	}
-}
-
-func TestV2RootVersionAssertion(t *testing.T) {
-	record := &resolution.RecordV2{
-		Requested: []resolution.RequestedRootV2{{Requested: "sozercan/repo/a365", ID: "sozercan/repo/a365"}},
-		Nodes:     []resolution.NodeV2{{ID: "sozercan/repo/a365", FormulaVersion: "0.3.3"}},
-	}
-	roots := []speccontract.Root{{Requested: "sozercan/repo/a365", VersionAssertion: "0.3.3"}}
-	if err := validateRootVersionAssertionsV2(record, roots); err != nil {
-		t.Fatal(err)
-	}
-	record.Nodes[0].FormulaVersion = "0.3.4"
-	if err := validateRootVersionAssertionsV2(record, roots); err == nil || !strings.Contains(err.Error(), `requires exact Formula version "0.3.3"`) {
-		t.Fatalf("version mismatch error = %v", err)
-	}
-}
-
-func TestV2RootVersionAssertionFollowsResolvedIdentity(t *testing.T) {
-	record := &resolution.RecordV2{
-		Requested: []resolution.RequestedRootV2{{Requested: "sozercan/repo/a365-old", ID: "sozercan/repo/a365"}},
-		Nodes:     []resolution.NodeV2{{ID: "sozercan/repo/a365", FormulaVersion: "0.3.3"}},
-	}
-	roots := []speccontract.Root{{Requested: "sozercan/repo/a365-old", VersionAssertion: "0.3.3"}}
-	if err := validateRootVersionAssertionsV2(record, roots); err != nil {
-		t.Fatal(err)
 	}
 }

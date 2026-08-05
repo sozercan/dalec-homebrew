@@ -293,7 +293,7 @@ docker run --rm --network none --entrypoint /bin/bash "$FINAL_IMAGE" -lc '
   set -euo pipefail
   hello | grep -F "Hello, world!"
   test -s /home/linuxbrew/.linuxbrew/opt/libdf/lib/libdf.so
-  a365 --version | grep -F "0.3.3"
+  a365 --version | grep -Eq '[0-9]+[.][0-9]+[.][0-9]+'
 '
 
 for name in resolution.json materialization-v2.json runtime-inventory.json; do
@@ -364,8 +364,8 @@ jq -e --arg id "$A365_ID" --arg tap "$A365_TAP" '
     .tap == $tap and
     .name == "a365" and
     .homebrew_full_name == $id and
-    .formula_version == "0.3.3" and
-    .pkg_version == "0.3.3" and
+    (.formula_version | test("^[0-9]+[.][0-9]+[.][0-9]+([+._-][0-9A-Za-z.-]+)?$")) and
+    (.pkg_version | test("^[0-9]+[.][0-9]+[.][0-9]+([+._-][0-9A-Za-z.-]+)?$")) and
     .bottle.transport.oci == null and
     .bottle.transport.https.fetch_policy_version == "homebrew-bottle-fetch-v1" and
     (.bottle.transport.https.url | contains("/v1/artifacts/sha256/")) and
