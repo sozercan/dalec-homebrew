@@ -3,10 +3,13 @@ package frontend
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
 	"github.com/sozercan/dalec-homebrew/internal/catalogclient"
+	"github.com/sozercan/dalec-homebrew/internal/catalogresolver"
 	"github.com/sozercan/dalec-homebrew/internal/homebrew/metadata"
 )
 
@@ -58,4 +61,49 @@ func TestResolveNonCoreCatalogsBindsCoreRootsWithExternalRequest(t *testing.T) {
 	if client.request == nil || len(client.request.Targets) != 1 || len(client.request.Targets[0].ExternalRoots) != 1 || len(client.request.Targets[0].CoreRoots) != 1 {
 		t.Fatalf("captured request=%+v", client.request)
 	}
+}
+
+func TestResolveNonCoreCatalogsRecomputesCanonicalRootOrder(t *testing.T) {
+	platform := catalog.Platform{OS: "linux", Architecture: "amd64"}
+	digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	tap := catalog.TapID("acme/tools")
+	formula := func(name string) catalog.Formula {
+		id := catalog.FormulaID("acme/tools/" + name)
+		return catalog.Formula{
+			ID: id, Name: name, HomebrewFullName: string(id), SourcePath: "Formula/" + name + ".rb", SourceDigest: digest, StableVersion: "1.0",
+			Bottle: &catalog.BottleDeclaration{RootURL: "https://github.com/acme/homebrew-tools/releases/download/v1.0", Files: []catalog.BottleFile{{Tag: "x86_64_linux", URL: "https://github.com/acme/homebrew-tools/releases/download/v1.0/" + name + "--1.0.x86_64_linux.bottle.tar.gz", SHA256: digest, Cellar: "/home/linuxbrew/.linuxbrew/Cellar"}}},
+		}
+	}
+	document := &catalog.TapCatalog{
+		SchemaVersion: catalog.TapCatalogSchemaVersion,
+		Tap:           catalog.TapSource{ID: tap, Repository: tap.DefaultGitHubRepository(), Commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", TreeDigest: digest, ArchiveDigest: digest},
+		PublishedAt:   time.Unix(1, 0).UTC(), Sequence: 1, Formulae: []catalog.Formula{formula("a"), formula("b")},
+	}
+	catalogs := map[catalog.TapID]*catalog.TapCatalog{tap: document}
+	resolver, err := catalogresolver.New(emptyCore{}, catalogs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := catalog.FormulaID("acme/tools/a")
+	b := catalog.FormulaID("acme/tools/b")
+	signed, err := resolver.Resolve([]catalog.FormulaID{a, b}, platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &staticCatalogClient{result: &catalogclient.Result{Payload: &catalog.CatalogSetPayload{Results: []catalog.PlatformResult{{Platform: platform, Closure: signed}}}, Catalogs: catalogs}}
+	resolved, err := ResolveNonCoreCatalogs(t.Context(), client, emptyCore{}, []NonCoreTarget{{Platform: platform, ExternalRoots: []catalog.FormulaID{b, a}}}, "0123456789abcdef0123456789abcdef01234567", digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resolved.ByPlatform["linux/amd64"].Closure.InstallOrder; !slices.Equal(got, []catalog.FormulaID{a, b}) {
+		t.Fatalf("install order=%v, want canonical root order", got)
+	}
+}
+
+type staticCatalogClient struct {
+	result *catalogclient.Result
+}
+
+func (client *staticCatalogClient) Resolve(context.Context, *catalog.Request) (*catalogclient.Result, error) {
+	return client.result, nil
 }

@@ -65,6 +65,10 @@ func ResolveNonCoreCatalogs(ctx context.Context, client catalogSetClient, core c
 		return nil, errors.New("catalog service client is required for external roots")
 	}
 	request := &catalog.Request{SchemaVersion: catalog.RequestSchemaVersion, Targets: requestTargets, HomebrewCommit: homebrewCommit, CoreSnapshotDigest: coreSnapshotDigest}
+	canonicalTargets, err := request.NormalizedTargets()
+	if err != nil {
+		return nil, err
+	}
 	result, err := client.Resolve(ctx, request)
 	if err != nil {
 		return nil, err
@@ -84,7 +88,7 @@ func ResolveNonCoreCatalogs(ctx context.Context, client catalogSetClient, core c
 		}
 		byPlatform[key] = signed
 	}
-	for _, target := range requestTargets {
+	for _, target := range canonicalTargets {
 		key := target.Platform.OS + "/" + target.Platform.Architecture
 		signed, ok := byPlatform[key]
 		if !ok {
@@ -105,7 +109,7 @@ func ResolveNonCoreCatalogs(ctx context.Context, client catalogSetClient, core c
 			return nil, fmt.Errorf("catalog service closure mismatch for %s: %w", key, err)
 		}
 	}
-	if len(byPlatform) != len(requestTargets) {
+	if len(byPlatform) != len(canonicalTargets) {
 		return nil, errors.New("catalog service returned an unexpected platform result")
 	}
 	return &NonCoreResolution{Request: request, Payload: result.Payload, Catalogs: result.Catalogs, ByPlatform: byPlatform, Signatures: slices.Clone(result.Signatures), MinimumSequences: cloneCatalogSequenceFloors(result.MinimumSequences), SetPayloadDigest: result.SetPayloadDigest, SetEnvelopeDigest: result.SetEnvelopeDigest}, nil
