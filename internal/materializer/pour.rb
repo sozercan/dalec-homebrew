@@ -12,11 +12,11 @@ require "formulary"
 require "formula_installer"
 
 unless [1, 3, 4].include?(ARGV.length)
-  abort "usage: dalec-homebrew-pour.rb <bottle> OR <formula-id> <staged-formula> <bottle> [--derived-prebuilt]"
+  abort "usage: dalec-homebrew-pour.rb <bottle> OR <formula-id> <staged-formula> <bottle> [derived-prebuilt-v1]"
 end
 
 derived_prebuilt = ARGV.length == 4
-abort "unsupported derived-bottle mode" if derived_prebuilt && ARGV.fetch(3) != "--derived-prebuilt"
+abort "unsupported derived-bottle mode" if derived_prebuilt && ARGV.fetch(3) != "derived-prebuilt-v1"
 
 if ARGV.length == 1
   bottle_path = Pathname(ARGV.fetch(0)).realpath

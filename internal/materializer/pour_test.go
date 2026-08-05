@@ -51,7 +51,7 @@ func TestPourAdapterDerivedPrebuiltSkipsFormulaHooks(t *testing.T) {
 	}
 	source := string(data)
 	for _, want := range []string{
-		`ARGV.fetch(3) != "--derived-prebuilt"`,
+		`ARGV.fetch(3) != "derived-prebuilt-v1"`,
 		"formula.bottle_specification.sha256(",
 		"cellar: :any_skip_relocation",
 		"skip_post_install: derived_prebuilt",

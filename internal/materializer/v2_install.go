@@ -186,7 +186,7 @@ func InstallOneV2(ctx context.Context, cfg InstallOneV2Config) (*InstallDeltaV2,
 	}
 	args := []string{"ruby", pourScriptPath, node.ID.String(), stagedPath, cfg.BottlePath}
 	if node.Bottle.PrebuiltDerivation != nil {
-		args = append(args, "--derived-prebuilt")
+		args = append(args, "derived-prebuilt-v1")
 	}
 	command := Command{Path: filepath.Join(cfg.Prefix, filepath.FromSlash(protectedHomebrewBrew)), Args: args, Env: installEnvV2(cfg.Prefix, cfg.HomebrewConfig), Dir: "/home/linuxbrew", User: cfg.User}
 	if err := cfg.Runner.Run(stepCtx, command); err != nil {
