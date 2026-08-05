@@ -12,7 +12,7 @@ import (
 
 func TestDalecLoadOptionsAllowFrontendOwnedBuildArgs(t *testing.T) {
 	args := make(map[string]string)
-	for _, name := range config.DalecBuildArgs() {
+	for _, name := range config.BuildArgNames() {
 		args[name] = "test-value"
 	}
 	if err := (&dalec.Spec{}).SubstituteArgs(args); err == nil || !strings.Contains(err.Error(), "unknown arg") {
@@ -25,6 +25,11 @@ func TestDalecLoadOptionsAllowFrontendOwnedBuildArgs(t *testing.T) {
 	}
 	if err := (&dalec.Spec{}).SubstituteArgs(args, loadConfig.SubstituteOpts...); err != nil {
 		t.Fatalf("frontend-owned args were rejected: %v", err)
+	}
+
+	args["DALEC_HOMEBREW_UNKNOWN"] = "value"
+	if err := (&dalec.Spec{}).SubstituteArgs(args, loadConfig.SubstituteOpts...); err == nil || !strings.Contains(err.Error(), `unknown arg: "DALEC_HOMEBREW_UNKNOWN"`) {
+		t.Fatalf("unknown frontend arg error = %v", err)
 	}
 }
 

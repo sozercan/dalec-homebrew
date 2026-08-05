@@ -63,6 +63,7 @@ var dalecBuildArgs = []string{
 	"DALEC_HOMEBREW_MIGRATIONS_URL",
 	"DALEC_HOMEBREW_RUBY_VERSION",
 	"DALEC_HOMEBREW_RUNTIME_BASE",
+	"DALEC_SKIP_TESTS",
 	SupportedCatalogPolicyVersionsBuildArg,
 	SupportedFetchPolicyVersionsBuildArg,
 	SupportedProvenancePolicyVersionsBuildArg,
@@ -74,6 +75,12 @@ var dalecBuildArgs = []string{
 // and validates these arguments before Dalec substitutes spec-defined args.
 func DalecBuildArgs() []string {
 	return slices.Clone(dalecBuildArgs)
+}
+
+// BuildArgNames returns the frontend-owned build arguments that Dalec must
+// permit without requiring declarations in the user spec.
+func BuildArgNames() []string {
+	return DalecBuildArgs()
 }
 
 var (

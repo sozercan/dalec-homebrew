@@ -32,7 +32,7 @@ import (
 )
 
 func dalecLoadOptions() []dalecfrontend.LoadOpt {
-	return []dalecfrontend.LoadOpt{dalecfrontend.WithAllowArgs(config.DalecBuildArgs()...)}
+	return []dalecfrontend.LoadOpt{dalecfrontend.WithAllowArgs(config.BuildArgNames()...)}
 }
 
 type preflightPlatform struct {
