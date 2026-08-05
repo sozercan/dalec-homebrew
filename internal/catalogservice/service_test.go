@@ -778,12 +778,12 @@ func TestConcurrentDuplicatePostsLaunchOneGenerator(t *testing.T) {
 	for err := range errorsChannel {
 		t.Error(err)
 	}
-	if calls.Load() != 1 {
-		t.Fatalf("generator calls=%d, want 1", calls.Load())
-	}
 	close(gate)
 	id, _ := OperationID(request)
 	waitOperation(t, service, id, catalog.OperationCompleted)
+	if calls.Load() != 1 {
+		t.Fatalf("generator calls=%d, want 1", calls.Load())
+	}
 }
 
 func TestGenerationAdmissionBoundRejectsDistinctRequestsBeforePersistence(t *testing.T) {
