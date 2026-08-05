@@ -33,6 +33,7 @@ type BuildKitExtractorConfig struct {
 	Address        string
 	ExtractorRef   string
 	HomebrewCommit string
+	TapCommits     map[catalog.TapID]string
 }
 
 // BuildKitExtractor separates the networked public Git source operation from a
@@ -41,6 +42,7 @@ type BuildKitExtractor struct {
 	client         *bkclient.Client
 	extractorRef   string
 	homebrewCommit string
+	tapCommits     map[catalog.TapID]string
 	closeOnce      sync.Once
 	closeErr       error
 }
@@ -55,11 +57,15 @@ func NewBuildKitExtractor(ctx context.Context, cfg BuildKitExtractorConfig) (*Bu
 	if len(cfg.HomebrewCommit) != 40 {
 		return nil, errors.New("release-pinned Homebrew commit is required")
 	}
+	tapCommits, err := copyTapCommits(cfg.TapCommits)
+	if err != nil {
+		return nil, err
+	}
 	client, err := bkclient.New(ctx, cfg.Address)
 	if err != nil {
 		return nil, fmt.Errorf("connect dedicated BuildKit worker: %w", err)
 	}
-	return &BuildKitExtractor{client: client, extractorRef: cfg.ExtractorRef, homebrewCommit: cfg.HomebrewCommit}, nil
+	return &BuildKitExtractor{client: client, extractorRef: cfg.ExtractorRef, homebrewCommit: cfg.HomebrewCommit, tapCommits: tapCommits}, nil
 }
 
 func (e *BuildKitExtractor) Close() error {
@@ -120,10 +126,23 @@ func (e *BuildKitExtractor) Extract(ctx context.Context, tap catalog.TapID) (*ca
 	if err != nil {
 		return nil, fmt.Errorf("decode isolated tap extraction: %w", err)
 	}
-	if extracted.Tap.ID != tap || extracted.Tap.Repository != tap.DefaultGitHubRepository() {
-		return nil, errors.New("isolated tap extraction changed requested identity")
+	if err := e.verifyExtractedTap(tap, extracted); err != nil {
+		return nil, err
 	}
 	return extracted, nil
+}
+
+func (e *BuildKitExtractor) verifyExtractedTap(tap catalog.TapID, extracted *catalogextractor.ExtractedTap) error {
+	if extracted == nil {
+		return errors.New("isolated tap extraction returned no result")
+	}
+	if extracted.Tap.ID != tap || extracted.Tap.Repository != tap.DefaultGitHubRepository() {
+		return errors.New("isolated tap extraction changed requested identity")
+	}
+	if commit, pinned := e.tapCommits[tap]; pinned && extracted.Tap.Commit != commit {
+		return fmt.Errorf("isolated tap extraction commit %q does not match requested pin %q for %s", extracted.Tap.Commit, commit, tap)
+	}
+	return nil
 }
 
 const maxExtractionSolveLogBytes = 1 << 20
@@ -162,10 +181,10 @@ func (e *BuildKitExtractor) extractionState(tap catalog.TapID) (llb.State, error
 	repository := tap.DefaultGitHubRepository()
 	gitURL := repository + ".git"
 	tapRoot := "/home/linuxbrew/.linuxbrew/Homebrew/Library/Taps/" + tap.Owner() + "/homebrew-" + tap.Name()
-	// BuildKit's Git source resolves the default branch HEAD to an exact commit
-	// and fetches it before the exec. Keep .git so the offline extractor can bind
-	// the observed commit and deterministic tree/archive digests.
-	source := llb.Git(gitURL, "", llb.KeepGitDir(), llb.GitSkipSubmodules(), llb.AuthTokenSecret(""), llb.AuthHeaderSecret(""))
+	// BuildKit's Git source resolves an unpinned tap's default branch HEAD, or
+	// fetches the configured exact commit. Keep .git so the offline extractor can
+	// independently bind the observed commit and deterministic tree/archive digests.
+	source := llb.Git(gitURL, e.tapCommits[tap], llb.KeepGitDir(), llb.GitSkipSubmodules(), llb.AuthTokenSecret(""), llb.AuthHeaderSecret(""))
 	worker := llb.Image(e.extractorRef)
 	metadataRun := worker.Run(
 		llb.Args([]string{

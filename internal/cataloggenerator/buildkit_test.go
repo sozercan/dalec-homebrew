@@ -9,6 +9,7 @@ import (
 	bkclient "github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
+	"github.com/sozercan/dalec-homebrew/internal/catalogextractor"
 )
 
 func TestExtractionGraphSeparatesNetworkedGitFromOfflineEvaluation(t *testing.T) {
@@ -33,6 +34,9 @@ func TestExtractionGraphSeparatesNetworkedGitFromOfflineEvaluation(t *testing.T)
 		if source := op.GetSource(); source != nil {
 			if strings.Contains(source.Identifier, "github.com/acme/homebrew-tools.git") {
 				foundGit = true
+				if source.Identifier != "git://github.com/acme/homebrew-tools.git" {
+					t.Fatalf("unpinned Git source identifier=%q", source.Identifier)
+				}
 				if source.Attrs[pb.AttrKeepGitDir] != "true" {
 					t.Fatal("Git source does not retain exact commit metadata")
 				}
@@ -81,6 +85,80 @@ func TestExtractionGraphSeparatesNetworkedGitFromOfflineEvaluation(t *testing.T)
 	}
 	if !foundGit || execCount != 3 || !foundTapMount || !foundSourceMetadataMount || !foundTrustMount || !foundTrustEnv || !foundGitRemoval {
 		t.Fatalf("graph coverage git=%v execs=%d tap_mount=%v source_metadata=%v trust_mount=%v trust_env=%v git_removal=%v", foundGit, execCount, foundTapMount, foundSourceMetadataMount, foundTrustMount, foundTrustEnv, foundGitRemoval)
+	}
+}
+
+func TestExtractionGraphSelectsPinnedTapCommit(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	commit := strings.Repeat("c", 40)
+	tap, _ := catalog.ParseTapID("acme/tools")
+	extractor := &BuildKitExtractor{
+		extractorRef:   "ghcr.io/example/catalog-extractor@" + digest,
+		homebrewCommit: strings.Repeat("b", 40),
+		tapCommits:     map[catalog.TapID]string{tap: commit},
+	}
+	state, err := extractor.extractionState(tap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := state.Marshal(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "git://github.com/acme/homebrew-tools.git#" + commit
+	for _, raw := range definition.Def {
+		var op pb.Op
+		if err := op.Unmarshal(raw); err != nil {
+			t.Fatal(err)
+		}
+		if source := op.GetSource(); source != nil && strings.Contains(source.Identifier, "github.com/acme/homebrew-tools.git") {
+			if source.Identifier != want {
+				t.Fatalf("Git source identifier=%q want=%q", source.Identifier, want)
+			}
+			return
+		}
+	}
+	t.Fatal("pinned Git source not found")
+}
+
+func TestBuildKitExtractorVerifiesPinnedTapCommit(t *testing.T) {
+	tap, _ := catalog.ParseTapID("acme/tools")
+	commit := strings.Repeat("c", 40)
+	extracted := &catalogextractor.ExtractedTap{Tap: catalog.TapSource{ID: tap, Repository: tap.DefaultGitHubRepository(), Commit: commit}}
+	if err := (&BuildKitExtractor{}).verifyExtractedTap(tap, extracted); err != nil {
+		t.Fatalf("unpinned verification failed: %v", err)
+	}
+	extractor := &BuildKitExtractor{tapCommits: map[catalog.TapID]string{tap: commit}}
+	if err := extractor.verifyExtractedTap(tap, extracted); err != nil {
+		t.Fatalf("matching pin verification failed: %v", err)
+	}
+	extracted.Tap.Commit = strings.Repeat("d", 40)
+	if err := extractor.verifyExtractedTap(tap, extracted); err == nil || !strings.Contains(err.Error(), "does not match requested pin") {
+		t.Fatalf("mismatched pin error=%v", err)
+	}
+}
+
+func TestNewBuildKitExtractorCopiesTapCommits(t *testing.T) {
+	tap, _ := catalog.ParseTapID("acme/tools")
+	commit := strings.Repeat("c", 40)
+	pins := map[catalog.TapID]string{tap: commit}
+	extractor, err := NewBuildKitExtractor(context.Background(), BuildKitExtractorConfig{
+		Address:        "unix:///definitely-missing-buildkit.sock",
+		ExtractorRef:   "ghcr.io/example/catalog-extractor@sha256:" + strings.Repeat("a", 64),
+		HomebrewCommit: strings.Repeat("b", 40),
+		TapCommits:     pins,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := extractor.Close(); err != nil {
+			t.Errorf("close extractor: %v", err)
+		}
+	})
+	pins[tap] = strings.Repeat("d", 40)
+	if got := extractor.tapCommits[tap]; got != commit {
+		t.Fatalf("copied pin=%q want=%q", got, commit)
 	}
 }
 

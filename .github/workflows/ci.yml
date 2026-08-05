@@ -22,6 +22,8 @@ env:
   ACTIONLINT_IMAGE: docker.io/rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
   REGISTRY_IMAGE: docker.io/library/registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
   CLOUDFLARED_IMAGE: docker.io/cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+  A365_TAP_COMMIT: 9c84216d0c239c0fabf214ab995bf07960727cab # a365 0.3.3
+  AVTOOLS_TAP_COMMIT: 44ef54859495a94d474483a64308bfafb9f1e4d9 # libdf 0.5.6+d375b2d
 
 jobs:
   go:
@@ -177,4 +179,6 @@ jobs:
           DALEC_HOMEBREW_E2E_IMAGE: dalec-homebrew-noncore-e2e:${{ github.sha }}
           DALEC_HOMEBREW_E2E_SPEC: examples/ci-noncore-multi-package.yaml
           DALEC_HOMEBREW_E2E_PROGRESS: plain
+          DALEC_HOMEBREW_E2E_A365_TAP_COMMIT: ${{ env.A365_TAP_COMMIT }}
+          DALEC_HOMEBREW_E2E_AVTOOLS_TAP_COMMIT: ${{ env.AVTOOLS_TAP_COMMIT }}
         run: ./scripts/noncore-e2e.sh

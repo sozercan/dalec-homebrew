@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
@@ -18,6 +20,7 @@ type ProductionConfig struct {
 	BuildKitAddress      string
 	ExtractorRef         string
 	HomebrewCommit       string
+	TapCommits           map[catalog.TapID]string
 	Metadata             metadata.Config
 	Fetcher              fetcher.Config
 	CatalogServiceOrigin string
@@ -53,7 +56,11 @@ func NewProduction(ctx context.Context, cfg ProductionConfig) (*Generator, error
 	if !validCommit(cfg.HomebrewCommit) {
 		return nil, errors.New("release-pinned Homebrew commit is required")
 	}
-	extractor, err := NewBuildKitExtractor(ctx, BuildKitExtractorConfig{Address: cfg.BuildKitAddress, ExtractorRef: cfg.ExtractorRef, HomebrewCommit: cfg.HomebrewCommit})
+	tapCommits, err := copyTapCommits(cfg.TapCommits)
+	if err != nil {
+		return nil, err
+	}
+	extractor, err := NewBuildKitExtractor(ctx, BuildKitExtractorConfig{Address: cfg.BuildKitAddress, ExtractorRef: cfg.ExtractorRef, HomebrewCommit: cfg.HomebrewCommit, TapCommits: tapCommits})
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +81,7 @@ func NewProduction(ctx context.Context, cfg ProductionConfig) (*Generator, error
 			_ = extractor.Close()
 			return nil, err
 		}
-		cacheRoot := filepath.Join(cfg.CacheDir, cacheKey([]byte(cfg.VerificationIdentity+"\x00"+tapPolicyDigest+"\x00"+cfg.HomebrewCommit)))
+		cacheRoot := filepath.Join(cfg.CacheDir, cacheKey(productionCacheIdentity(cfg.VerificationIdentity, tapPolicyDigest, cfg.HomebrewCommit, tapCommits)))
 		maxAge := cfg.CacheMaxAge
 		if maxAge == 0 {
 			maxAge = time.Hour
@@ -101,6 +108,48 @@ func NewProduction(ctx context.Context, cfg ProductionConfig) (*Generator, error
 		return nil, err
 	}
 	return generator, nil
+}
+
+func copyTapCommits(pins map[catalog.TapID]string) (map[catalog.TapID]string, error) {
+	if len(pins) > catalog.MaxTaps {
+		return nil, fmt.Errorf("tap commit pin count %d exceeds limit %d", len(pins), catalog.MaxTaps)
+	}
+	if len(pins) == 0 {
+		return nil, nil
+	}
+	taps := make([]catalog.TapID, 0, len(pins))
+	for tap := range pins {
+		taps = append(taps, tap)
+	}
+	slices.Sort(taps)
+	copied := make(map[catalog.TapID]string, len(pins))
+	for _, tap := range taps {
+		if err := tap.Validate(); err != nil {
+			return nil, fmt.Errorf("tap commit pin %q: %w", tap, err)
+		}
+		if tap.IsCore() {
+			return nil, errors.New("homebrew/core cannot be pinned as an external tap")
+		}
+		commit := pins[tap]
+		if !validCommit(commit) {
+			return nil, fmt.Errorf("tap commit pin for %s must be a lowercase 40-hex commit", tap)
+		}
+		copied[tap] = commit
+	}
+	return copied, nil
+}
+
+func productionCacheIdentity(verificationIdentity, tapPolicyDigest, homebrewCommit string, tapCommits map[catalog.TapID]string) []byte {
+	return []byte(verificationIdentity + "\x00" + tapPolicyDigest + "\x00" + homebrewCommit + "\x00" + canonicalTapCommitSet(tapCommits))
+}
+
+func canonicalTapCommitSet(pins map[catalog.TapID]string) string {
+	values := make([]string, 0, len(pins))
+	for tap, commit := range pins {
+		values = append(values, string(tap)+"="+commit)
+	}
+	slices.Sort(values)
+	return strings.Join(values, "\n")
 }
 
 func validCommit(value string) bool {

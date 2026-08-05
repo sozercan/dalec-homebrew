@@ -13,6 +13,8 @@ SPEC=${DALEC_HOMEBREW_E2E_SPEC:-examples/ci-noncore-multi-package.yaml}
 PROGRESS=${DALEC_HOMEBREW_E2E_PROGRESS:-plain}
 PLATFORM=${DALEC_HOMEBREW_E2E_PLATFORM:-linux/amd64}
 KEEP_WORK=${DALEC_HOMEBREW_E2E_KEEP_WORK:-0}
+A365_TAP_COMMIT=${DALEC_HOMEBREW_E2E_A365_TAP_COMMIT:-}
+AVTOOLS_TAP_COMMIT=${DALEC_HOMEBREW_E2E_AVTOOLS_TAP_COMMIT:-}
 
 fail_usage() {
   echo "$*" >&2
@@ -25,6 +27,8 @@ done
 [[ -n "$BUILDKIT_IMAGE" ]] || fail_usage "DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE is required"
 [[ -n "$REGISTRY_IMAGE" ]] || fail_usage "DALEC_HOMEBREW_E2E_REGISTRY_IMAGE is required"
 [[ -n "$CLOUDFLARED_IMAGE" ]] || fail_usage "DALEC_HOMEBREW_E2E_CLOUDFLARED_IMAGE is required"
+[[ "$A365_TAP_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail_usage "DALEC_HOMEBREW_E2E_A365_TAP_COMMIT must be a lowercase 40-character commit"
+[[ "$AVTOOLS_TAP_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail_usage "DALEC_HOMEBREW_E2E_AVTOOLS_TAP_COMMIT must be a lowercase 40-character commit"
 [[ "$PLATFORM" == linux/amd64 ]] || fail_usage "only linux/amd64 is supported by the CI non-core E2E"
 [[ "$RUN_ID" =~ ^[0-9A-Za-z][0-9A-Za-z_.-]{0,63}$ ]] || fail_usage "invalid E2E run ID"
 [[ -f "$SPEC" ]] || fail_usage "E2E spec does not exist: $SPEC"
@@ -236,6 +240,8 @@ docker run --detach \
   --service-digest "$SERVICE_DIGEST" \
   --extractor-version e2e \
   --extractor-digest "$EXTRACTOR_DIGEST" \
+  --tap-commit "sozercan/repo=$A365_TAP_COMMIT" \
+  --tap-commit "svt/avtools=$AVTOOLS_TAP_COMMIT" \
   --max-concurrent-generations 1 \
   --max-pending-generations 4 \
   --max-stored-operations 8 >/dev/null
@@ -303,7 +309,7 @@ done
 
 LIBDF_ID=svt/avtools/libdf
 LIBDF_TAP=svt/avtools
-jq -e --arg id "$LIBDF_ID" --arg tap "$LIBDF_TAP" '
+jq -e --arg id "$LIBDF_ID" --arg tap "$LIBDF_TAP" --arg commit "$AVTOOLS_TAP_COMMIT" '
   .schema_version == "dalec-homebrew-resolution/v2" and
   (([.requested[] | select(.requested == $id and .id == $id)] | length) == 1) and
   (([.nodes[] | select(
@@ -311,11 +317,13 @@ jq -e --arg id "$LIBDF_ID" --arg tap "$LIBDF_TAP" '
     .tap == $tap and
     .name == "libdf" and
     .homebrew_full_name == $id and
+    .pkg_version == "0.5.6+d375b2d" and
     .bottle.transport.oci == null and
     .bottle.transport.https.fetch_policy_version == "homebrew-bottle-fetch-v1"
   )] | length) == 1) and
   (([.metadata_sources[] | select(
     .tap == $tap and
+    .commit == $commit and
     .catalog_policy_version == "tap-catalog-v1" and
     .signer.algorithm == "PS512" and
     .signer.verified == true
@@ -348,7 +356,7 @@ jq -e --arg id "$LIBDF_ID" '
 
 A365_ID=sozercan/repo/a365
 A365_TAP=sozercan/repo
-jq -e --arg id "$A365_ID" --arg tap "$A365_TAP" '
+jq -e --arg id "$A365_ID" --arg tap "$A365_TAP" --arg commit "$A365_TAP_COMMIT" '
   .schema_version == "dalec-homebrew-resolution/v2" and
   (([.requested[] | select(.requested == $id and .id == $id)] | length) == 1) and
   (([.nodes[] | select(
@@ -366,11 +374,13 @@ jq -e --arg id "$A365_ID" --arg tap "$A365_TAP" '
     .bottle.prebuilt_derivation.source.sha256 == "sha256:71461c31e350cabf4e718a5e1331b39a395a6dc9183bb3ea5922f0fac67404ce" and
     .bottle.prebuilt_derivation.payload.source_path == "a365" and
     .bottle.prebuilt_derivation.payload.destination_path == "bin/a365" and
+    .bottle.prebuilt_derivation.formula_source.transport.tap.commit == $commit and
     .bottle.prebuilt_derivation.elf.machine == "x86_64" and
     .provenance.waiver.policy == "prebuilt-archive-tap-catalog-jws-and-verified-checksum-v1"
   )] | length) == 1) and
   (([.metadata_sources[] | select(
     .tap == $tap and
+    .commit == $commit and
     .catalog_policy_version == "tap-catalog-v1" and
     .signer.algorithm == "PS512" and
     .signer.verified == true
