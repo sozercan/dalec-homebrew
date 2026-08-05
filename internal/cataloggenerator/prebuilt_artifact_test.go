@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"path"
 	"slices"
 	"strings"
 	"testing"
@@ -221,7 +222,7 @@ func fakePrebuiltDeriver(t *testing.T) prebuiltDeriver {
 			Source:     prebuilt.SourceEvidence{SHA256: profile.Source.SHA256, Size: profile.Source.Size, ExpandedSHA256: digestString([]byte("expanded")), ExpandedSize: 100, InventorySHA256: digestString([]byte("inventory")), Inventory: []prebuilt.InventoryEntry{{Path: "LICENSE", Mode: 0o644, Size: 1, SHA256: digestString([]byte("l"))}, {Path: "README.md", Mode: 0o644, Size: 1, SHA256: digestString([]byte("r"))}, {Path: profile.PayloadPath, Mode: 0o755, Size: 15, SHA256: payloadDigest}}, PayloadPath: profile.PayloadPath, PayloadSHA256: payloadDigest, PayloadSize: 15},
 			Formula:    prebuilt.FormulaEvidence{SHA256: profile.FormulaSHA256, Size: int64(len(formula))},
 			ELF:        prebuilt.ELFEvidence{Class: "ELFCLASS64", Machine: "EM_X86_64", ImportedLibraries: []string{}},
-			Derivation: prebuilt.DerivationEvidence{PolicyVersion: prebuilt.DerivationPolicyVersion, Receiptless: true, ExecutablePath: "bin/" + profile.Name, SHA256: digestString(bottleBytes), Size: int64(len(bottleBytes))},
+			Derivation: prebuilt.DerivationEvidence{PolicyVersion: prebuilt.DerivationPolicyVersion, Receiptless: true, ExecutablePath: path.Join(profile.Name, profile.PkgVersion, "bin", profile.Name), SHA256: digestString(bottleBytes), Size: int64(len(bottleBytes))},
 		}}, nil
 	}
 }

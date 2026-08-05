@@ -377,7 +377,8 @@ func validateDerivedResult(result *prebuilt.Result, selected selectedPrebuilt, f
 	if evidence.Formula.SHA256 != selected.profile.FormulaSHA256 || evidence.Formula.Size != int64(len(formulaSource)) {
 		return errors.New("prebuilt derivation Formula evidence does not match authenticated source")
 	}
-	if evidence.Source.PayloadPath != selected.policy.Install.Source || evidence.Derivation.ExecutablePath != selected.policy.Install.Destination || !evidence.Derivation.Receiptless {
+	expectedExecutable := path.Join(selected.profile.Name, selected.profile.PkgVersion, selected.policy.Install.Destination)
+	if evidence.Source.PayloadPath != selected.policy.Install.Source || evidence.Derivation.ExecutablePath != expectedExecutable || !evidence.Derivation.Receiptless {
 		return errors.New("prebuilt derivation output does not match the fixed installation policy")
 	}
 	if evidence.Derivation.SHA256 != sha256Digest(result.Bottle) || evidence.Derivation.Size != int64(len(result.Bottle)) {
