@@ -27,7 +27,7 @@ func CompareClosure(signed, recomputed ClosureResult) error {
 	}
 	signedDigest, _ := ClosureResultDigest(signed)
 	recomputedDigest, _ := ClosureResultDigest(recomputed)
-	return fmt.Errorf("closure mismatch: signed %s, recomputed %s", signedDigest, recomputedDigest)
+	return fmt.Errorf("closure mismatch: signed %s, recomputed %s; signed_json=%s; recomputed_json=%s", signedDigest, recomputedDigest, signedBytes, recomputedBytes)
 }
 
 // ComparePlatformResult verifies a recomputed platform closure and artifact set
