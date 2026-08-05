@@ -59,7 +59,7 @@ func validV2(t *testing.T) *Manifest {
 	m.ExecutableRuntimePolicyDigest = runtimeDigest
 	m.SupportedCatalogPolicyVersions = []string{CatalogPolicyVersionV1}
 	m.SupportedFetchPolicyVersions = []string{BottleFetchPolicyVersionV1}
-	m.SupportedProvenancePolicyVersions = []string{ChecksumWaiverPolicyVersionV1, CoreWaiverPolicyVersionV1, HTTPSSourceWaiverPolicyVersionV1, SigstoreProvenancePolicyVersionV1}
+	m.SupportedProvenancePolicyVersions = []string{ChecksumWaiverPolicyVersionV1, CoreWaiverPolicyVersionV1, HTTPSSourceWaiverPolicyVersionV1, PrebuiltWaiverPolicyVersionV1, SigstoreProvenancePolicyVersionV1}
 	return m
 }
 

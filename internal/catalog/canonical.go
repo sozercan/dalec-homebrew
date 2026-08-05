@@ -106,6 +106,40 @@ func CatalogSetPayloadDigest(payload *CatalogSetPayload) (digest.Digest, error) 
 	return digest.FromBytes(data), nil
 }
 
+// CanonicalPrebuiltArchiveDeclaration returns stable JSON for policy and
+// catalog construction without mutating declaration.
+func CanonicalPrebuiltArchiveDeclaration(declaration PrebuiltArchiveDeclaration) ([]byte, error) {
+	if err := ValidatePrebuiltArchiveDeclaration(declaration); err != nil {
+		return nil, fmt.Errorf("validate prebuilt archive declaration: %w", err)
+	}
+	clone, err := cloneValue(declaration)
+	if err != nil {
+		return nil, fmt.Errorf("clone prebuilt archive declaration: %w", err)
+	}
+	canonicalizePrebuiltArchiveDeclaration(&clone)
+	if err := ValidatePrebuiltArchiveDeclaration(clone); err != nil {
+		return nil, fmt.Errorf("validate canonical prebuilt archive declaration: %w", err)
+	}
+	return encodeCanonical(clone)
+}
+
+// CanonicalPrebuiltDerivation returns stable JSON for signed derivation
+// evidence without mutating derivation.
+func CanonicalPrebuiltDerivation(derivation PrebuiltDerivation) ([]byte, error) {
+	if err := ValidatePrebuiltDerivation(derivation); err != nil {
+		return nil, fmt.Errorf("validate prebuilt derivation: %w", err)
+	}
+	clone, err := cloneValue(derivation)
+	if err != nil {
+		return nil, fmt.Errorf("clone prebuilt derivation: %w", err)
+	}
+	canonicalizePrebuiltDerivation(&clone)
+	if err := ValidatePrebuiltDerivation(clone); err != nil {
+		return nil, fmt.Errorf("validate canonical prebuilt derivation: %w", err)
+	}
+	return encodeCanonical(clone)
+}
+
 // CanonicalClosureResult returns stable JSON for independent closure
 // comparison. InstallOrder remains ordered because it is materialization input.
 func CanonicalClosureResult(closure ClosureResult) ([]byte, error) {
@@ -290,6 +324,9 @@ func canonicalizeFormula(formula *Formula) {
 			return strings.Compare(left.Tag, right.Tag)
 		})
 	}
+	if formula.PrebuiltArchive != nil {
+		canonicalizePrebuiltArchiveDeclaration(formula.PrebuiltArchive)
+	}
 	if len(formula.Dependencies) == 0 {
 		formula.Dependencies = nil
 	}
@@ -398,6 +435,23 @@ func canonicalizeArtifact(artifact *BottleArtifact) {
 			}
 		}
 	}
+	if artifact.PrebuiltDerivation != nil {
+		canonicalizePrebuiltDerivation(artifact.PrebuiltDerivation)
+	}
+}
+
+func canonicalizePrebuiltArchiveDeclaration(declaration *PrebuiltArchiveDeclaration) {
+	slices.SortFunc(declaration.Files, func(left, right PrebuiltArchiveFile) int {
+		return strings.Compare(left.Tag, right.Tag)
+	})
+}
+
+func canonicalizePrebuiltDerivation(derivation *PrebuiltDerivation) {
+	if derivation.Source.Transport.HTTPS != nil {
+		slices.Sort(derivation.Source.Transport.HTTPS.AllowedRedirectHosts)
+	}
+	slices.Sort(derivation.ELF.NeededLibraries)
+	slices.Sort(derivation.ELF.RPaths)
 }
 
 func comparePlatform(left, right Platform) int {

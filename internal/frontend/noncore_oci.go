@@ -72,6 +72,23 @@ func ResolveNonCoreOCIArtifacts(ctx context.Context, client *hboci.Client, core 
 		if !ok {
 			return catalog.PlatformResult{}, fmt.Errorf("Formula %s is absent from fetched catalogs", artifact.ID)
 		}
+		if artifact.PrebuiltDerivation != nil {
+			if entry.formula.PrebuiltArchive == nil {
+				return catalog.PlatformResult{}, fmt.Errorf("Formula %s has no authenticated prebuilt archive declaration", artifact.ID)
+			}
+			if entry.formula.Bottle != nil {
+				if _, native := selectCatalogBottleFile(entry.formula.Bottle.Files, bottleTagForCatalogPlatform(result.Platform)); native {
+					return catalog.PlatformResult{}, fmt.Errorf("prebuilt artifact for %s cannot replace an available native bottle", artifact.ID)
+				}
+			}
+			if artifact.Transport.HTTPS == nil || artifact.Transport.OCI != nil {
+				return catalog.PlatformResult{}, fmt.Errorf("prebuilt artifact for %s must use service-hosted HTTPS transport", artifact.ID)
+			}
+			if err := catalog.ValidatePrebuiltDerivationSource(*entry.formula.PrebuiltArchive, artifact.Tag, *artifact.PrebuiltDerivation); err != nil {
+				return catalog.PlatformResult{}, fmt.Errorf("independently bind prebuilt source for %s: %w", artifact.ID, err)
+			}
+			continue
+		}
 		if entry.formula.Bottle == nil {
 			return catalog.PlatformResult{}, fmt.Errorf("Formula %s has no bottle declaration", artifact.ID)
 		}

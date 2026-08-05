@@ -23,6 +23,10 @@ func TestRubyExtractorKeepsRuntimeDependenciesAndSourceContained(t *testing.T) {
 		`Homebrew::SimulateSystem.with(os: tag.system, arch: simulated_arch)`,
 		`next unless SUPPORTED_TAGS.include?(tag_name)`,
 		`cellar = ENV.fetch("HOMEBREW_CELLAR") if cellar == "/Cellar"`,
+		`hash.fetch("urls", {}).fetch("stable", nil)`,
+		`stable.fetch("checksum", "").to_s`,
+		`return "tar+gzip" if uri.path.end_with?(".tar.gz", ".tgz")`,
+		`"stable_source" => stable_source_from_hash(hash)`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("Ruby extractor is missing %q", required)

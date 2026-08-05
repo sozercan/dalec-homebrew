@@ -52,6 +52,9 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 		".signer.algorithm == \"PS512\"",
 		".artifact_id == $id",
 		".formula_id == $id",
+		"A365_ID=sozercan/repo/a365",
+		".bottle.prebuilt_derivation.policy_version == \"prebuilt-derived-bottle-v1\"",
+		"endswith(\"/bin/a365\")",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("non-core E2E script is missing %q", want)
@@ -71,6 +74,7 @@ func TestNonCoreE2ESpecContainsQualifiedAndCoreRoots(t *testing.T) {
 	text := string(spec)
 	for _, want := range []string{
 		"svt/avtools/libdf: {}",
+		"sozercan/repo/a365: {}",
 		"hello: {}",
 		"dalec-homebrew-resolution/v2",
 	} {

@@ -8,5 +8,82 @@
   "max_non_core_taps": 16,
   "sigstore_trusted_root_digest": "sha256:4364d7724c04cc912ce2a6c45ed2610e8d8d1c4dc857fb500292738d4d9c8d2c",
   "sigstore_issuer": "https://token.actions.githubusercontent.com",
-  "sigstore_identity_template": "^https://github.com/<owner>/homebrew-<tap>/"
+  "sigstore_identity_template": "^https://github.com/<owner>/homebrew-<tap>/",
+  "prebuilt_archives": [
+    {
+      "formula_id": "sozercan/repo/a365",
+      "policy_version": "prebuilt-derived-bottle-v1",
+      "version": "0.3.3",
+      "formula_source_digest": "sha256:d6c00086e77905de6f2c93c59ff2b560101925dc77a1f3094468fd154a89e997",
+      "license": "MIT",
+      "root_only": true,
+      "require_no_bottle": true,
+      "dependencies": [],
+      "platforms": [
+        {
+          "platform": "linux/amd64",
+          "url": "https://github.com/sozercan/a365cli/releases/download/v0.3.3/a365_0.3.3_linux_amd64.tar.gz",
+          "sha256": "sha256:71461c31e350cabf4e718a5e1331b39a395a6dc9183bb3ea5922f0fac67404ce"
+        },
+        {
+          "platform": "linux/arm64",
+          "url": "https://github.com/sozercan/a365cli/releases/download/v0.3.3/a365_0.3.3_linux_arm64.tar.gz",
+          "sha256": "sha256:fe7e6b2efa8bab9b804e401e3664dcb6adbb4e2cdcf7d2049b05e645f3eccc83"
+        }
+      ],
+      "archive": {
+        "format": "tar+gzip",
+        "single_gzip_member": true,
+        "max_compressed_bytes": 33554432,
+        "max_expanded_bytes": 67108864,
+        "max_expansion_ratio": 8,
+        "max_entries": 3,
+        "max_file_bytes": 16777216,
+        "max_depth": 1,
+        "max_path_bytes": 255,
+        "members": [
+          {
+            "path": "LICENSE",
+            "type": "regular",
+            "mode": "0644"
+          },
+          {
+            "path": "README.md",
+            "type": "regular",
+            "mode": "0644"
+          },
+          {
+            "path": "a365",
+            "type": "regular",
+            "mode": "0755"
+          }
+        ]
+      },
+      "install": {
+        "source": "a365",
+        "destination": "bin/a365",
+        "mode": "0555"
+      },
+      "binary": {
+        "format": "elf64",
+        "machines": [
+          {
+            "platform": "linux/amd64",
+            "machine": "x86_64"
+          },
+          {
+            "platform": "linux/arm64",
+            "machine": "aarch64"
+          }
+        ],
+        "linkage": "static",
+        "interpreter": "forbidden",
+        "needed_libraries": [],
+        "rpath": "forbidden",
+        "writable_executable_segments": "forbidden",
+        "go_module": "github.com/sozercan/a365cli",
+        "cgo_enabled": false
+      }
+    }
+  ]
 }

@@ -119,6 +119,9 @@ func InstallOneV2(ctx context.Context, cfg InstallOneV2Config) (*InstallDeltaV2,
 	if verifyErr != nil || closeErr != nil {
 		return nil, errors.Join(verifyErr, closeErr)
 	}
+	if err := verifyPrebuiltDerivedBottleV2(node, verified); err != nil {
+		return nil, err
+	}
 	stagedRelative, err := FormulaTapPathV2(node)
 	if err != nil {
 		return nil, err
@@ -181,7 +184,11 @@ func InstallOneV2(ctx context.Context, cfg InstallOneV2Config) (*InstallDeltaV2,
 			return nil, err
 		}
 	}
-	command := Command{Path: filepath.Join(cfg.Prefix, filepath.FromSlash(protectedHomebrewBrew)), Args: []string{"ruby", pourScriptPath, node.ID.String(), stagedPath, cfg.BottlePath}, Env: installEnvV2(cfg.Prefix, cfg.HomebrewConfig), Dir: "/home/linuxbrew", User: cfg.User}
+	args := []string{"ruby", pourScriptPath, node.ID.String(), stagedPath, cfg.BottlePath}
+	if node.Bottle.PrebuiltDerivation != nil {
+		args = append(args, "--derived-prebuilt")
+	}
+	command := Command{Path: filepath.Join(cfg.Prefix, filepath.FromSlash(protectedHomebrewBrew)), Args: args, Env: installEnvV2(cfg.Prefix, cfg.HomebrewConfig), Dir: "/home/linuxbrew", User: cfg.User}
 	if err := cfg.Runner.Run(stepCtx, command); err != nil {
 		return nil, fmt.Errorf("offline install %q: %w", cfg.ID, err)
 	}

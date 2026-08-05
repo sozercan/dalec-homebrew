@@ -42,18 +42,27 @@ type ExtractedFormula struct {
 }
 
 type ExtractedPlatformFormula struct {
-	Tag               string           `json:"tag"`
-	Name              string           `json:"name"`
-	HomebrewFullName  string           `json:"homebrew_full_name"`
-	StableVersion     string           `json:"stable_version"`
-	Revision          int              `json:"revision"`
-	VersionScheme     int              `json:"version_scheme"`
-	Disabled          bool             `json:"disabled,omitempty"`
-	KegOnly           bool             `json:"keg_only,omitempty"`
-	License           string           `json:"license,omitempty"`
-	Dependencies      []string         `json:"dependencies,omitempty"`
-	VersionedFormulae []string         `json:"versioned_formulae,omitempty"`
-	Bottle            *ExtractedBottle `json:"bottle,omitempty"`
+	Tag               string                 `json:"tag"`
+	Name              string                 `json:"name"`
+	HomebrewFullName  string                 `json:"homebrew_full_name"`
+	StableVersion     string                 `json:"stable_version"`
+	Revision          int                    `json:"revision"`
+	VersionScheme     int                    `json:"version_scheme"`
+	Disabled          bool                   `json:"disabled,omitempty"`
+	KegOnly           bool                   `json:"keg_only,omitempty"`
+	License           string                 `json:"license,omitempty"`
+	Dependencies      []string               `json:"dependencies,omitempty"`
+	VersionedFormulae []string               `json:"versioned_formulae,omitempty"`
+	Bottle            *ExtractedBottle       `json:"bottle,omitempty"`
+	StableSource      *ExtractedStableSource `json:"stable_source,omitempty"`
+}
+
+// ExtractedStableSource is the platform-selected, checksummed stable archive
+// reported by Formula#to_hash. Policy authorization happens after extraction.
+type ExtractedStableSource struct {
+	URL           string `json:"url"`
+	SHA256        string `json:"sha256"`
+	ArchiveFormat string `json:"archive_format"`
 }
 
 type ExtractedBottle struct {
@@ -223,6 +232,10 @@ func convertFormula(raw ExtractedFormula, owner catalog.TapID, localNames map[st
 	if err != nil {
 		return catalog.Formula{}, fmt.Errorf("Formula %s bottle: %w", id, err)
 	}
+	prebuiltArchive, err := mergePrebuiltArchiveDeclarations(platforms, bottle)
+	if err != nil {
+		return catalog.Formula{}, fmt.Errorf("Formula %s prebuilt archive: %w", id, err)
+	}
 	slices.Sort(base.VersionedFormulae)
 	if okX86 && okARM {
 		slices.Sort(x86.VersionedFormulae)
@@ -240,7 +253,7 @@ func convertFormula(raw ExtractedFormula, owner catalog.TapID, localNames map[st
 		versioned = append(versioned, value)
 	}
 
-	formula := catalog.Formula{ID: id, Name: base.Name, HomebrewFullName: base.HomebrewFullName, SourcePath: raw.SourcePath, SourceDigest: raw.SourceDigest, StableVersion: base.StableVersion, Revision: base.Revision, VersionScheme: base.VersionScheme, Disabled: base.Disabled, KegOnly: base.KegOnly, License: base.License, Dependencies: baseDependencies, VersionedFormulae: versioned, Bottle: bottle}
+	formula := catalog.Formula{ID: id, Name: base.Name, HomebrewFullName: base.HomebrewFullName, SourcePath: raw.SourcePath, SourceDigest: raw.SourceDigest, StableVersion: base.StableVersion, Revision: base.Revision, VersionScheme: base.VersionScheme, Disabled: base.Disabled, KegOnly: base.KegOnly, License: base.License, Dependencies: baseDependencies, VersionedFormulae: versioned, Bottle: bottle, PrebuiltArchive: prebuiltArchive}
 	if !okX86 {
 		formula.Variations = append(formula.Variations, catalog.FormulaVariation{Tag: "x86_64_linux", Unavailable: true})
 	}
@@ -289,6 +302,38 @@ func mergeBottleDeclarations(left, right *ExtractedBottle) (*catalog.BottleDecla
 	}
 	slices.SortFunc(values, func(a, b catalog.BottleFile) int { return strings.Compare(a.Tag, b.Tag) })
 	return &catalog.BottleDeclaration{RootURL: left.RootURL, Rebuild: left.Rebuild, Files: values}, nil
+}
+
+func mergePrebuiltArchiveDeclarations(platforms map[string]ExtractedPlatformFormula, bottle *catalog.BottleDeclaration) (*catalog.PrebuiltArchiveDeclaration, error) {
+	bottleTags := map[string]struct{}{}
+	if bottle != nil {
+		for _, file := range bottle.Files {
+			bottleTags[file.Tag] = struct{}{}
+		}
+	}
+	files := make([]catalog.PrebuiltArchiveFile, 0, len(platforms))
+	for _, tag := range []string{"x86_64_linux", "arm64_linux"} {
+		platform, ok := platforms[tag]
+		_, native := bottleTags[tag]
+		_, universal := bottleTags["all"]
+		if !ok || platform.StableSource == nil || native || universal {
+			continue
+		}
+		files = append(files, catalog.PrebuiltArchiveFile{
+			Tag:    tag,
+			URL:    platform.StableSource.URL,
+			SHA256: platform.StableSource.SHA256,
+			Format: platform.StableSource.ArchiveFormat,
+		})
+	}
+	if len(files) == 0 {
+		return nil, nil
+	}
+	declaration := &catalog.PrebuiltArchiveDeclaration{Files: files}
+	if err := catalog.ValidatePrebuiltArchiveDeclaration(*declaration); err != nil {
+		return nil, err
+	}
+	return declaration, nil
 }
 
 func normalizeDependencies(raw []string, owner catalog.TapID, localNames map[string]struct{}, core CoreCatalog) ([]catalog.Dependency, error) {

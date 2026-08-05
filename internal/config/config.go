@@ -26,6 +26,7 @@ const (
 	SigstoreProvenancePolicyVersionV1 = "sigstore-in-toto-v1"
 	ChecksumWaiverPolicyVersionV1     = policyv2.NonCoreProvenanceWaiver
 	HTTPSSourceWaiverPolicyVersionV1  = catalog.HTTPSBottleSourceWaiver
+	PrebuiltWaiverPolicyVersionV1     = resolution.PrebuiltProvenanceWaiverPolicyV1
 	CoreWaiverPolicyVersionV1         = DefaultAttestationWaiver
 
 	BottleFetcherBuildArg                     = "DALEC_HOMEBREW_BOTTLE_FETCHER"
@@ -375,7 +376,7 @@ func validateNonCoreBindings(cfg Config) error {
 	}{
 		{name: "catalog", values: cfg.SupportedCatalogPolicyVersions, want: []string{CatalogPolicyVersionV1}},
 		{name: "fetch", values: cfg.SupportedFetchPolicyVersions, want: []string{BottleFetchPolicyVersionV1}},
-		{name: "provenance", values: cfg.SupportedProvenancePolicyVersions, want: []string{SigstoreProvenancePolicyVersionV1, ChecksumWaiverPolicyVersionV1, HTTPSSourceWaiverPolicyVersionV1, CoreWaiverPolicyVersionV1}},
+		{name: "provenance", values: cfg.SupportedProvenancePolicyVersions, want: []string{SigstoreProvenancePolicyVersionV1, ChecksumWaiverPolicyVersionV1, HTTPSSourceWaiverPolicyVersionV1, PrebuiltWaiverPolicyVersionV1, CoreWaiverPolicyVersionV1}},
 	} {
 		if err := validateExactPolicyVersions(field.name, field.values, field.want); err != nil {
 			errs = append(errs, err)

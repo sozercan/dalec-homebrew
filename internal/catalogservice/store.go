@@ -15,6 +15,7 @@ import (
 
 	digest "github.com/opencontainers/go-digest"
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
+	"github.com/sozercan/dalec-homebrew/internal/catalogartifactstore"
 	"golang.org/x/sys/unix"
 )
 
@@ -25,6 +26,7 @@ const (
 
 type store struct {
 	root       string
+	artifacts  *catalogartifactstore.Store
 	catalogs   string
 	operations string
 	requests   string
@@ -41,7 +43,11 @@ type sequenceState struct {
 	SourceIdentity string        `json:"source_identity"`
 }
 
-func openStore(root string) (_ *store, retErr error) {
+func openStore(root string) (*store, error) {
+	return openStoreWithArtifacts(root, nil)
+}
+
+func openStoreWithArtifacts(root string, artifactStore *catalogartifactstore.Store) (_ *store, retErr error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("catalog store directory is empty")
 	}
@@ -82,6 +88,16 @@ func openStore(root string) (_ *store, retErr error) {
 			return nil, err
 		}
 	}
+
+	if artifactStore == nil {
+		artifactStore, err = catalogartifactstore.New(absolute)
+		if err != nil {
+			return nil, fmt.Errorf("open catalog artifact store: %w", err)
+		}
+	} else if artifactStore.Root() != absolute {
+		return nil, errors.New("catalog artifact store must be rooted below the catalog store directory")
+	}
+	s.artifacts = artifactStore
 
 	lockPath := filepath.Join(absolute, ".writer.lock")
 	if entry, err := os.Lstat(lockPath); err == nil && (!entry.Mode().IsRegular() || entry.Mode()&os.ModeSymlink != 0) {

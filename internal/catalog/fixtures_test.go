@@ -293,3 +293,118 @@ func cloneForTest[T any](t *testing.T, value T) T {
 	}
 	return clone
 }
+
+func validPrebuiltArchiveDeclaration() PrebuiltArchiveDeclaration {
+	return PrebuiltArchiveDeclaration{Files: []PrebuiltArchiveFile{
+		{
+			Tag:    "x86_64_linux",
+			URL:    "https://github.com/sozercan/a365cli/releases/download/v0.3.3/a365_0.3.3_linux_amd64.tar.gz",
+			SHA256: testDigest('9'),
+			Format: PrebuiltArchiveFormatTarGzip,
+		},
+		{
+			Tag:    "arm64_linux",
+			URL:    "https://github.com/sozercan/a365cli/releases/download/v0.3.3/a365_0.3.3_linux_arm64.tar.gz",
+			SHA256: testDigest('a'),
+			Format: PrebuiltArchiveFormatTarGzip,
+		},
+	}}
+}
+
+func validPrebuiltArtifact() BottleArtifact {
+	platform := Platform{OS: "linux", Architecture: "amd64"}
+	formulaDigest := testDigest('2')
+	verification := BottleVerification{
+		PolicyVersion:   BottleVerificationPolicy,
+		InventoryDigest: testDigest('4'),
+		EntryCount:      3,
+		ExpandedSize:    12_000_000,
+	}
+	derivedFilename := "a365--0.3.3.x86_64_linux.bottle.tar.gz"
+	derivedDigest := testDigest('8')
+	derivedSize := int64(8_000_000)
+	return BottleArtifact{
+		ID:                         "sozercan/repo/a365",
+		Platform:                   platform,
+		Tag:                        "x86_64_linux",
+		Filename:                   derivedFilename,
+		SHA256:                     derivedDigest,
+		Size:                       derivedSize,
+		Cellar:                     "/home/linuxbrew/.linuxbrew/Cellar",
+		Tab:                        BottleTab{Receiptless: true, Arch: "x86_64"},
+		CurrentFormulaSourceDigest: formulaDigest,
+		BottleFormulaSourceDigest:  formulaDigest,
+		ExecutablePaths:            []string{"bin/a365"},
+		Transport: Transport{HTTPS: &HTTPSTransport{
+			URL:                  "https://catalog.example.com/v1/artifacts/sha256/" + strings.TrimPrefix(derivedDigest, "sha256:"),
+			ExpectedSize:         derivedSize,
+			SHA256:               derivedDigest,
+			Filename:             derivedFilename,
+			AllowedRedirectHosts: []string{"catalog.example.com"},
+			FetchPolicyVersion:   HTTPSFetchPolicyVersion,
+		}},
+		Verification: verification,
+		Provenance:   Provenance{Waiver: &ProvenanceWaiver{Policy: PrebuiltProvenanceWaiver}},
+		PrebuiltDerivation: &PrebuiltDerivation{
+			PolicyVersion: "single-static-elf-archive-v1",
+			PolicyDigest:  testDigest('5'),
+			Source: PrebuiltSourceArtifact{
+				Filename: "a365_0.3.3_linux_amd64.tar.gz",
+				Size:     7_000_000,
+				SHA256:   testDigest('9'),
+				Format:   PrebuiltArchiveFormatTarGzip,
+				Transport: Transport{HTTPS: &HTTPSTransport{
+					URL:                  "https://github.com/sozercan/a365cli/releases/download/v0.3.3/a365_0.3.3_linux_amd64.tar.gz",
+					ExpectedSize:         7_000_000,
+					SHA256:               testDigest('9'),
+					Filename:             "a365_0.3.3_linux_amd64.tar.gz",
+					AllowedRedirectHosts: []string{"release-assets.githubusercontent.com", "github.com"},
+					FetchPolicyVersion:   HTTPSFetchPolicyVersion,
+				}},
+			},
+			SourceInventory: PrebuiltSourceInventory{
+				InventoryDigest: testDigest('6'),
+				EntryCount:      3,
+				ExpandedSize:    15_000_000,
+			},
+			Payload: PrebuiltPayloadEvidence{
+				SourcePath:      "a365",
+				DestinationPath: "bin/a365",
+				SHA256:          testDigest('7'),
+				Size:            14_000_000,
+				ArchiveMode:     0o755,
+				DerivedMode:     0o555,
+			},
+			ELF: PrebuiltELFEvidence{
+				Format:           PrebuiltELFFormatELF64,
+				Machine:          PrebuiltELFMachineX8664,
+				StaticallyLinked: true,
+				NeededLibraries:  []string{},
+				RPaths:           []string{},
+			},
+			FormulaSource: PrebuiltFormulaSourceEvidence{
+				Transport: TapFormulaSourceTransport{
+					Tap: TapSource{
+						ID:            "sozercan/repo",
+						Repository:    "https://github.com/sozercan/homebrew-repo",
+						Commit:        strings.Repeat("c", 40),
+						TreeDigest:    testDigest('c'),
+						ArchiveDigest: testDigest('d'),
+					},
+					Path: "Formula/a365.rb",
+				},
+				SHA256: formulaDigest,
+				Size:   4096,
+			},
+			RecipeDigest: testDigest('e'),
+			DerivedBottle: PrebuiltDerivedBottleRelation{
+				Tag:                 "x86_64_linux",
+				Filename:            derivedFilename,
+				SHA256:              derivedDigest,
+				Size:                derivedSize,
+				Verification:        verification,
+				FormulaSourceDigest: formulaDigest,
+			},
+		},
+	}
+}

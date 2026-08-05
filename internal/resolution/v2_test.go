@@ -635,3 +635,126 @@ func TestDecodeV2RejectsCaseFoldedFieldAliases(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func addValidPrebuiltDerivationV2(record *RecordV2) *NodeV2 {
+	node := nodeV2(record, "acme/tools/widget")
+	digestA := record.Components.TapPolicyDigest
+	digestB := "sha256:" + strings.Repeat("b", 64)
+	digestE := "sha256:" + strings.Repeat("e", 64)
+	digestF := "sha256:" + strings.Repeat("f", 64)
+	digest9 := "sha256:" + strings.Repeat("9", 64)
+	node.Bottle.Tab = BottleTabV2{Receiptless: true, Arch: "x86_64"}
+	node.Bottle.BottleFormulaSourceDigest = node.Bottle.CurrentFormulaSourceDigest
+	node.Bottle.BottleSourceRepository = ""
+	node.Bottle.BottleSourceCommit = ""
+	node.Bottle.BottleFormulaPath = ""
+	node.Bottle.BottleSourceWaiver = ""
+	node.Bottle.Transport.HTTPS = &HTTPSTransport{
+		URL:                  record.Components.CatalogServiceOrigin + "/v1/artifacts/sha256/" + strings.TrimPrefix(node.Bottle.SHA256, "sha256:"),
+		ExpectedSize:         node.Bottle.Size,
+		SHA256:               node.Bottle.SHA256,
+		Filename:             node.Bottle.Filename,
+		AllowedRedirectHosts: []string{"catalog.example.test"},
+		FetchPolicyVersion:   HTTPSFetchPolicyVersionV1,
+	}
+	node.Provenance = Provenance{Waiver: &ProvenanceWaiver{Policy: PrebuiltProvenanceWaiverPolicyV1}}
+	record.Components.SupportedProvenancePolicyVersions = append(record.Components.SupportedProvenancePolicyVersions, PrebuiltProvenanceWaiverPolicyV1)
+	node.Bottle.PrebuiltDerivation = &PrebuiltDerivationV2{
+		PolicyVersion: PrebuiltDerivedBottlePolicyV1,
+		PolicyDigest:  digestA,
+		Source: PrebuiltSourceArtifactV2{
+			Filename: "widget_2.0_linux_amd64.tar.gz",
+			Size:     3,
+			SHA256:   digestB,
+			Format:   "tar+gzip",
+			Transport: BottleTransport{HTTPS: &HTTPSTransport{
+				URL:                  "https://github.com/acme/widget/releases/download/v2.0/widget_2.0_linux_amd64.tar.gz",
+				ExpectedSize:         3,
+				SHA256:               digestB,
+				Filename:             "widget_2.0_linux_amd64.tar.gz",
+				AllowedRedirectHosts: []string{"release-assets.githubusercontent.com", "github.com"},
+				FetchPolicyVersion:   HTTPSFetchPolicyVersionV1,
+			}},
+		},
+		SourceInventory: PrebuiltSourceInventoryV2{InventoryDigest: digestE, EntryCount: 3, ExpandedSize: 10},
+		Payload:         PrebuiltPayloadEvidenceV2{SourcePath: "widget", DestinationPath: "bin/widget", SHA256: digestF, Size: 5, ArchiveMode: 0o755, DerivedMode: 0o555},
+		ELF:             PrebuiltELFEvidenceV2{Format: "elf64", Machine: "x86_64", StaticallyLinked: true, NeededLibraries: []string{}, RPaths: []string{}},
+		FormulaSource: PrebuiltFormulaSourceEvidenceV2{
+			Transport: TapFormulaSourceTransportV2{Tap: TapSourceV2{ID: "acme/tools", Repository: "https://github.com/acme/homebrew-tools", Commit: strings.Repeat("2", 40), TreeDigest: digest9, ArchiveDigest: digestE}, Path: "Formula/widget.rb"},
+			SHA256:    node.Bottle.CurrentFormulaSourceDigest,
+			Size:      128,
+		},
+		RecipeDigest: digest9,
+		DerivedBottle: PrebuiltDerivedBottleRelationV2{
+			Tag: node.Bottle.Tag, Filename: node.Bottle.Filename, SHA256: node.Bottle.SHA256, Size: node.Bottle.Size,
+			Verification: node.Bottle.Verification, FormulaSourceDigest: node.Bottle.CurrentFormulaSourceDigest,
+		},
+	}
+	return node
+}
+
+func TestValidateV2PrebuiltDerivation(t *testing.T) {
+	record := validRecordV2()
+	addValidPrebuiltDerivationV2(record)
+	canonical, err := CanonicalV2(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeV2(canonical); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateV2RejectsPrebuiltDerivationMixAndMatch(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*RecordV2, *NodeV2)
+		want   string
+	}{
+		{name: "derived bottle", mutate: func(_ *RecordV2, node *NodeV2) {
+			node.Bottle.PrebuiltDerivation.DerivedBottle.SHA256 = "sha256:" + strings.Repeat("1", 64)
+		}, want: "derived-bottle relation"},
+		{name: "wrong platform", mutate: func(_ *RecordV2, node *NodeV2) { node.Bottle.PrebuiltDerivation.ELF.Machine = "aarch64" }, want: "static x86_64"},
+		{name: "wrong source tap", mutate: func(_ *RecordV2, node *NodeV2) {
+			node.Bottle.PrebuiltDerivation.FormulaSource.Transport.Tap.ID = "other/tools"
+		}, want: "does not match node tap"},
+		{name: "wrong source digest", mutate: func(_ *RecordV2, node *NodeV2) {
+			node.Bottle.PrebuiltDerivation.FormulaSource.SHA256 = "sha256:" + strings.Repeat("1", 64)
+		}, want: "does not bind current"},
+		{name: "wrong policy", mutate: func(_ *RecordV2, node *NodeV2) {
+			node.Bottle.PrebuiltDerivation.PolicyDigest = "sha256:" + strings.Repeat("1", 64)
+		}, want: "does not match release tap policy"},
+		{name: "wrong service", mutate: func(_ *RecordV2, node *NodeV2) {
+			node.Bottle.Transport.HTTPS.URL = "https://other.example.com/v1/artifacts/sha256/" + strings.TrimPrefix(node.Bottle.SHA256, "sha256:")
+		}, want: "does not match catalog service"},
+		{name: "native waiver", mutate: func(_ *RecordV2, node *NodeV2) { node.Provenance.Waiver.Policy = ProvenanceWaiverPolicyV1 }, want: "prebuilt provenance waiver"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			record := validRecordV2()
+			node := addValidPrebuiltDerivationV2(record)
+			test.mutate(record, node)
+			if err := ValidateV2(record); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateV2() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCanonicalV2SortsPrebuiltDerivationSets(t *testing.T) {
+	a := validRecordV2()
+	addValidPrebuiltDerivationV2(a)
+	b := cloneRecordV2(*a)
+	slices.Reverse(b.Nodes[0].Bottle.PrebuiltDerivation.Source.Transport.HTTPS.AllowedRedirectHosts)
+	left, err := CanonicalV2(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := CanonicalV2(&b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(left) != string(right) {
+		t.Fatal("prebuilt derivation canonical bytes depend on redirect-host order")
+	}
+}

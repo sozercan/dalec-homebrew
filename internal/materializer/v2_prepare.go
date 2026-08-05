@@ -142,6 +142,9 @@ func PrepareV2(ctx context.Context, cfg PrepareV2Config) (*PreparationEvidenceV2
 		if err := verifyReceiptlessMarkerV2(node, result); err != nil {
 			return nil, err
 		}
+		if err := verifyPrebuiltDerivedBottleV2(node, result); err != nil {
+			return nil, err
+		}
 		if result.Formula.Size > MaxPreparedFormulaSourceBytes-formulaSourceBytes {
 			return nil, fmt.Errorf("aggregate bottle Formula source exceeds %d bytes", MaxPreparedFormulaSourceBytes)
 		}
@@ -285,4 +288,32 @@ func nodeV2ByID(nodes []resolution.NodeV2, id resolution.FormulaID) (resolution.
 		}
 	}
 	return resolution.NodeV2{}, false
+}
+
+func verifyPrebuiltDerivedBottleV2(node resolution.NodeV2, result *bottle.Result) error {
+	derivation := node.Bottle.PrebuiltDerivation
+	if derivation == nil {
+		return nil
+	}
+	if result == nil {
+		return errors.New("prebuilt derived bottle verification result is missing")
+	}
+	if result.Receipt != nil {
+		return fmt.Errorf("prebuilt derived bottle %s unexpectedly contains a receipt", node.ID)
+	}
+	payload := derivation.Payload
+	matches := 0
+	for _, entry := range result.Inventory {
+		if entry.KegPath != payload.DestinationPath {
+			continue
+		}
+		matches++
+		if entry.Type != bottle.EntryRegular || entry.SHA256 != payload.SHA256 || entry.Size != payload.Size || entry.Mode&0o777 != payload.DerivedMode {
+			return fmt.Errorf("prebuilt derived payload %s does not match signed source relation", payload.DestinationPath)
+		}
+	}
+	if matches != 1 {
+		return fmt.Errorf("prebuilt derived payload %s occurs %d times in verified bottle inventory", payload.DestinationPath, matches)
+	}
+	return nil
 }

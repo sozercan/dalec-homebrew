@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
+	"github.com/sozercan/dalec-homebrew/internal/catalogartifactstore"
 	"github.com/sozercan/dalec-homebrew/internal/cataloggenerator"
 	"github.com/sozercan/dalec-homebrew/internal/catalogservice"
 )
@@ -76,9 +77,12 @@ func run(ctx context.Context, args []string) (retErr error) {
 	if (*fixturePath == "") == (*buildkitAddress == "") {
 		return errors.New("exactly one of --buildkit-address or --fixture is required")
 	}
+	artifactStore, err := catalogartifactstore.New(*storeDir)
+	if err != nil {
+		return fmt.Errorf("configure generated artifact store: %w", err)
+	}
 	var (
 		generator catalogservice.Generator
-		err       error
 	)
 	if *fixturePath != "" {
 		generator, err = catalogservice.LoadStaticGenerator(*fixturePath)
@@ -97,13 +101,14 @@ func run(ctx context.Context, args []string) (retErr error) {
 		if !strings.HasSuffix(*extractorRef, "@"+*extractorDigest) {
 			return errors.New("--extractor-ref digest does not match --extractor-digest")
 		}
-		generator, err = cataloggenerator.NewProduction(ctx, cataloggenerator.ProductionConfig{BuildKitAddress: *buildkitAddress, ExtractorRef: *extractorRef, HomebrewCommit: *homebrewCommit, CacheDir: filepath.Join(*storeDir, "ingestion-cache"), CacheMaxAge: *catalogRefresh, VerificationIdentity: *serviceDigest + "\x00" + *extractorDigest})
+		generator, err = cataloggenerator.NewProduction(ctx, cataloggenerator.ProductionConfig{BuildKitAddress: *buildkitAddress, ExtractorRef: *extractorRef, HomebrewCommit: *homebrewCommit, CatalogServiceOrigin: *origin, ArtifactStore: artifactStore, CacheDir: filepath.Join(*storeDir, "ingestion-cache"), CacheMaxAge: *catalogRefresh, VerificationIdentity: *serviceDigest + "\x00" + *extractorDigest})
 		if err != nil {
 			return fmt.Errorf("configure BuildKit catalog generator: %w", err)
 		}
 	}
 	service, err := catalogservice.New(catalogservice.Config{
 		StoreDir:                 *storeDir,
+		ArtifactStore:            artifactStore,
 		Origin:                   *origin,
 		Generator:                generator,
 		SigningKeyPath:           *signingKey,

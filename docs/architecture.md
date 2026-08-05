@@ -144,9 +144,9 @@ all-platform raw/typed preflight
   -> one per-invocation catalog-set request
   -> PS512 catalog-set verification and digest-addressed catalog fetches
   -> independent cross-tap normalization, cycle/order, platform, and rack-collision checks
-  -> independent GHCR descriptor resolution or one bounded HTTPS fetch exec per bottle
+  -> independent GHCR descriptor resolution or one bounded HTTPS fetch exec per selected artifact
   -> canonical resolution V2
-  -> prepare (all bottles and fetch evidence verified; synthetic taps and trust store sealed)
+  -> prepare (all bottles or policy-derived bottles and fetch evidence verified; synthetic taps and trust store sealed)
   -> one network-disabled install exec per install-order node
   -> finalize onto the clean runtime base with V2 inventory, prune, manifest, and SPDX evidence
 ```
@@ -156,6 +156,8 @@ Core-only builds bypass the catalog client. Catalog requests bind each target pl
 The catalog service persists canonical catalogs by digest, operation state, monotonic per-tap sequences, repository+commit extraction snapshots, and artifact-verification records under a single-writer file lock. Tap indexes refresh after one hour; immutable repository and artifact records are content-keyed, revalidated before reuse, and namespaced by the authorized service/extractor identities, tap-policy digest, and Homebrew commit so policy or verifier rotation cannot reuse stale evidence. The service signs completed set manifests with a mounted PS512 key whose public-key policy and authorized service/extractor identities are compiled into the frontend release. Production deployments configure the repository-contained generator with `--buildkit-address`, a digest-pinned `--extractor-ref`, and the release Homebrew commit. The BuildKit Git source fetches only the derived public default repository, while Formula evaluation runs in a separate network-disabled, read-only extractor exec with disposable cache and temporary mounts. Fixture generation is local/test-only; production does not delegate catalog construction to an unspecified executable.
 
 HTTPS bottles never use `llb.HTTP`. A minimal CA-plus-static-binary fetcher enforces public DNS/IP destinations, HTTPS port 443, redirect allowlists, exact positive size up to 1 GiB, a 15-minute deadline, and SHA-256 before atomically publishing mode-0444 output and redacted evidence.
+
+A Formula without a native bottle remains unsupported unless its exact Formula ID appears in the release-bound prebuilt-archive section of the tap policy. In that case the extractor records the platform-specific stable archive URL and checksum, and the catalog service verifies the complete bounded tar+gzip inventory plus the selected static ELF and Go build properties. It then creates a deterministic receiptless **derived bottle** containing only the policy-selected executable and exact authenticated Formula source, persists it by digest, and signs a derivation record that keeps the upstream archive and derived-bottle identities distinct. Formula `install` and `post_install` methods are not run. The frontend fetches the derived bottle from the configured catalog-service origin through the normal bounded fetcher, and the existing bottle verifier and offline materializer remain authoritative for installation.
 
 During ingestion, GHCR source annotations are used to recover the exact historical bottle-source commit and Formula path. The source file is fetched at that immutable revision and compared byte-for-byte with the embedded Formula after the deterministic Homebrew bottle block (which is intentionally omitted from bottle Formula copies) is removed. Generic HTTPS bottles do not expose an equivalent authenticated source revision, so V2 leaves the historical repository/commit/path fields empty and requires the explicit `https-bottle-embedded-formula-digest-only-v1` bottle-source waiver. The current signed tap source and the separately verified embedded-Formula digest remain distinct evidence.
 

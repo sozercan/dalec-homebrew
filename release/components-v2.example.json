@@ -95,6 +95,7 @@
   "supported_provenance_policy_versions": [
     "homebrew-jws-and-verified-oci-chain-v1",
     "https-bottle-embedded-formula-digest-only-v1",
+    "prebuilt-archive-tap-catalog-jws-and-verified-checksum-v1",
     "sigstore-in-toto-v1",
     "tap-catalog-jws-and-verified-checksum-v1"
   ]

@@ -1,6 +1,7 @@
 package catalogservice
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -9,8 +10,47 @@ import (
 	"testing"
 	"time"
 
+	digest "github.com/opencontainers/go-digest"
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
+	"github.com/sozercan/dalec-homebrew/internal/catalogartifactstore"
 )
+
+func TestStoreOwnsPersistentArtifactStoreUnderRoot(t *testing.T) {
+	root := t.TempDir()
+	configured, err := catalogartifactstore.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistent, err := openStoreWithArtifacts(root, configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("generated artifact")
+	expected := digest.FromBytes(data)
+	if err := persistent.artifacts.Put(expected, int64(len(data)), bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
+	if persistent.artifacts != configured || persistent.artifacts.Root() != persistent.root {
+		t.Fatalf("artifact store root=%q catalog root=%q", persistent.artifacts.Root(), persistent.root)
+	}
+	if err := persistent.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := openStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	artifact, err := restarted.artifacts.Open(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer artifact.Close()
+	if artifact.Size() != int64(len(data)) {
+		t.Fatalf("artifact size=%d", artifact.Size())
+	}
+}
 
 func TestStoreSingleWriterLockAndPersistentSequence(t *testing.T) {
 	root := t.TempDir()

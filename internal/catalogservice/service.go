@@ -22,6 +22,7 @@ import (
 
 	digest "github.com/opencontainers/go-digest"
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
+	"github.com/sozercan/dalec-homebrew/internal/catalogartifactstore"
 	"github.com/sozercan/dalec-homebrew/internal/catalogauth"
 	"github.com/sozercan/dalec-homebrew/internal/catalogkeys"
 	"github.com/sozercan/dalec-homebrew/internal/homebrew/metadata"
@@ -42,6 +43,7 @@ const (
 // Config contains release-bound service inputs and process-local controls.
 type Config struct {
 	StoreDir                 string
+	ArtifactStore            *catalogartifactstore.Store
 	Origin                   string
 	Generator                Generator
 	SigningKeyPath           string
@@ -173,7 +175,7 @@ func New(config Config) (_ *Service, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("construct catalog verification key set: %w", err)
 	}
-	persistentStore, err := openStore(config.StoreDir)
+	persistentStore, err := openStoreWithArtifacts(config.StoreDir, config.ArtifactStore)
 	if err != nil {
 		return nil, err
 	}
@@ -279,6 +281,13 @@ func (s *Service) ServeHTTP(response http.ResponseWriter, request *http.Request)
 			return
 		}
 		s.handleOperation(response, request)
+	case strings.HasPrefix(request.URL.Path, catalogartifactstore.HTTPPathPrefix):
+		if request.Method != http.MethodGet && request.Method != http.MethodHead {
+			response.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+			s.writeHTTPFailure(response, http.StatusMethodNotAllowed, catalog.FailurePolicy, "method not allowed")
+			return
+		}
+		s.handleArtifact(response, request)
 	case strings.HasPrefix(request.URL.Path, catalog.CatalogDocumentPathPrefix):
 		if request.Method != http.MethodGet {
 			response.Header().Set("Allow", http.MethodGet)
@@ -479,6 +488,42 @@ func (s *Service) handleOperation(response http.ResponseWriter, request *http.Re
 		response.Header().Set("Retry-After", strconv.Itoa(operation.RetryAfterSeconds))
 	}
 	s.writeJSON(response, http.StatusOK, operation, true)
+}
+
+func (s *Service) handleArtifact(response http.ResponseWriter, request *http.Request) {
+	if request.URL.RawQuery != "" || request.URL.ForceQuery {
+		s.writeHTTPFailure(response, http.StatusBadRequest, catalog.FailurePolicy, "queries are not supported")
+		return
+	}
+	if len(request.Header.Values("Range")) != 0 {
+		s.writeHTTPFailure(response, http.StatusBadRequest, catalog.FailurePolicy, "range requests are not supported")
+		return
+	}
+	encoded := strings.TrimPrefix(request.URL.Path, catalogartifactstore.HTTPPathPrefix)
+	if request.URL.RawPath != "" || !validSHA256Hex(encoded) || strings.Contains(encoded, "/") {
+		s.writeHTTPFailure(response, http.StatusNotFound, catalog.FailureUnavailable, "artifact not found")
+		return
+	}
+	expected := digest.Digest("sha256:" + encoded)
+	artifact, err := s.store.artifacts.Open(expected)
+	if errors.Is(err, os.ErrNotExist) {
+		s.writeHTTPFailure(response, http.StatusNotFound, catalog.FailureUnavailable, "artifact not found")
+		return
+	}
+	if err != nil {
+		s.writeHTTPFailure(response, http.StatusInternalServerError, catalog.FailureUnavailable, "artifact storage is unavailable")
+		return
+	}
+	defer artifact.Close()
+
+	response.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	response.Header().Set("Content-Type", "application/gzip")
+	response.Header().Set("Content-Length", strconv.FormatInt(artifact.Size(), 10))
+	response.Header().Set("ETag", `"`+expected.String()+`"`)
+	response.WriteHeader(http.StatusOK)
+	if request.Method == http.MethodGet {
+		_, _ = io.Copy(response, artifact)
+	}
 }
 
 func (s *Service) handleCatalog(response http.ResponseWriter, request *http.Request) {

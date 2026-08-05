@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
+	"github.com/sozercan/dalec-homebrew/internal/catalogartifactstore"
 	"github.com/sozercan/dalec-homebrew/internal/fetcher"
 	"github.com/sozercan/dalec-homebrew/internal/homebrew/metadata"
 	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
@@ -19,6 +20,8 @@ type ProductionConfig struct {
 	HomebrewCommit       string
 	Metadata             metadata.Config
 	Fetcher              fetcher.Config
+	CatalogServiceOrigin string
+	ArtifactStore        *catalogartifactstore.Store
 	CacheDir             string
 	CacheMaxAge          time.Duration
 	VerificationIdentity string
@@ -54,7 +57,7 @@ func NewProduction(ctx context.Context, cfg ProductionConfig) (*Generator, error
 	if err != nil {
 		return nil, err
 	}
-	artifacts, err := NewProductionArtifactBuilder(cfg.Fetcher)
+	artifacts, err := NewProductionArtifactBuilder(cfg.Fetcher, cfg.CatalogServiceOrigin, cfg.ArtifactStore)
 	if err != nil {
 		_ = extractor.Close()
 		return nil, err

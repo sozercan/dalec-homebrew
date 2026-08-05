@@ -7,6 +7,7 @@ require "pathname"
 require "formulary"
 require "simulate_system"
 require "tap"
+require "uri"
 require "utils/bottles"
 
 MAX_FORMULAE = 4096
@@ -41,6 +42,34 @@ def bottle_from_hash(hash)
   }
 end
 
+def stable_archive_format(url)
+  uri = URI.parse(url)
+  return nil unless uri.is_a?(URI::HTTPS) && uri.userinfo.nil? && uri.fragment.nil? && uri.port == 443
+
+  return "tar+gzip" if uri.path.end_with?(".tar.gz", ".tgz")
+
+  nil
+rescue URI::InvalidURIError
+  nil
+end
+
+def stable_source_from_hash(hash)
+  stable = hash.fetch("urls", {}).fetch("stable", nil)
+  return nil unless stable.is_a?(Hash)
+  return nil unless stable.fetch("tag", nil).nil? && stable.fetch("revision", nil).nil? && stable.fetch("using", nil).nil?
+
+  url = stable.fetch("url", "").to_s
+  checksum = stable.fetch("checksum", "").to_s
+  format = stable_archive_format(url)
+  return nil if format.nil? || !checksum.match?(/\A[0-9a-f]{64}\z/)
+
+  {
+    "url" => url,
+    "sha256" => "sha256:#{checksum}",
+    "archive_format" => format,
+  }
+end
+
 def platform_formula(path, tag_name)
   tag = Utils::Bottles::Tag.from_symbol(tag_name.to_sym)
   simulated_arch = { x86_64: :intel, arm64: :arm }.fetch(tag.arch)
@@ -67,6 +96,7 @@ def platform_formula(path, tag_name)
       "dependencies" => (hash.fetch("dependencies", []) + hash.fetch("recommended_dependencies", []) + uses_from_macos).uniq,
       "versioned_formulae" => hash.fetch("versioned_formulae", []),
       "bottle" => bottle_from_hash(hash),
+      "stable_source" => stable_source_from_hash(hash),
     }.compact
   end
 end

@@ -10,7 +10,7 @@
 
 ## What you get
 
-- Choose packages from `homebrew/core` or public default GitHub taps in a release-bound V2 frontend.
+- Choose packages from `homebrew/core` or public default GitHub taps in a release-bound V2 frontend, including exact policy-authorized prebuilt executable archives.
 - Get a minimal, non-root image without Homebrew or package managers.
 - Keep an SBOM and a record of everything included in the image.
 
@@ -78,7 +78,7 @@ See the [usage reference](docs/usage.md) for image settings, tests, dependency r
 | Supported | Not supported |
 | --- | --- |
 | Linux `amd64` and `arm64` | Other platforms |
-| Current stable `homebrew/core` bottles and public default GitHub taps in V2-capable releases | Casks, private/authenticated taps, arbitrary Git remotes, source builds, and non-self-contained bottle Formulae |
+| Current stable `homebrew/core` bottles, public default GitHub tap bottles, and exact release-policy-authorized prebuilt executable archives in V2-capable releases | Casks, private/authenticated taps, arbitrary Git remotes, general source builds, and non-self-contained bottle Formulae |
 | Non-root images | Custom base images and networked tests |
 
 ## Public taps (V2)
@@ -87,7 +87,9 @@ A V2-capable frontend accepts `owner/tap/formula` and derives only the public de
 
 Non-core builds use the release-bound catalog service and bottle fetcher. Core-only builds continue to use the official Homebrew JWS and GHCR path and do not contact the catalog service.
 
-The catalog service verifies exact tap commits, bottle checksums and sizes, hostile-archive structure, embedded Formula bytes, and any digest-advertised Sigstore/in-toto bundle covered by the release tap policy. Missing provenance is recorded as an explicit per-bottle waiver; invalid advertised provenance fails the build.
+The catalog service verifies exact tap commits, bottle checksums and sizes, hostile-archive structure, embedded Formula bytes, and any digest-advertised Sigstore/in-toto bundle covered by the release tap policy. Missing provenance is recorded as an explicit per-artifact waiver; invalid advertised provenance fails the build.
+
+A Formula without a bottle remains unsupported unless its exact Formula ID is present in the embedded tap policy as a prebuilt executable archive. For those entries, the service verifies the complete upstream archive and executable properties, creates a deterministic receiptless derived bottle containing only the policy-selected payload, and records the upstream and derived identities separately. Build input cannot add archive recipes or enable another Formula.
 
 ```yaml
 dependencies:

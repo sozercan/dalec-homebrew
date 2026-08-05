@@ -9,6 +9,7 @@ license: Apache-2.0
 dependencies:
   runtime:
     svt/avtools/libdf: {}
+    sozercan/repo/a365: {}
     hello: {}
 
 image:
@@ -24,9 +25,13 @@ tests:
       - command: test -s /home/linuxbrew/.linuxbrew/opt/libdf/lib/libdf.so && echo libdf-ok
         stdout:
           equals: "libdf-ok\n"
+      - command: a365 --version
+        stdout:
+          contains: ["0.3.3"]
     files:
       /home/linuxbrew/.linuxbrew/bin/hello: {}
       /home/linuxbrew/.linuxbrew/opt/libdf/lib/libdf.so: {}
+      /home/linuxbrew/.linuxbrew/bin/a365: {}
       /home/linuxbrew/.linuxbrew/bin/brew:
         not_exist: true
       /home/linuxbrew/.linuxbrew/Homebrew:
@@ -37,4 +42,5 @@ tests:
         contains:
           - dalec-homebrew-resolution/v2
           - svt/avtools/libdf
+          - sozercan/repo/a365
           - homebrew/core/hello

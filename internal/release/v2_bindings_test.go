@@ -33,7 +33,7 @@ func TestGenerateV2Bindings(t *testing.T) {
 	if got, want := bindings.SupportedFetchPolicyVersions, "homebrew-bottle-fetch-v1"; got != want {
 		t.Fatalf("fetch policy versions = %q, want %q", got, want)
 	}
-	if got, want := bindings.SupportedProvenancePolicyVersions, "homebrew-jws-and-verified-oci-chain-v1,https-bottle-embedded-formula-digest-only-v1,sigstore-in-toto-v1,tap-catalog-jws-and-verified-checksum-v1"; got != want {
+	if got, want := bindings.SupportedProvenancePolicyVersions, "homebrew-jws-and-verified-oci-chain-v1,https-bottle-embedded-formula-digest-only-v1,prebuilt-archive-tap-catalog-jws-and-verified-checksum-v1,sigstore-in-toto-v1,tap-catalog-jws-and-verified-checksum-v1"; got != want {
 		t.Fatalf("provenance policy versions = %q, want %q", got, want)
 	}
 

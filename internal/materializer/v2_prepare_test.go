@@ -259,7 +259,7 @@ func materializerRuntimePolicyRecordV2(t *testing.T) *resolution.RecordV2 {
 			BuildKitModule:                    "github.com/moby/buildkit@v0.31.2",
 			SupportedCatalogPolicyVersions:    []string{"tap-catalog-v1"},
 			SupportedFetchPolicyVersions:      []string{resolution.HTTPSFetchPolicyVersionV1},
-			SupportedProvenancePolicyVersions: []string{resolution.CoreProvenanceWaiverPolicyV1, resolution.HTTPSBottleSourceWaiverPolicyV1, resolution.ProvenanceWaiverPolicyV1, resolution.VerifiedProvenancePolicyV1},
+			SupportedProvenancePolicyVersions: []string{resolution.CoreProvenanceWaiverPolicyV1, resolution.HTTPSBottleSourceWaiverPolicyV1, resolution.ProvenanceWaiverPolicyV1, resolution.PrebuiltProvenanceWaiverPolicyV1, resolution.VerifiedProvenancePolicyV1},
 		},
 		Runtime: resolution.RuntimePolicy{User: "linuxbrew", UID: 1000, GID: 1000, CPUBaseline: "core2"},
 	}
@@ -277,5 +277,40 @@ func TestVerifyReceiptlessMarkerV2MatchesHTTPSArchive(t *testing.T) {
 	node.Bottle.Tab.Receiptless = false
 	if err := verifyReceiptlessMarkerV2(node, &bottle.Result{Receipt: &bottle.ReceiptEvidence{}}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestVerifyPrebuiltDerivedBottleV2BindsPayload(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	node := resolution.NodeV2{
+		ID: "sozercan/repo/a365",
+		Bottle: resolution.BottleV2{PrebuiltDerivation: &resolution.PrebuiltDerivationV2{
+			Payload: resolution.PrebuiltPayloadEvidenceV2{
+				DestinationPath: "bin/a365",
+				SHA256:          digest,
+				Size:            42,
+				DerivedMode:     0o555,
+			},
+		}},
+	}
+	valid := &bottle.Result{Inventory: []bottle.InventoryEntry{{KegPath: "bin/a365", Type: bottle.EntryRegular, SHA256: digest, Size: 42, Mode: 0o555}}}
+	if err := verifyPrebuiltDerivedBottleV2(node, valid); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*bottle.Result){
+		"receipt":   func(result *bottle.Result) { result.Receipt = &bottle.ReceiptEvidence{} },
+		"digest":    func(result *bottle.Result) { result.Inventory[0].SHA256 = "sha256:" + strings.Repeat("b", 64) },
+		"mode":      func(result *bottle.Result) { result.Inventory[0].Mode = 0o755 },
+		"missing":   func(result *bottle.Result) { result.Inventory = nil },
+		"duplicate": func(result *bottle.Result) { result.Inventory = append(result.Inventory, result.Inventory[0]) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			copy := *valid
+			copy.Inventory = append([]bottle.InventoryEntry(nil), valid.Inventory...)
+			mutate(&copy)
+			if err := verifyPrebuiltDerivedBottleV2(node, &copy); err == nil {
+				t.Fatal("tampered prebuilt derived bottle accepted")
+			}
+		})
 	}
 }

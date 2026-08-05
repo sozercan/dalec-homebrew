@@ -11,6 +11,7 @@ import (
 
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
 	"github.com/sozercan/dalec-homebrew/internal/homebrew/metadata"
+	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
 type CoreCatalog interface {
@@ -22,6 +23,7 @@ type Resolver struct {
 	catalogs map[catalog.TapID]*catalog.TapCatalog
 	formulae map[catalog.FormulaID]catalog.Formula
 	mappings map[catalog.FormulaID]catalog.FormulaID
+	policy   *policyv2.TapPolicy
 }
 
 // MissingTapError reports the exact public tap that must be ingested before a
@@ -43,7 +45,11 @@ func New(core CoreCatalog, catalogs map[catalog.TapID]*catalog.TapCatalog) (*Res
 	if core == nil {
 		return nil, errors.New("core catalog is required")
 	}
-	r := &Resolver{core: core, catalogs: make(map[catalog.TapID]*catalog.TapCatalog, len(catalogs)), formulae: map[catalog.FormulaID]catalog.Formula{}, mappings: map[catalog.FormulaID]catalog.FormulaID{}}
+	tapPolicy, err := policyv2.LoadTapPolicy()
+	if err != nil {
+		return nil, fmt.Errorf("load release-bound tap policy: %w", err)
+	}
+	r := &Resolver{core: core, catalogs: make(map[catalog.TapID]*catalog.TapCatalog, len(catalogs)), formulae: map[catalog.FormulaID]catalog.Formula{}, mappings: map[catalog.FormulaID]catalog.FormulaID{}, policy: tapPolicy}
 	if len(catalogs) > catalog.MaxTaps {
 		return nil, fmt.Errorf("catalog count %d exceeds %d", len(catalogs), catalog.MaxTaps)
 	}
@@ -128,7 +134,8 @@ func (r *Resolver) Resolve(roots []catalog.FormulaID, platform catalog.Platform)
 		if canonical != id {
 			return catalog.ClosureResult{}, fmt.Errorf("canonical queue identity %s maps to %s", id, canonical)
 		}
-		node, dependencies, err := r.nodeAndDependencies(source, tag)
+		_, requestedRoot := seenRoots[id]
+		node, dependencies, err := r.nodeAndDependencies(source, platform, tag, requestedRoot)
 		if err != nil {
 			return catalog.ClosureResult{}, fmt.Errorf("Formula %s: %w", id, err)
 		}
@@ -272,7 +279,7 @@ func (r *Resolver) resolveMapping(id catalog.FormulaID, used map[catalog.TapID]s
 	}
 }
 
-func (r *Resolver) nodeAndDependencies(source formulaSource, tag string) (catalog.Node, []catalog.Requirement, error) {
+func (r *Resolver) nodeAndDependencies(source formulaSource, platform catalog.Platform, tag string, requestedRoot bool) (catalog.Node, []catalog.Requirement, error) {
 	if source.core != nil {
 		formula := *source.core
 		if formula.Disabled {
@@ -292,11 +299,15 @@ func (r *Resolver) nodeAndDependencies(source formulaSource, tag string) (catalo
 	if formula.Disabled {
 		return catalog.Node{}, nil, errors.New("Formula is disabled")
 	}
-	if formula.Bottle == nil {
-		return catalog.Node{}, nil, errors.New("stable bottle metadata is unavailable")
-	}
-	if !hasBottleTag(formula.Bottle.Files, tag) && !hasBottleTag(formula.Bottle.Files, "all") {
-		return catalog.Node{}, nil, fmt.Errorf("stable bottle tag %s is unavailable", tag)
+	bottleRebuild := 0
+	if hasNativeBottleForTag(formula.Bottle, tag) {
+		bottleRebuild = formula.Bottle.Rebuild
+	} else if err := r.authorizePrebuiltArchive(formula, platform, tag, requestedRoot); err != nil {
+		unavailable := externalBottleUnavailableError(formula.Bottle, tag)
+		if formula.PrebuiltArchive == nil {
+			return catalog.Node{}, nil, unavailable
+		}
+		return catalog.Node{}, nil, fmt.Errorf("%w: prebuilt archive is not eligible: %v", unavailable, err)
 	}
 	deps := formula.Dependencies
 	kegOnly := formula.KegOnly
@@ -318,7 +329,109 @@ func (r *Resolver) nodeAndDependencies(source formulaSource, tag string) (catalo
 	for i, dep := range deps {
 		requirements[i] = catalog.Requirement{Raw: dep.Raw, ID: dep.ID, DeclaredDirectly: true}
 	}
-	return catalog.Node{ID: source.id, Tap: source.id.Tap(), Name: formula.Name, HomebrewFullName: formula.HomebrewFullName, FormulaVersion: formula.StableVersion, FormulaRevision: formula.Revision, PkgVersion: pkgVersion(formula.StableVersion, formula.Revision), VersionScheme: formula.VersionScheme, License: formula.License, KegOnly: kegOnly, BottleRebuild: formula.Bottle.Rebuild}, requirements, nil
+	return catalog.Node{ID: source.id, Tap: source.id.Tap(), Name: formula.Name, HomebrewFullName: formula.HomebrewFullName, FormulaVersion: formula.StableVersion, FormulaRevision: formula.Revision, PkgVersion: pkgVersion(formula.StableVersion, formula.Revision), VersionScheme: formula.VersionScheme, License: formula.License, KegOnly: kegOnly, BottleRebuild: bottleRebuild}, requirements, nil
+}
+
+func (r *Resolver) authorizePrebuiltArchive(formula catalog.Formula, platform catalog.Platform, tag string, requestedRoot bool) error {
+	declaration := formula.PrebuiltArchive
+	if declaration == nil {
+		return errors.New("stable prebuilt archive metadata is unavailable")
+	}
+	policy, ok := r.policy.PrebuiltArchiveForFormula(string(formula.ID))
+	if !ok {
+		return fmt.Errorf("Formula ID %s has no exact release-policy authorization", formula.ID)
+	}
+	if policy.FormulaID != string(formula.ID) {
+		return fmt.Errorf("release policy Formula ID %q does not match %s", policy.FormulaID, formula.ID)
+	}
+	if !policy.RootOnly {
+		return errors.New("release policy does not require prebuilt archive use to be root-only")
+	}
+	if !requestedRoot {
+		return errors.New("release policy permits the prebuilt archive only as an explicitly requested resolved root")
+	}
+	if formula.StableVersion != policy.Version {
+		return fmt.Errorf("stable version %q does not match release policy %q", formula.StableVersion, policy.Version)
+	}
+	if formula.SourceDigest != policy.FormulaSourceDigest {
+		return fmt.Errorf("Formula source digest %s does not match release policy %s", formula.SourceDigest, policy.FormulaSourceDigest)
+	}
+	if formula.License != policy.License {
+		return fmt.Errorf("license %q does not match release policy %q", formula.License, policy.License)
+	}
+	if !policy.RequireNoBottle {
+		return errors.New("release policy does not require native bottles to be absent")
+	}
+	if formula.Bottle != nil {
+		return errors.New("Formula declares native bottle metadata but release policy requires no bottle")
+	}
+	if len(policy.Dependencies) != 0 {
+		return errors.New("release policy does not require an empty dependency set")
+	}
+	if formulaHasDependencies(formula) {
+		return errors.New("Formula declares dependencies but release policy requires none")
+	}
+
+	policyPlatform, ok := prebuiltPolicyPlatform(policy.Platforms, platform)
+	if !ok {
+		return fmt.Errorf("release policy has no entry for %s/%s", platform.OS, platform.Architecture)
+	}
+	file, ok := prebuiltArchiveFile(declaration.Files, tag)
+	if !ok {
+		return fmt.Errorf("prebuilt archive does not declare target tag %s", tag)
+	}
+	if file.URL != policyPlatform.URL {
+		return fmt.Errorf("prebuilt archive URL %q does not match release policy %q", file.URL, policyPlatform.URL)
+	}
+	if file.SHA256 != policyPlatform.SHA256 {
+		return fmt.Errorf("prebuilt archive digest %s does not match release policy %s", file.SHA256, policyPlatform.SHA256)
+	}
+	if file.Format != policy.Archive.Format {
+		return fmt.Errorf("prebuilt archive format %q does not match release policy %q", file.Format, policy.Archive.Format)
+	}
+	return nil
+}
+
+func prebuiltPolicyPlatform(platforms []policyv2.PrebuiltArchivePlatformPolicy, target catalog.Platform) (policyv2.PrebuiltArchivePlatformPolicy, bool) {
+	want := target.OS + "/" + target.Architecture
+	for _, platform := range platforms {
+		if platform.Platform == want {
+			return platform, true
+		}
+	}
+	return policyv2.PrebuiltArchivePlatformPolicy{}, false
+}
+
+func prebuiltArchiveFile(files []catalog.PrebuiltArchiveFile, tag string) (catalog.PrebuiltArchiveFile, bool) {
+	for _, file := range files {
+		if file.Tag == tag {
+			return file, true
+		}
+	}
+	return catalog.PrebuiltArchiveFile{}, false
+}
+
+func formulaHasDependencies(formula catalog.Formula) bool {
+	if len(formula.Dependencies) != 0 {
+		return true
+	}
+	for _, variation := range formula.Variations {
+		if len(variation.Dependencies) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasNativeBottleForTag(bottle *catalog.BottleDeclaration, tag string) bool {
+	return bottle != nil && (hasBottleTag(bottle.Files, tag) || hasBottleTag(bottle.Files, "all"))
+}
+
+func externalBottleUnavailableError(bottle *catalog.BottleDeclaration, tag string) error {
+	if bottle == nil {
+		return errors.New("stable bottle metadata is unavailable")
+	}
+	return fmt.Errorf("stable bottle tag %s is unavailable", tag)
 }
 
 func validateRackCollisions(nodes map[catalog.FormulaID]catalog.Node) error {

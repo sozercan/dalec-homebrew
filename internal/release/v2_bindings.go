@@ -188,7 +188,7 @@ func v2FetchPolicyVersions() []string {
 }
 
 func v2ProvenancePolicyVersions() []string {
-	return []string{SigstoreProvenancePolicyVersionV1, ChecksumWaiverPolicyVersionV1, HTTPSSourceWaiverPolicyVersionV1, CoreWaiverPolicyVersionV1}
+	return []string{SigstoreProvenancePolicyVersionV1, ChecksumWaiverPolicyVersionV1, HTTPSSourceWaiverPolicyVersionV1, PrebuiltWaiverPolicyVersionV1, CoreWaiverPolicyVersionV1}
 }
 
 func joinPolicyVersions(values []string) string {

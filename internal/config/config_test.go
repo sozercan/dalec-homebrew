@@ -104,7 +104,7 @@ func addV2BuildOpts(t *testing.T, opts map[string]string) {
 	opts["build-arg:"+ExecutableRuntimePolicyDigestBuildArg] = runtimeDigest
 	opts["build-arg:"+SupportedCatalogPolicyVersionsBuildArg] = CatalogPolicyVersionV1
 	opts["build-arg:"+SupportedFetchPolicyVersionsBuildArg] = BottleFetchPolicyVersionV1
-	opts["build-arg:"+SupportedProvenancePolicyVersionsBuildArg] = ChecksumWaiverPolicyVersionV1 + "," + CoreWaiverPolicyVersionV1 + "," + HTTPSSourceWaiverPolicyVersionV1 + "," + SigstoreProvenancePolicyVersionV1
+	opts["build-arg:"+SupportedProvenancePolicyVersionsBuildArg] = ChecksumWaiverPolicyVersionV1 + "," + CoreWaiverPolicyVersionV1 + "," + HTTPSSourceWaiverPolicyVersionV1 + "," + PrebuiltWaiverPolicyVersionV1 + "," + SigstoreProvenancePolicyVersionV1
 }
 
 func setCompiledV1() {
@@ -153,7 +153,7 @@ func setCompiledV2(t *testing.T) {
 	ExecutableRuntimePolicyDigest = runtimeDigest
 	SupportedCatalogPolicyVersions = CatalogPolicyVersionV1
 	SupportedFetchPolicyVersions = BottleFetchPolicyVersionV1
-	SupportedProvenancePolicyVersions = ChecksumWaiverPolicyVersionV1 + "," + CoreWaiverPolicyVersionV1 + "," + HTTPSSourceWaiverPolicyVersionV1 + "," + SigstoreProvenancePolicyVersionV1
+	SupportedProvenancePolicyVersions = ChecksumWaiverPolicyVersionV1 + "," + CoreWaiverPolicyVersionV1 + "," + HTTPSSourceWaiverPolicyVersionV1 + "," + PrebuiltWaiverPolicyVersionV1 + "," + SigstoreProvenancePolicyVersionV1
 }
 
 func TestRequiresPinnedComponents(t *testing.T) {

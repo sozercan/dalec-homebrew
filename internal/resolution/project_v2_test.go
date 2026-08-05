@@ -1,6 +1,11 @@
 package resolution
 
-import "testing"
+import (
+	"encoding/json"
+	"reflect"
+	"slices"
+	"testing"
+)
 
 func TestProjectV2ForRuntimePreservesFullIdentity(t *testing.T) {
 	record := validRecordV2()
@@ -59,5 +64,53 @@ func TestProjectV2ForRuntimePreservesHistoricalTabDependencyIdentity(t *testing.
 	}
 	if got.Version != historical.Version || got.Revision != historical.Revision || got.BottleRebuild != historical.BottleRebuild || got.PkgVersion != historical.PkgVersion || got.DeclaredDirectly != historical.DeclaredDirectly {
 		t.Fatalf("projected historical dependency=%+v, want %+v", *got, historical)
+	}
+}
+
+func TestProjectV2ForRuntimePreservesPrebuiltDerivation(t *testing.T) {
+	record := validRecordV2()
+	wantNode := addValidPrebuiltDerivationV2(record)
+	projected, _, err := ProjectV2ForRuntime(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var annotation *KV
+	for i := range projected.Nodes {
+		if projected.Nodes[i].FullName != wantNode.ID.String() {
+			continue
+		}
+		if projected.Nodes[i].Bottle.Layer.Digest != wantNode.Bottle.SHA256 || projected.Nodes[i].Bottle.HomebrewSHA256 != wantNode.Bottle.SHA256 {
+			t.Fatalf("projected derived bottle identity = %+v", projected.Nodes[i].Bottle)
+		}
+		for j := range projected.Nodes[i].Bottle.SelectedAnnotations {
+			if projected.Nodes[i].Bottle.SelectedAnnotations[j].Key == RuntimePrebuiltDerivationAnnotationV2 {
+				annotation = &projected.Nodes[i].Bottle.SelectedAnnotations[j]
+			}
+		}
+	}
+	if annotation == nil {
+		t.Fatal("projected prebuilt derivation annotation is missing")
+	}
+	var got PrebuiltDerivationV2
+	if err := json.Unmarshal([]byte(annotation.Value), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := *wantNode.Bottle.PrebuiltDerivation
+	slices.Sort(want.Source.Transport.HTTPS.AllowedRedirectHosts)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("projected derivation = %#v, want %#v", got, want)
+	}
+}
+
+func TestProjectV2ForRuntimeDoesNotChangeBottleOnlyAnnotations(t *testing.T) {
+	record := validRecordV2()
+	projected, _, err := ProjectV2ForRuntime(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range projected.Nodes {
+		if node.Bottle.SelectedAnnotations != nil {
+			t.Fatalf("bottle-only node %q gained projected annotations: %+v", node.FullName, node.Bottle.SelectedAnnotations)
+		}
 	}
 }

@@ -2,6 +2,7 @@ package catalogservice
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -20,7 +21,9 @@ import (
 	"testing"
 	"time"
 
+	digest "github.com/opencontainers/go-digest"
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
+	"github.com/sozercan/dalec-homebrew/internal/catalogartifactstore"
 	"github.com/sozercan/dalec-homebrew/internal/catalogauth"
 	"github.com/sozercan/dalec-homebrew/internal/homebrew/metadata"
 )
@@ -44,6 +47,19 @@ func (c *lockedClock) Add(duration time.Duration) {
 
 func testDigest(character byte) string {
 	return "sha256:" + strings.Repeat(string(character), 64)
+}
+
+func testServiceArtifact(t *testing.T) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	writer := gzip.NewWriter(&output)
+	if _, err := writer.Write([]byte("service-hosted generated artifact")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
 }
 
 func testRequest(t *testing.T) *catalog.Request {
@@ -196,6 +212,201 @@ func waitOperation(t *testing.T, service http.Handler, id string, want catalog.O
 			t.Fatalf("timed out waiting for operation %s", want)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestArtifactHTTPGetHeadPersistsAcrossRestartAndFailsClosedOnCorruption(t *testing.T) {
+	storeDir := t.TempDir()
+	keyPath, _ := writeSigningKey(t, t.TempDir())
+	clock := &lockedClock{now: time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC)}
+	artifactStore, err := catalogartifactstore.New(storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := testServiceArtifact(t)
+	expected := digest.FromBytes(data)
+	if err := artifactStore.Put(expected, int64(len(data)), bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
+	generator := GeneratorFunc(func(context.Context, *catalog.Request) (*GeneratedSet, error) {
+		t.Fatal("artifact requests must not invoke the catalog generator")
+		return nil, nil
+	})
+	config := testConfig(storeDir, keyPath, generator, clock)
+	config.ArtifactStore = artifactStore
+	service, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := catalogartifactstore.HTTPPathPrefix + expected.Encoded()
+	assertArtifact := func(t *testing.T, handler http.Handler, method string) {
+		t.Helper()
+		request := httptest.NewRequest(method, "https://service.test"+path, nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s artifact status=%d body=%s", method, response.Code, response.Body.String())
+		}
+		if got := response.Header().Get("Content-Length"); got != fmt.Sprint(len(data)) {
+			t.Fatalf("%s content-length=%q", method, got)
+		}
+		if got := response.Header().Get("Content-Type"); got != "application/gzip" {
+			t.Fatalf("%s content-type=%q", method, got)
+		}
+		if got := response.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+			t.Fatalf("%s cache-control=%q", method, got)
+		}
+		if got := response.Header().Get("ETag"); got != `"`+expected.String()+`"` {
+			t.Fatalf("%s etag=%q", method, got)
+		}
+		if got := response.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Fatalf("%s nosniff=%q", method, got)
+		}
+		if method == http.MethodHead {
+			if response.Body.Len() != 0 {
+				t.Fatalf("HEAD returned %d body bytes", response.Body.Len())
+			}
+		} else if !bytes.Equal(response.Body.Bytes(), data) {
+			t.Fatal("GET artifact bytes differ")
+		}
+	}
+	assertArtifact(t, service, http.MethodGet)
+	assertArtifact(t, service, http.MethodHead)
+	if err := service.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restartedStore, err := catalogartifactstore.New(storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedConfig := testConfig(storeDir, keyPath, generator, clock)
+	restartedConfig.ArtifactStore = restartedStore
+	restarted, err := New(restartedConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	assertArtifact(t, restarted, http.MethodGet)
+
+	artifactPath := filepath.Join(restartedStore.Directory(), expected.Encoded())
+	corrupt := append([]byte(nil), data...)
+	corrupt[len(corrupt)-1] ^= 0xff
+	if err := os.Chmod(artifactPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifactPath, corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(artifactPath, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://service.test"+path, nil)
+	response := httptest.NewRecorder()
+	restarted.ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("corrupt artifact status=%d body=%s", response.Code, response.Body.String())
+	}
+	if bytes.Contains(response.Body.Bytes(), data) {
+		t.Fatal("corrupt artifact bytes were served")
+	}
+}
+
+func TestArtifactHTTPRejectsMethodsQueriesRangesAndMalformedDigests(t *testing.T) {
+	storeDir := t.TempDir()
+	keyPath, _ := writeSigningKey(t, t.TempDir())
+	clock := &lockedClock{now: time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC)}
+	artifactStore, err := catalogartifactstore.New(storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := testServiceArtifact(t)
+	expected := digest.FromBytes(data)
+	if err := artifactStore.Put(expected, int64(len(data)), bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
+	generator := GeneratorFunc(func(context.Context, *catalog.Request) (*GeneratedSet, error) { return nil, errors.New("unused") })
+	config := testConfig(storeDir, keyPath, generator, clock)
+	config.ArtifactStore = artifactStore
+	service, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	path := catalogartifactstore.HTTPPathPrefix + expected.Encoded()
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions} {
+		t.Run("method "+method, func(t *testing.T) {
+			request := httptest.NewRequest(method, "https://service.test"+path, nil)
+			response := httptest.NewRecorder()
+			service.ServeHTTP(response, request)
+			if response.Code != http.StatusMethodNotAllowed || response.Header().Get("Allow") != "GET, HEAD" {
+				t.Fatalf("status=%d allow=%q body=%s", response.Code, response.Header().Get("Allow"), response.Body.String())
+			}
+		})
+	}
+
+	for name, mutate := range map[string]func(*http.Request){
+		"query":       func(request *http.Request) { request.URL.RawQuery = "download=1" },
+		"empty query": func(request *http.Request) { request.URL.ForceQuery = true },
+		"range":       func(request *http.Request) { request.Header.Set("Range", "bytes=0-1") },
+		"empty range": func(request *http.Request) {
+			request.Header["Range"] = []string{""}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "https://service.test"+path, nil)
+			mutate(request)
+			response := httptest.NewRecorder()
+			service.ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	percentEncoded := catalogartifactstore.HTTPPathPrefix + fmt.Sprintf("%%%02x", expected.Encoded()[0]) + expected.Encoded()[1:]
+	malformed := []string{
+		catalogartifactstore.HTTPPathPrefix,
+		percentEncoded,
+		catalogartifactstore.HTTPPathPrefix + strings.Repeat("a", 63),
+		catalogartifactstore.HTTPPathPrefix + strings.Repeat("A", 64),
+		catalogartifactstore.HTTPPathPrefix + strings.Repeat("g", 64),
+		catalogartifactstore.HTTPPathPrefix + expected.Encoded() + "/extra",
+		catalogartifactstore.HTTPPathPrefix + expected.String(),
+	}
+	for _, requestPath := range malformed {
+		t.Run("malformed "+requestPath, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "https://service.test"+requestPath, nil)
+			response := httptest.NewRecorder()
+			service.ServeHTTP(response, request)
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+	missing := httptest.NewRequest(http.MethodGet, "https://service.test"+catalogartifactstore.HTTPPathPrefix+strings.Repeat("f", 64), nil)
+	missingResponse := httptest.NewRecorder()
+	service.ServeHTTP(missingResponse, missing)
+	if missingResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing status=%d body=%s", missingResponse.Code, missingResponse.Body.String())
+	}
+}
+
+func TestNewRejectsArtifactStoreOutsideCatalogStoreRoot(t *testing.T) {
+	storeDir := t.TempDir()
+	artifactStore, err := catalogartifactstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath, _ := writeSigningKey(t, t.TempDir())
+	clock := &lockedClock{now: time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC)}
+	generator := GeneratorFunc(func(context.Context, *catalog.Request) (*GeneratedSet, error) { return nil, errors.New("unused") })
+	config := testConfig(storeDir, keyPath, generator, clock)
+	config.ArtifactStore = artifactStore
+	if _, err := New(config); err == nil || !strings.Contains(err.Error(), "rooted below") {
+		t.Fatalf("mismatched artifact store error=%v", err)
 	}
 }
 

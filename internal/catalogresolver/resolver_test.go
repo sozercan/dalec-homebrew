@@ -8,6 +8,7 @@ import (
 
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
 	"github.com/sozercan/dalec-homebrew/internal/homebrew/metadata"
+	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
 type fakeCore map[string]metadata.Formula
@@ -42,6 +43,40 @@ func externalFormula(t *testing.T, idValue string, deps ...catalog.Dependency) c
 	}
 	d := "sha256:" + strings.Repeat("c", 64)
 	return catalog.Formula{ID: id, Name: id.Name(), HomebrewFullName: string(id), SourcePath: "Formula/" + id.Name() + ".rb", SourceDigest: d, StableVersion: "1", License: "MIT", Dependencies: deps, Bottle: &catalog.BottleDeclaration{RootURL: "https://bottles.example", Files: []catalog.BottleFile{{Tag: "x86_64_linux", URL: "https://bottles.example/" + id.Name() + ".tgz", SHA256: "sha256:" + strings.Repeat("d", 64), Cellar: ":any"}}}}
+}
+
+func prebuiltA365Formula(t *testing.T) catalog.Formula {
+	t.Helper()
+	policy, err := policyv2.LoadTapPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization, ok := policy.PrebuiltArchiveForFormula("sozercan/repo/a365")
+	if !ok {
+		t.Fatal("missing a365 prebuilt archive policy")
+	}
+	id, err := catalog.ParseFormulaID(authorization.FormulaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := make([]catalog.PrebuiltArchiveFile, 0, len(authorization.Platforms))
+	for _, platform := range authorization.Platforms {
+		tag := "x86_64_linux"
+		if platform.Platform == "linux/arm64" {
+			tag = "arm64_linux"
+		}
+		files = append(files, catalog.PrebuiltArchiveFile{Tag: tag, URL: platform.URL, SHA256: platform.SHA256, Format: authorization.Archive.Format})
+	}
+	return catalog.Formula{
+		ID:               id,
+		Name:             id.Name(),
+		HomebrewFullName: string(id),
+		SourcePath:       "Formula/a365.rb",
+		SourceDigest:     authorization.FormulaSourceDigest,
+		StableVersion:    authorization.Version,
+		License:          "MIT",
+		PrebuiltArchive:  &catalog.PrebuiltArchiveDeclaration{Files: files},
+	}
 }
 
 func dep(t *testing.T, raw, normalized string) catalog.Dependency {
@@ -217,5 +252,129 @@ func TestMigrationToCoreRetainsNormalizationTap(t *testing.T) {
 	}
 	if len(closure.RequestedMappings) != 1 || closure.RequestedMappings[0].Resolved != coreID || len(closure.NormalizationTaps) != 1 || closure.NormalizationTaps[0] != tap {
 		t.Fatalf("closure=%+v", closure)
+	}
+}
+
+func TestPrebuiltA365RequestedRoot(t *testing.T) {
+	formula := prebuiltA365Formula(t)
+	tap := formula.ID.Tap()
+	resolver, err := New(fakeCore{}, map[catalog.TapID]*catalog.TapCatalog{tap: tapCatalog(t, string(tap), []catalog.Formula{formula}, nil, nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, platform := range []catalog.Platform{{OS: "linux", Architecture: "amd64"}, {OS: "linux", Architecture: "arm64"}} {
+		t.Run(platform.Architecture, func(t *testing.T) {
+			closure, err := resolver.Resolve([]catalog.FormulaID{formula.ID}, platform)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(closure.Nodes) != 1 || closure.Nodes[0].ID != formula.ID || len(closure.Nodes[0].Dependencies) != 0 || closure.Nodes[0].BottleRebuild != 0 {
+				t.Fatalf("closure=%+v", closure)
+			}
+		})
+	}
+}
+
+func TestPrebuiltA365RejectsPolicyMismatch(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*catalog.Formula)
+		want   string
+	}{
+		{name: "version", mutate: func(formula *catalog.Formula) { formula.StableVersion = "0.3.4" }, want: "stable version"},
+		{name: "source digest", mutate: func(formula *catalog.Formula) { formula.SourceDigest = "sha256:" + strings.Repeat("e", 64) }, want: "source digest"},
+		{name: "license", mutate: func(formula *catalog.Formula) { formula.License = "Apache-2.0" }, want: "license"},
+		{name: "dependency", mutate: func(formula *catalog.Formula) {
+			formula.Dependencies = []catalog.Dependency{dep(t, "hello", "homebrew/core/hello")}
+		}, want: "requires none"},
+		{name: "url", mutate: func(formula *catalog.Formula) {
+			formula.PrebuiltArchive.Files[0].URL = "https://github.com/sozercan/a365cli/releases/download/v0.3.3/substitution.tar.gz"
+		}, want: "URL"},
+		{name: "digest", mutate: func(formula *catalog.Formula) {
+			formula.PrebuiltArchive.Files[0].SHA256 = "sha256:" + strings.Repeat("f", 64)
+		}, want: "digest"},
+		{name: "native bottle exists", mutate: func(formula *catalog.Formula) {
+			formula.PrebuiltArchive.Files = formula.PrebuiltArchive.Files[:1]
+			formula.Bottle = &catalog.BottleDeclaration{RootURL: "https://bottles.example", Files: []catalog.BottleFile{{Tag: "arm64_linux", URL: "https://bottles.example/a365.arm64.tar.gz", SHA256: "sha256:" + strings.Repeat("d", 64), Cellar: ":any"}}}
+		}, want: "requires no bottle"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			formula := prebuiltA365Formula(t)
+			test.mutate(&formula)
+			tap := formula.ID.Tap()
+			resolver, err := New(fakeCore{}, map[catalog.TapID]*catalog.TapCatalog{tap: tapCatalog(t, string(tap), []catalog.Formula{formula}, nil, nil)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = resolver.Resolve([]catalog.FormulaID{formula.ID}, catalog.Platform{OS: "linux", Architecture: "amd64"})
+			if err == nil || !strings.Contains(err.Error(), test.want) || !strings.Contains(err.Error(), "stable bottle") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestPrebuiltArchiveRejectsSpoofFormulaID(t *testing.T) {
+	formula := prebuiltA365Formula(t)
+	formula.ID, _ = catalog.ParseFormulaID("acme/tools/a365")
+	formula.HomebrewFullName = string(formula.ID)
+	tap := formula.ID.Tap()
+	resolver, err := New(fakeCore{}, map[catalog.TapID]*catalog.TapCatalog{tap: tapCatalog(t, string(tap), []catalog.Formula{formula}, nil, nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = resolver.Resolve([]catalog.FormulaID{formula.ID}, catalog.Platform{OS: "linux", Architecture: "amd64"})
+	if err == nil || !strings.Contains(err.Error(), "no exact release-policy authorization") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestNativeBottleTakesPrecedenceOverPrebuiltPolicy(t *testing.T) {
+	formula := prebuiltA365Formula(t)
+	formula.StableVersion = "9.9.9"
+	formula.SourceDigest = "sha256:" + strings.Repeat("e", 64)
+	formula.License = "Apache-2.0"
+	formula.PrebuiltArchive.Files = formula.PrebuiltArchive.Files[1:]
+	formula.Bottle = &catalog.BottleDeclaration{RootURL: "https://bottles.example", Rebuild: 7, Files: []catalog.BottleFile{{Tag: "x86_64_linux", URL: "https://bottles.example/a365.x86_64.tar.gz", SHA256: "sha256:" + strings.Repeat("d", 64), Cellar: ":any"}}}
+	tap := formula.ID.Tap()
+	resolver, err := New(fakeCore{}, map[catalog.TapID]*catalog.TapCatalog{tap: tapCatalog(t, string(tap), []catalog.Formula{formula}, nil, nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closure, err := resolver.Resolve([]catalog.FormulaID{formula.ID}, catalog.Platform{OS: "linux", Architecture: "amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node := nodeByID(t, closure, formula.ID); node.BottleRebuild != 7 || node.FormulaVersion != "9.9.9" {
+		t.Fatalf("node=%+v", node)
+	}
+}
+
+func TestPrebuiltArchiveRejectsWrongArchitecture(t *testing.T) {
+	formula := prebuiltA365Formula(t)
+	formula.PrebuiltArchive.Files = formula.PrebuiltArchive.Files[1:]
+	tap := formula.ID.Tap()
+	resolver, err := New(fakeCore{}, map[catalog.TapID]*catalog.TapCatalog{tap: tapCatalog(t, string(tap), []catalog.Formula{formula}, nil, nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = resolver.Resolve([]catalog.FormulaID{formula.ID}, catalog.Platform{OS: "linux", Architecture: "amd64"})
+	if err == nil || !strings.Contains(err.Error(), "does not declare target tag x86_64_linux") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestPrebuiltArchiveRejectsTransitiveUse(t *testing.T) {
+	a365 := prebuiltA365Formula(t)
+	parent := externalFormula(t, "sozercan/repo/parent", dep(t, "a365", "sozercan/repo/a365"))
+	tap := a365.ID.Tap()
+	resolver, err := New(fakeCore{}, map[catalog.TapID]*catalog.TapCatalog{tap: tapCatalog(t, string(tap), []catalog.Formula{a365, parent}, nil, nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = resolver.Resolve([]catalog.FormulaID{parent.ID}, catalog.Platform{OS: "linux", Architecture: "amd64"})
+	if err == nil || !strings.Contains(err.Error(), "explicitly requested resolved root") {
+		t.Fatalf("err=%v", err)
 	}
 }

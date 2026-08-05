@@ -62,21 +62,22 @@ type TapCatalog struct {
 // Formula contains current stable metadata needed to resolve bottles without
 // evaluating Formula code in the frontend.
 type Formula struct {
-	ID                FormulaID          `json:"id"`
-	Name              string             `json:"name"`
-	HomebrewFullName  string             `json:"homebrew_full_name"`
-	SourcePath        string             `json:"source_path"`
-	SourceDigest      string             `json:"source_digest"`
-	StableVersion     string             `json:"stable_version"`
-	Revision          int                `json:"revision"`
-	VersionScheme     int                `json:"version_scheme"`
-	Disabled          bool               `json:"disabled,omitempty"`
-	KegOnly           bool               `json:"keg_only,omitempty"`
-	License           string             `json:"license,omitempty"`
-	Dependencies      []Dependency       `json:"dependencies,omitempty"`
-	Variations        []FormulaVariation `json:"variations,omitempty"`
-	VersionedFormulae []FormulaID        `json:"versioned_formulae,omitempty"`
-	Bottle            *BottleDeclaration `json:"bottle,omitempty"`
+	ID                FormulaID                   `json:"id"`
+	Name              string                      `json:"name"`
+	HomebrewFullName  string                      `json:"homebrew_full_name"`
+	SourcePath        string                      `json:"source_path"`
+	SourceDigest      string                      `json:"source_digest"`
+	StableVersion     string                      `json:"stable_version"`
+	Revision          int                         `json:"revision"`
+	VersionScheme     int                         `json:"version_scheme"`
+	Disabled          bool                        `json:"disabled,omitempty"`
+	KegOnly           bool                        `json:"keg_only,omitempty"`
+	License           string                      `json:"license,omitempty"`
+	Dependencies      []Dependency                `json:"dependencies,omitempty"`
+	Variations        []FormulaVariation          `json:"variations,omitempty"`
+	VersionedFormulae []FormulaID                 `json:"versioned_formulae,omitempty"`
+	Bottle            *BottleDeclaration          `json:"bottle,omitempty"`
+	PrebuiltArchive   *PrebuiltArchiveDeclaration `json:"prebuilt_archive,omitempty"`
 }
 
 // Dependency preserves the Formula spelling that was evaluated and the
@@ -112,6 +113,21 @@ type BottleFile struct {
 	URL    string `json:"url"`
 	SHA256 string `json:"sha256"`
 	Cellar string `json:"cellar"`
+}
+
+// PrebuiltArchiveDeclaration records candidate stable source archives for
+// target tags without a native bottle. Presence does not authorize selection;
+// the release-bound tap policy remains authoritative.
+type PrebuiltArchiveDeclaration struct {
+	Files []PrebuiltArchiveFile `json:"files"`
+}
+
+// PrebuiltArchiveFile is one checksummed platform-specific stable archive.
+type PrebuiltArchiveFile struct {
+	Tag    string `json:"tag"`
+	URL    string `json:"url"`
+	SHA256 string `json:"sha256"`
+	Format string `json:"format"`
 }
 
 // ScopedMapping is a signed same-tap alias or rename.
@@ -216,24 +232,107 @@ type Requirement struct {
 // BottleArtifact binds exact selected bytes, transport, static verification,
 // Formula-source evidence, and provenance for one platform node.
 type BottleArtifact struct {
-	ID                         FormulaID          `json:"id"`
-	Platform                   Platform           `json:"platform"`
-	Tag                        string             `json:"tag"`
-	Filename                   string             `json:"filename"`
-	SHA256                     string             `json:"sha256"`
-	Size                       int64              `json:"size"`
-	Cellar                     string             `json:"cellar"`
-	Tab                        BottleTab          `json:"tab"`
-	CurrentFormulaSourceDigest string             `json:"current_formula_source_digest"`
-	BottleFormulaSourceDigest  string             `json:"bottle_formula_source_digest"`
-	BottleSourceRepository     string             `json:"bottle_source_repository"`
-	BottleSourceCommit         string             `json:"bottle_source_commit"`
-	BottleFormulaPath          string             `json:"bottle_formula_path"`
-	BottleSourceWaiver         string             `json:"bottle_source_waiver,omitempty"`
-	ExecutablePaths            []string           `json:"executable_paths,omitempty"`
-	Transport                  Transport          `json:"transport"`
-	Verification               BottleVerification `json:"verification"`
-	Provenance                 Provenance         `json:"provenance"`
+	ID                         FormulaID           `json:"id"`
+	Platform                   Platform            `json:"platform"`
+	Tag                        string              `json:"tag"`
+	Filename                   string              `json:"filename"`
+	SHA256                     string              `json:"sha256"`
+	Size                       int64               `json:"size"`
+	Cellar                     string              `json:"cellar"`
+	Tab                        BottleTab           `json:"tab"`
+	CurrentFormulaSourceDigest string              `json:"current_formula_source_digest"`
+	BottleFormulaSourceDigest  string              `json:"bottle_formula_source_digest"`
+	BottleSourceRepository     string              `json:"bottle_source_repository"`
+	BottleSourceCommit         string              `json:"bottle_source_commit"`
+	BottleFormulaPath          string              `json:"bottle_formula_path"`
+	BottleSourceWaiver         string              `json:"bottle_source_waiver,omitempty"`
+	ExecutablePaths            []string            `json:"executable_paths,omitempty"`
+	Transport                  Transport           `json:"transport"`
+	Verification               BottleVerification  `json:"verification"`
+	Provenance                 Provenance          `json:"provenance"`
+	PrebuiltDerivation         *PrebuiltDerivation `json:"prebuilt_derivation,omitempty"`
+}
+
+// PrebuiltDerivation binds the policy-authorized upstream archive and exact
+// deterministic transformation that produced a selected derived bottle. The
+// outer BottleArtifact continues to describe the derived bottle bytes.
+type PrebuiltDerivation struct {
+	PolicyVersion   string                        `json:"policy_version"`
+	PolicyDigest    string                        `json:"policy_digest"`
+	Source          PrebuiltSourceArtifact        `json:"source"`
+	SourceInventory PrebuiltSourceInventory       `json:"source_inventory"`
+	Payload         PrebuiltPayloadEvidence       `json:"payload"`
+	ELF             PrebuiltELFEvidence           `json:"elf"`
+	FormulaSource   PrebuiltFormulaSourceEvidence `json:"formula_source"`
+	RecipeDigest    string                        `json:"recipe_digest"`
+	DerivedBottle   PrebuiltDerivedBottleRelation `json:"derived_bottle"`
+}
+
+// PrebuiltSourceArtifact is the exact upstream stable archive and its bounded
+// public transport. Transport must contain HTTPS and never OCI.
+type PrebuiltSourceArtifact struct {
+	Filename  string    `json:"filename"`
+	Size      int64     `json:"size"`
+	SHA256    string    `json:"sha256"`
+	Format    string    `json:"format"`
+	Transport Transport `json:"transport"`
+}
+
+// PrebuiltSourceInventory summarizes complete hostile-archive verification.
+type PrebuiltSourceInventory struct {
+	InventoryDigest string `json:"inventory_digest"`
+	EntryCount      int    `json:"entry_count"`
+	ExpandedSize    int64  `json:"expanded_size"`
+}
+
+// PrebuiltPayloadEvidence identifies the one executable archive member and the
+// policy-selected path and mode used in the derived bottle.
+type PrebuiltPayloadEvidence struct {
+	SourcePath      string `json:"source_path"`
+	DestinationPath string `json:"destination_path"`
+	SHA256          string `json:"sha256"`
+	Size            int64  `json:"size"`
+	ArchiveMode     uint32 `json:"archive_mode"`
+	DerivedMode     uint32 `json:"derived_mode"`
+}
+
+// PrebuiltELFEvidence records the static executable checks performed before a
+// payload can be included in a derived bottle. Empty dynamic-linking arrays are
+// serialized explicitly so absence is authenticated.
+type PrebuiltELFEvidence struct {
+	Format                     string   `json:"format"`
+	Machine                    string   `json:"machine"`
+	StaticallyLinked           bool     `json:"statically_linked"`
+	Interpreter                string   `json:"interpreter"`
+	NeededLibraries            []string `json:"needed_libraries"`
+	RPaths                     []string `json:"rpaths"`
+	WritableExecutableSegments bool     `json:"writable_executable_segments"`
+}
+
+// PrebuiltFormulaSourceEvidence binds the exact authenticated tap Formula used
+// as the embedded Formula in the derived bottle.
+type PrebuiltFormulaSourceEvidence struct {
+	Transport TapFormulaSourceTransport `json:"transport"`
+	SHA256    string                    `json:"sha256"`
+	Size      int64                     `json:"size"`
+}
+
+// TapFormulaSourceTransport identifies Formula bytes within one exact
+// authenticated default-GitHub tap snapshot.
+type TapFormulaSourceTransport struct {
+	Tap  TapSource `json:"tap"`
+	Path string    `json:"path"`
+}
+
+// PrebuiltDerivedBottleRelation repeats the selected derived-bottle identity so
+// validators can reject mix-and-match source, recipe, and bottle records.
+type PrebuiltDerivedBottleRelation struct {
+	Tag                 string             `json:"tag"`
+	Filename            string             `json:"filename"`
+	SHA256              string             `json:"sha256"`
+	Size                int64              `json:"size"`
+	Verification        BottleVerification `json:"verification"`
+	FormulaSourceDigest string             `json:"formula_source_digest"`
 }
 
 // BottleTab records exact bottle-build receipt metadata independently of the

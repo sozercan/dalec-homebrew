@@ -44,6 +44,27 @@ func TestPourAdapterPropagatesDeferredHomebrewFailure(t *testing.T) {
 	}
 }
 
+func TestPourAdapterDerivedPrebuiltSkipsFormulaHooks(t *testing.T) {
+	data, err := os.ReadFile("pour.rb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		`ARGV.fetch(3) != "--derived-prebuilt"`,
+		"formula.bottle_specification.sha256(",
+		"cellar: :any_skip_relocation",
+		"skip_post_install: derived_prebuilt",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("derived prebuilt adapter is missing %q", want)
+		}
+	}
+	if !strings.Contains(source, "formula.local_bottle_path = bottle_path") {
+		t.Fatal("derived prebuilt path must remain a local bottle pour")
+	}
+}
+
 func TestPourAdapterV2LoadsStagedTapFormula(t *testing.T) {
 	data, err := os.ReadFile("pour.rb")
 	if err != nil {

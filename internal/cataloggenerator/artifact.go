@@ -18,18 +18,27 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sozercan/dalec-homebrew/internal/bottle"
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
+	"github.com/sozercan/dalec-homebrew/internal/catalogartifactstore"
 	"github.com/sozercan/dalec-homebrew/internal/fetcher"
 	"github.com/sozercan/dalec-homebrew/internal/homebrew/formulaid"
 	hboci "github.com/sozercan/dalec-homebrew/internal/homebrew/oci"
+	"github.com/sozercan/dalec-homebrew/internal/prebuilt"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
+	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
 type ProductionArtifactBuilder struct {
-	registry *hboci.Client
-	fetcher  *fetcher.Fetcher
+	registry        *hboci.Client
+	fetcher         artifactFetcher
+	serviceOrigin   string
+	artifactStore   generatedArtifactStore
+	tapPolicy       *policyv2.TapPolicy
+	tapPolicyDigest string
+	derivePrebuilt  prebuiltDeriver
+	inspectBottle   bottleInspector
 }
 
-func NewProductionArtifactBuilder(fetchConfig fetcher.Config) (*ProductionArtifactBuilder, error) {
+func NewProductionArtifactBuilder(fetchConfig fetcher.Config, serviceOrigin string, artifactStore *catalogartifactstore.Store) (*ProductionArtifactBuilder, error) {
 	limits := hboci.DefaultLimits()
 	limits.BlobBytes = catalog.MaxBottleBytes
 	registry, err := hboci.NewClient("https://ghcr.io", hboci.WithLimits(limits))
@@ -40,17 +49,49 @@ func NewProductionArtifactBuilder(fetchConfig fetcher.Config) (*ProductionArtifa
 	if err != nil {
 		return nil, err
 	}
-	return &ProductionArtifactBuilder{registry: registry, fetcher: boundedFetcher}, nil
+	if (serviceOrigin == "") != (artifactStore == nil) {
+		return nil, errors.New("catalog service origin and artifact store must be configured together")
+	}
+	if serviceOrigin != "" {
+		if err := catalog.ValidateServiceOrigin(serviceOrigin); err != nil {
+			return nil, fmt.Errorf("catalog service origin: %w", err)
+		}
+	}
+	tapPolicy, err := policyv2.LoadTapPolicy()
+	if err != nil {
+		return nil, fmt.Errorf("load tap policy: %w", err)
+	}
+	tapPolicyDigest, err := policyv2.TapPolicyDigest()
+	if err != nil {
+		return nil, fmt.Errorf("digest tap policy: %w", err)
+	}
+	var store generatedArtifactStore
+	if artifactStore != nil {
+		store = catalogArtifactStoreAdapter{store: artifactStore}
+	}
+	return &ProductionArtifactBuilder{
+		registry:        registry,
+		fetcher:         boundedFetcher,
+		serviceOrigin:   serviceOrigin,
+		artifactStore:   store,
+		tapPolicy:       tapPolicy,
+		tapPolicyDigest: tapPolicyDigest,
+		derivePrebuilt:  prebuilt.Derive,
+		inspectBottle:   bottle.InspectForCatalog,
+	}, nil
 }
 
 func (b *ProductionArtifactBuilder) Build(ctx context.Context, request *catalog.Request, core CoreSnapshot, catalogs map[catalog.TapID]*catalog.TapCatalog, node catalog.Node, platform catalog.Platform) (catalog.BottleArtifact, error) {
-	if b == nil || b.registry == nil || b.fetcher == nil {
+	if b == nil || b.fetcher == nil {
 		return catalog.BottleArtifact{}, errors.New("artifact builder is unavailable")
 	}
 	if request == nil || core == nil {
 		return catalog.BottleArtifact{}, errors.New("request and core snapshot are required")
 	}
 	if node.ID.IsCore() {
+		if b.registry == nil {
+			return catalog.BottleArtifact{}, errors.New("OCI artifact resolver is unavailable")
+		}
 		return b.buildCore(ctx, request, core, node, platform)
 	}
 	document := catalogs[node.ID.Tap()]
@@ -64,8 +105,15 @@ func (b *ProductionArtifactBuilder) Build(ctx context.Context, request *catalog.
 			break
 		}
 	}
-	if formula == nil || formula.Bottle == nil {
-		return catalog.BottleArtifact{}, fmt.Errorf("Formula %s has no bottle declaration", node.ID)
+	if formula == nil {
+		return catalog.BottleArtifact{}, fmt.Errorf("Formula %s is unavailable", node.ID)
+	}
+	tag := bottleTag(platform)
+	if formula.Bottle == nil {
+		return b.buildExternalPrebuilt(ctx, request, document, *formula, node, platform)
+	}
+	if _, ok := selectBottleFile(formula.Bottle.Files, tag); !ok {
+		return b.buildExternalPrebuilt(ctx, request, document, *formula, node, platform)
 	}
 	sharedID, err := formulaid.Parse(string(node.ID))
 	if err != nil {
@@ -76,6 +124,9 @@ func (b *ProductionArtifactBuilder) Build(ctx context.Context, request *catalog.
 		return catalog.BottleArtifact{}, err
 	}
 	if ghcr {
+		if b.registry == nil {
+			return catalog.BottleArtifact{}, errors.New("OCI artifact resolver is unavailable")
+		}
 		return b.buildExternalOCI(ctx, document, *formula, node, platform, sharedID)
 	}
 	return b.buildExternalHTTPS(ctx, document, *formula, node, platform)

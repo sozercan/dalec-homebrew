@@ -293,6 +293,7 @@ docker run --rm --network none --entrypoint /bin/bash "$FINAL_IMAGE" -lc '
   set -euo pipefail
   hello | grep -F "Hello, world!"
   test -s /home/linuxbrew/.linuxbrew/opt/libdf/lib/libdf.so
+  a365 --version | grep -F "0.3.3"
 '
 
 for name in resolution.json materialization-v2.json runtime-inventory.json; do
@@ -300,9 +301,9 @@ for name in resolution.json materialization-v2.json runtime-inventory.json; do
     "/usr/share/dalec-homebrew/$name" > "$WORK/$name"
 done
 
-NONCORE_ID=svt/avtools/libdf
-NONCORE_TAP=svt/avtools
-jq -e --arg id "$NONCORE_ID" --arg tap "$NONCORE_TAP" '
+LIBDF_ID=svt/avtools/libdf
+LIBDF_TAP=svt/avtools
+jq -e --arg id "$LIBDF_ID" --arg tap "$LIBDF_TAP" '
   .schema_version == "dalec-homebrew-resolution/v2" and
   (([.requested[] | select(.requested == $id and .id == $id)] | length) == 1) and
   (([.nodes[] | select(
@@ -322,7 +323,7 @@ jq -e --arg id "$NONCORE_ID" --arg tap "$NONCORE_TAP" '
   ((.install_order | index($id)) != null)
 ' "$WORK/resolution.json" >/dev/null
 
-jq -e --arg id "$NONCORE_ID" --arg tap "$NONCORE_TAP" '
+jq -e --arg id "$LIBDF_ID" --arg tap "$LIBDF_TAP" '
   .schema_version == "dalec-homebrew-materialization/v2" and
   .preparation.schema_version == "dalec-homebrew-preparation/v2" and
   (([.preparation.verified_bottles[] | select(.id == $id)] | length) == 1) and
@@ -335,7 +336,7 @@ jq -e --arg id "$NONCORE_ID" --arg tap "$NONCORE_TAP" '
   (([.install_deltas[] | select(.schema_version == "dalec-homebrew-install-delta/v2" and .id == $id)] | length) == 1)
 ' "$WORK/materialization-v2.json" >/dev/null
 
-jq -e --arg id "$NONCORE_ID" '
+jq -e --arg id "$LIBDF_ID" '
   .schema_version == "dalec-homebrew-runtime-inventory/v2" and
   (([.entries[] | select(
     .formula_id == $id and
@@ -343,6 +344,60 @@ jq -e --arg id "$NONCORE_ID" '
     (.path | endswith("/libdf.so")) and
     .size > 0
   )] | length) >= 1)
+' "$WORK/runtime-inventory.json" >/dev/null
+
+A365_ID=sozercan/repo/a365
+A365_TAP=sozercan/repo
+jq -e --arg id "$A365_ID" --arg tap "$A365_TAP" '
+  .schema_version == "dalec-homebrew-resolution/v2" and
+  (([.requested[] | select(.requested == $id and .id == $id)] | length) == 1) and
+  (([.nodes[] | select(
+    .id == $id and
+    .tap == $tap and
+    .name == "a365" and
+    .homebrew_full_name == $id and
+    .pkg_version == "0.3.3" and
+    .bottle.transport.oci == null and
+    .bottle.transport.https.fetch_policy_version == "homebrew-bottle-fetch-v1" and
+    (.bottle.transport.https.url | contains("/v1/artifacts/sha256/")) and
+    .bottle.prebuilt_derivation.policy_version == "prebuilt-derived-bottle-v1" and
+    .bottle.prebuilt_derivation.source.format == "tar+gzip" and
+    .bottle.prebuilt_derivation.source.transport.https.fetch_policy_version == "homebrew-bottle-fetch-v1" and
+    .bottle.prebuilt_derivation.source.sha256 == "sha256:71461c31e350cabf4e718a5e1331b39a395a6dc9183bb3ea5922f0fac67404ce" and
+    .bottle.prebuilt_derivation.payload.source_path == "a365" and
+    .bottle.prebuilt_derivation.payload.destination_path == "bin/a365" and
+    .bottle.prebuilt_derivation.elf.machine == "x86_64" and
+    .provenance.waiver.policy == "prebuilt-archive-tap-catalog-jws-and-verified-checksum-v1"
+  )] | length) == 1) and
+  (([.metadata_sources[] | select(
+    .tap == $tap and
+    .catalog_policy_version == "tap-catalog-v1" and
+    .signer.algorithm == "PS512" and
+    .signer.verified == true
+  )] | length) == 1) and
+  ((.install_order | index($id)) != null)
+' "$WORK/resolution.json" >/dev/null
+
+jq -e --arg id "$A365_ID" --arg tap "$A365_TAP" '
+  .schema_version == "dalec-homebrew-materialization/v2" and
+  (([.preparation.verified_bottles[] | select(.id == $id and .receipt == null)] | length) == 1) and
+  (([.preparation.fetch_evidence[] | select(
+    .artifact_id == $id and
+    .schema_version == "bottle-fetch-evidence/v1" and
+    .fetch_policy_version == "homebrew-bottle-fetch-v1"
+  )] | length) == 1) and
+  (([.preparation.staged_formulae[] | select(.id == $id and .tap == $tap and .name == "a365")] | length) == 1) and
+  (([.install_deltas[] | select(.schema_version == "dalec-homebrew-install-delta/v2" and .id == $id)] | length) == 1)
+' "$WORK/materialization-v2.json" >/dev/null
+
+jq -e --arg id "$A365_ID" '
+  .schema_version == "dalec-homebrew-runtime-inventory/v2" and
+  (([.entries[] | select(
+    .formula_id == $id and
+    .type == "file" and
+    (.path | endswith("/bin/a365")) and
+    .size > 0
+  )] | length) == 1)
 ' "$WORK/runtime-inventory.json" >/dev/null
 
 cat <<RESULT

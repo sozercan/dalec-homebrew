@@ -7,12 +7,16 @@
 # disabled by the enclosing BuildKit exec, dependencies were resolved by the
 # frontend, and the Go materializer independently verifies the bottle before
 # this script is called.
+require "digest"
 require "formulary"
 require "formula_installer"
 
-unless [1, 3].include?(ARGV.length)
-  abort "usage: dalec-homebrew-pour.rb <bottle> OR <formula-id> <staged-formula> <bottle>"
+unless [1, 3, 4].include?(ARGV.length)
+  abort "usage: dalec-homebrew-pour.rb <bottle> OR <formula-id> <staged-formula> <bottle> [--derived-prebuilt]"
 end
+
+derived_prebuilt = ARGV.length == 4
+abort "unsupported derived-bottle mode" if derived_prebuilt && ARGV.fetch(3) != "--derived-prebuilt"
 
 if ARGV.length == 1
   bottle_path = Pathname(ARGV.fetch(0)).realpath
@@ -44,6 +48,17 @@ else
   # Network and dependency/source fallback remain disabled by the enclosing
   # materializer execution and installer options.
   formula.local_bottle_path = bottle_path
+
+  if derived_prebuilt
+    # The authenticated Formula intentionally has no upstream bottle block.
+    # Attach only the local derived bottle's relocation policy so Homebrew can
+    # pour it without changing or evaluating the Formula install method.
+    checksum = Digest::SHA256.file(bottle_path).hexdigest
+    formula.bottle_specification.sha256(
+      cellar: :any_skip_relocation,
+      Utils::Bottles.tag.to_sym => checksum,
+    )
+  end
 end
 
 installer = FormulaInstaller.new(
@@ -51,6 +66,7 @@ installer = FormulaInstaller.new(
   installed_on_request: true,
   force_bottle: true,
   ignore_deps: true,
+  skip_post_install: derived_prebuilt,
 )
 installer.install
 

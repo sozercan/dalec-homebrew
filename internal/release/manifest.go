@@ -28,6 +28,7 @@ const (
 	SigstoreProvenancePolicyVersionV1 = "sigstore-in-toto-v1"
 	ChecksumWaiverPolicyVersionV1     = policyv2.NonCoreProvenanceWaiver
 	HTTPSSourceWaiverPolicyVersionV1  = catalog.HTTPSBottleSourceWaiver
+	PrebuiltWaiverPolicyVersionV1     = resolution.PrebuiltProvenanceWaiverPolicyV1
 	CoreWaiverPolicyVersionV1         = "homebrew-jws-and-verified-oci-chain-v1"
 )
 

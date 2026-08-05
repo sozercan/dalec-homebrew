@@ -166,8 +166,10 @@ func convertCatalogNodeV2(node catalog.Node, artifact catalog.BottleArtifact, no
 		}
 	}
 	if artifact.Transport.HTTPS != nil {
-		transport := artifact.Transport.HTTPS
-		bottle.Transport.HTTPS = &resolution.HTTPSTransport{URL: transport.URL, ExpectedSize: transport.ExpectedSize, SHA256: transport.SHA256, Filename: transport.Filename, AllowedRedirectHosts: slices.Clone(transport.AllowedRedirectHosts), FetchPolicyVersion: transport.FetchPolicyVersion}
+		bottle.Transport.HTTPS = convertCatalogHTTPSTransportV2(*artifact.Transport.HTTPS)
+	}
+	if artifact.PrebuiltDerivation != nil {
+		bottle.PrebuiltDerivation = convertCatalogPrebuiltDerivationV2(*artifact.PrebuiltDerivation)
 	}
 	provenance := resolution.Provenance{}
 	if artifact.Provenance.Verified != nil {
@@ -178,6 +180,91 @@ func convertCatalogNodeV2(node catalog.Node, artifact catalog.BottleArtifact, no
 		provenance.Waiver = &resolution.ProvenanceWaiver{Policy: artifact.Provenance.Waiver.Policy}
 	}
 	return resolution.NodeV2{ID: resolution.FormulaID(node.ID), Tap: resolution.TapID(node.Tap), Name: node.Name, HomebrewFullName: resolution.FormulaID(node.HomebrewFullName), FormulaVersion: node.FormulaVersion, FormulaRevision: node.FormulaRevision, PkgVersion: node.PkgVersion, VersionScheme: node.VersionScheme, BottleRebuild: node.BottleRebuild, License: node.License, KegOnly: node.KegOnly, Dependencies: deps, Bottle: bottle, Provenance: provenance, ExecutablePaths: slices.Clone(artifact.ExecutablePaths)}, nil
+}
+
+func convertCatalogPrebuiltDerivationV2(value catalog.PrebuiltDerivation) *resolution.PrebuiltDerivationV2 {
+	return &resolution.PrebuiltDerivationV2{
+		PolicyVersion: value.PolicyVersion,
+		PolicyDigest:  value.PolicyDigest,
+		Source: resolution.PrebuiltSourceArtifactV2{
+			Filename:  value.Source.Filename,
+			Size:      value.Source.Size,
+			SHA256:    value.Source.SHA256,
+			Format:    value.Source.Format,
+			Transport: convertCatalogTransportV2(value.Source.Transport),
+		},
+		SourceInventory: resolution.PrebuiltSourceInventoryV2{
+			InventoryDigest: value.SourceInventory.InventoryDigest,
+			EntryCount:      value.SourceInventory.EntryCount,
+			ExpandedSize:    value.SourceInventory.ExpandedSize,
+		},
+		Payload: resolution.PrebuiltPayloadEvidenceV2{
+			SourcePath:      value.Payload.SourcePath,
+			DestinationPath: value.Payload.DestinationPath,
+			SHA256:          value.Payload.SHA256,
+			Size:            value.Payload.Size,
+			ArchiveMode:     value.Payload.ArchiveMode,
+			DerivedMode:     value.Payload.DerivedMode,
+		},
+		ELF: resolution.PrebuiltELFEvidenceV2{
+			Format:                     value.ELF.Format,
+			Machine:                    value.ELF.Machine,
+			StaticallyLinked:           value.ELF.StaticallyLinked,
+			Interpreter:                value.ELF.Interpreter,
+			NeededLibraries:            cloneStringsV2(value.ELF.NeededLibraries),
+			RPaths:                     cloneStringsV2(value.ELF.RPaths),
+			WritableExecutableSegments: value.ELF.WritableExecutableSegments,
+		},
+		FormulaSource: resolution.PrebuiltFormulaSourceEvidenceV2{
+			Transport: resolution.TapFormulaSourceTransportV2{
+				Tap: resolution.TapSourceV2{
+					ID:            resolution.TapID(value.FormulaSource.Transport.Tap.ID),
+					Repository:    value.FormulaSource.Transport.Tap.Repository,
+					Commit:        value.FormulaSource.Transport.Tap.Commit,
+					TreeDigest:    value.FormulaSource.Transport.Tap.TreeDigest,
+					ArchiveDigest: value.FormulaSource.Transport.Tap.ArchiveDigest,
+				},
+				Path: value.FormulaSource.Transport.Path,
+			},
+			SHA256: value.FormulaSource.SHA256,
+			Size:   value.FormulaSource.Size,
+		},
+		RecipeDigest: value.RecipeDigest,
+		DerivedBottle: resolution.PrebuiltDerivedBottleRelationV2{
+			Tag:                 value.DerivedBottle.Tag,
+			Filename:            value.DerivedBottle.Filename,
+			SHA256:              value.DerivedBottle.SHA256,
+			Size:                value.DerivedBottle.Size,
+			Verification:        convertCatalogBottleVerificationV2(value.DerivedBottle.Verification),
+			FormulaSourceDigest: value.DerivedBottle.FormulaSourceDigest,
+		},
+	}
+}
+
+func convertCatalogTransportV2(value catalog.Transport) resolution.BottleTransport {
+	var result resolution.BottleTransport
+	if value.OCI != nil {
+		result.OCI = &resolution.OCITransport{Registry: value.OCI.Registry, Repository: value.OCI.Repository, Index: convertCatalogDescriptor(value.OCI.Index), Manifest: convertCatalogDescriptor(value.OCI.Manifest), Config: convertCatalogDescriptor(value.OCI.Config), Layer: convertCatalogDescriptor(value.OCI.Layer)}
+	}
+	if value.HTTPS != nil {
+		result.HTTPS = convertCatalogHTTPSTransportV2(*value.HTTPS)
+	}
+	return result
+}
+
+func convertCatalogHTTPSTransportV2(value catalog.HTTPSTransport) *resolution.HTTPSTransport {
+	return &resolution.HTTPSTransport{URL: value.URL, ExpectedSize: value.ExpectedSize, SHA256: value.SHA256, Filename: value.Filename, AllowedRedirectHosts: slices.Clone(value.AllowedRedirectHosts), FetchPolicyVersion: value.FetchPolicyVersion}
+}
+
+func convertCatalogBottleVerificationV2(value catalog.BottleVerification) resolution.BottleVerificationV2 {
+	return resolution.BottleVerificationV2{PolicyVersion: value.PolicyVersion, InventoryDigest: value.InventoryDigest, EntryCount: value.EntryCount, ExpandedSize: value.ExpandedSize}
+}
+
+func cloneStringsV2(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string{}, values...)
 }
 
 func convertCatalogDescriptor(value catalog.Descriptor) resolution.Descriptor {

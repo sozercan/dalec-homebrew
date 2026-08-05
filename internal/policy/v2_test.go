@@ -240,7 +240,7 @@ func testRuntimePolicyRecordV2(t *testing.T) *resolution.RecordV2 {
 			BuildKitModule:                    "github.com/moby/buildkit@v0.31.2",
 			SupportedCatalogPolicyVersions:    []string{"tap-catalog-v1"},
 			SupportedFetchPolicyVersions:      []string{resolution.HTTPSFetchPolicyVersionV1},
-			SupportedProvenancePolicyVersions: []string{resolution.CoreProvenanceWaiverPolicyV1, resolution.HTTPSBottleSourceWaiverPolicyV1, resolution.ProvenanceWaiverPolicyV1, resolution.VerifiedProvenancePolicyV1},
+			SupportedProvenancePolicyVersions: []string{resolution.CoreProvenanceWaiverPolicyV1, resolution.HTTPSBottleSourceWaiverPolicyV1, resolution.ProvenanceWaiverPolicyV1, resolution.PrebuiltProvenanceWaiverPolicyV1, resolution.VerifiedProvenancePolicyV1},
 		},
 		Runtime: resolution.RuntimePolicy{User: "linuxbrew", UID: 1000, GID: 1000, CPUBaseline: "core2"},
 	}

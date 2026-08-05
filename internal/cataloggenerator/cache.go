@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -19,9 +20,15 @@ import (
 )
 
 const (
-	cacheSchemaVersion  = "dalec-homebrew-ingestion-cache/v1"
-	maxCacheRecordBytes = catalog.MaxCatalogDocumentBytes + 1<<20
+	cacheSchemaVersion         = "dalec-homebrew-ingestion-cache/v1"
+	artifactCacheSchemaVersion = "dalec-homebrew-ingestion-artifact-cache/v2"
+	maxCacheRecordBytes        = catalog.MaxCatalogDocumentBytes + 1<<20
 )
+
+type artifactCacheBinder interface {
+	artifactCacheBinding() ([]byte, error)
+	validateCachedArtifact(*catalog.Request, map[catalog.TapID]*catalog.TapCatalog, catalog.Node, catalog.Platform, catalog.BottleArtifact) error
+}
 
 type cachedTapExtractor struct {
 	inner  TapExtractor
@@ -105,7 +112,15 @@ func newCachedArtifactBuilder(root string, inner ArtifactBuilder) (*cachedArtifa
 }
 
 func (c *cachedArtifactBuilder) Build(ctx context.Context, request *catalog.Request, core CoreSnapshot, catalogs map[catalog.TapID]*catalog.TapCatalog, node catalog.Node, platform catalog.Platform) (catalog.BottleArtifact, error) {
-	keyData, err := artifactCacheIdentity(request, core, catalogs, node, platform)
+	var builderBinding []byte
+	if binder, ok := c.inner.(artifactCacheBinder); ok {
+		var err error
+		builderBinding, err = binder.artifactCacheBinding()
+		if err != nil {
+			return catalog.BottleArtifact{}, err
+		}
+	}
+	keyData, err := artifactCacheIdentity(request, core, catalogs, node, platform, builderBinding)
 	if err != nil {
 		return catalog.BottleArtifact{}, err
 	}
@@ -116,7 +131,9 @@ func (c *cachedArtifactBuilder) Build(ctx context.Context, request *catalog.Requ
 	if data, err := readCacheFile(path, maxCacheRecordBytes); err == nil {
 		var artifact catalog.BottleArtifact
 		if decodeStrict(data, &artifact) == nil && catalog.ValidateBottleArtifact(artifact) == nil && artifact.ID == node.ID && artifact.Platform == platform {
-			return artifact, nil
+			if binder, ok := c.inner.(artifactCacheBinder); !ok || binder.validateCachedArtifact(request, catalogs, node, platform, artifact) == nil {
+				return artifact, nil
+			}
 		}
 	}
 	artifact, err := c.inner.Build(ctx, request, core, catalogs, node, platform)
@@ -125,6 +142,11 @@ func (c *cachedArtifactBuilder) Build(ctx context.Context, request *catalog.Requ
 	}
 	if err := catalog.ValidateBottleArtifact(artifact); err != nil {
 		return catalog.BottleArtifact{}, err
+	}
+	if binder, ok := c.inner.(artifactCacheBinder); ok {
+		if err := binder.validateCachedArtifact(request, catalogs, node, platform, artifact); err != nil {
+			return catalog.BottleArtifact{}, err
+		}
 	}
 	data, err := json.Marshal(artifact)
 	if err != nil {
@@ -136,16 +158,17 @@ func (c *cachedArtifactBuilder) Build(ctx context.Context, request *catalog.Requ
 	return artifact, nil
 }
 
-func artifactCacheIdentity(request *catalog.Request, core CoreSnapshot, catalogs map[catalog.TapID]*catalog.TapCatalog, node catalog.Node, platform catalog.Platform) ([]byte, error) {
+func artifactCacheIdentity(request *catalog.Request, core CoreSnapshot, catalogs map[catalog.TapID]*catalog.TapCatalog, node catalog.Node, platform catalog.Platform, builderBinding []byte) ([]byte, error) {
 	identity := struct {
 		SchemaVersion  string             `json:"schema_version"`
 		HomebrewCommit string             `json:"homebrew_commit"`
 		CoreDigest     string             `json:"core_digest"`
+		BuilderBinding json.RawMessage    `json:"builder_binding,omitempty"`
 		Node           catalog.Node       `json:"node"`
 		Platform       catalog.Platform   `json:"platform"`
 		Tap            *catalog.TapSource `json:"tap,omitempty"`
 		Formula        *catalog.Formula   `json:"formula,omitempty"`
-	}{SchemaVersion: cacheSchemaVersion, Node: node, Platform: platform}
+	}{SchemaVersion: artifactCacheSchemaVersion, BuilderBinding: slices.Clone(builderBinding), Node: node, Platform: platform}
 	if request != nil {
 		identity.HomebrewCommit = request.HomebrewCommit
 	}

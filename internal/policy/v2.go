@@ -112,7 +112,7 @@ func VerifyReleaseBindingsV2(record *resolution.RecordV2) error {
 	}
 	exact("catalog", record.Components.SupportedCatalogPolicyVersions, []string{catalog.TapCatalogPolicyVersion})
 	exact("fetch", record.Components.SupportedFetchPolicyVersions, []string{fetcher.FetchPolicyVersion})
-	exact("provenance", record.Components.SupportedProvenancePolicyVersions, []string{catalog.VerifiedProvenancePolicy, catalog.ChecksumProvenanceWaiver, catalog.HTTPSBottleSourceWaiver, resolution.CoreProvenanceWaiverPolicyV1})
+	exact("provenance", record.Components.SupportedProvenancePolicyVersions, []string{catalog.VerifiedProvenancePolicy, catalog.ChecksumProvenanceWaiver, catalog.HTTPSBottleSourceWaiver, resolution.PrebuiltProvenanceWaiverPolicyV1, resolution.CoreProvenanceWaiverPolicyV1})
 
 	compare := func(name, got, want string) {
 		if want != "" && got != want {

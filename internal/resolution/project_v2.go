@@ -1,10 +1,14 @@
 package resolution
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
+
+const RuntimePrebuiltDerivationAnnotationV2 = "dev.dalec.homebrew.prebuilt-derivation.v2"
 
 // ProjectV2ForRuntime creates a rack-keyed compatibility view for mature
 // filesystem/install helpers. It is not a serialized resolution record and
@@ -53,7 +57,11 @@ func ProjectV2ForRuntime(record *RecordV2) (*Record, map[FormulaID]string, error
 			repository = node.Bottle.Transport.OCI.Repository
 			index, manifest, config, layer = node.Bottle.Transport.OCI.Index, node.Bottle.Transport.OCI.Manifest, node.Bottle.Transport.OCI.Config, node.Bottle.Transport.OCI.Layer
 		}
-		nodes = append(nodes, Node{Name: node.Name, FullName: node.HomebrewFullName.String(), FormulaVersion: node.FormulaVersion, FormulaRevision: node.FormulaRevision, PkgVersion: node.PkgVersion, VersionScheme: node.VersionScheme, BottleRebuild: node.BottleRebuild, License: node.License, KegOnly: node.KegOnly, Dependencies: dependencies, Bottle: Bottle{Tag: node.Bottle.Tag, Filename: node.Bottle.Filename, Repository: repository, Index: index, Manifest: manifest, Config: config, Layer: layer, HomebrewSHA256: node.Bottle.SHA256, Cellar: node.Bottle.Cellar, Tab: BottleTab{HomebrewVersion: node.Bottle.Tab.HomebrewVersion, Arch: node.Bottle.Tab.Arch, Compiler: node.Bottle.Tab.Compiler, ChangedFiles: append([]string(nil), node.Bottle.Tab.ChangedFiles...), BuiltOn: node.Bottle.Tab.BuiltOn, Dependencies: tabDependencies}}, ExecutablePaths: append([]string(nil), node.ExecutablePaths...), UpstreamFormulaID: node.UpstreamFormulaID.String(), PolicyFormulaID: node.ID.String()})
+		selectedAnnotations, err := projectPrebuiltDerivationV2(node.Bottle.PrebuiltDerivation)
+		if err != nil {
+			return nil, nil, fmt.Errorf("project prebuilt derivation for %q: %w", node.ID, err)
+		}
+		nodes = append(nodes, Node{Name: node.Name, FullName: node.HomebrewFullName.String(), FormulaVersion: node.FormulaVersion, FormulaRevision: node.FormulaRevision, PkgVersion: node.PkgVersion, VersionScheme: node.VersionScheme, BottleRebuild: node.BottleRebuild, License: node.License, KegOnly: node.KegOnly, Dependencies: dependencies, Bottle: Bottle{Tag: node.Bottle.Tag, Filename: node.Bottle.Filename, Repository: repository, Index: index, Manifest: manifest, Config: config, Layer: layer, HomebrewSHA256: node.Bottle.SHA256, Cellar: node.Bottle.Cellar, Tab: BottleTab{HomebrewVersion: node.Bottle.Tab.HomebrewVersion, Arch: node.Bottle.Tab.Arch, Compiler: node.Bottle.Tab.Compiler, ChangedFiles: append([]string(nil), node.Bottle.Tab.ChangedFiles...), BuiltOn: node.Bottle.Tab.BuiltOn, Dependencies: tabDependencies}, SelectedAnnotations: selectedAnnotations}, ExecutablePaths: append([]string(nil), node.ExecutablePaths...), UpstreamFormulaID: node.UpstreamFormulaID.String(), PolicyFormulaID: node.ID.String()})
 	}
 	requested := make([]RequestedRoot, len(record.Requested))
 	for i, root := range record.Requested {
@@ -65,4 +73,26 @@ func ProjectV2ForRuntime(record *RecordV2) (*Record, map[FormulaID]string, error
 	}
 	projected := &Record{SchemaVersion: SchemaVersionV1, PolicyVersion: PolicyVersionV2, Input: record.Input, ResolvedAt: record.ResolvedAt, SourceDateEpoch: record.SourceDateEpoch, Requested: requested, Nodes: nodes, InstallOrder: order, Runtime: record.Runtime, PruningPolicyDigest: record.PruningPolicyDigest}
 	return projected, rackByID, nil
+}
+
+func projectPrebuiltDerivationV2(derivation *PrebuiltDerivationV2) ([]KV, error) {
+	if derivation == nil {
+		return nil, nil
+	}
+	clone := *derivation
+	if transport := derivation.Source.Transport.HTTPS; transport != nil {
+		transportClone := *transport
+		transportClone.AllowedRedirectHosts = slices.Clone(transport.AllowedRedirectHosts)
+		slices.Sort(transportClone.AllowedRedirectHosts)
+		clone.Source.Transport.HTTPS = &transportClone
+	}
+	clone.ELF.NeededLibraries = slices.Clone(derivation.ELF.NeededLibraries)
+	clone.ELF.RPaths = slices.Clone(derivation.ELF.RPaths)
+	slices.Sort(clone.ELF.NeededLibraries)
+	slices.Sort(clone.ELF.RPaths)
+	data, err := json.Marshal(clone)
+	if err != nil {
+		return nil, err
+	}
+	return []KV{{Key: RuntimePrebuiltDerivationAnnotationV2, Value: string(data)}}, nil
 }

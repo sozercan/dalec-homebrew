@@ -356,6 +356,24 @@ func validateFormula(formula Formula, tap TapID) error {
 			errs = append(errs, fmt.Errorf("bottle: %w", err))
 		}
 	}
+	if formula.PrebuiltArchive != nil {
+		if err := ValidatePrebuiltArchiveDeclaration(*formula.PrebuiltArchive); err != nil {
+			errs = append(errs, fmt.Errorf("prebuilt_archive: %w", err))
+		}
+	}
+	if formula.Bottle != nil && formula.PrebuiltArchive != nil {
+		bottleTags := make(map[string]struct{}, len(formula.Bottle.Files))
+		for _, file := range formula.Bottle.Files {
+			bottleTags[file.Tag] = struct{}{}
+		}
+		for _, file := range formula.PrebuiltArchive.Files {
+			_, exact := bottleTags[file.Tag]
+			_, all := bottleTags["all"]
+			if exact || all {
+				errs = append(errs, fmt.Errorf("tag %q is declared as both a native bottle and prebuilt archive", file.Tag))
+			}
+		}
+	}
 	return errors.Join(errs...)
 }
 
@@ -395,6 +413,38 @@ func validateDependencies(dependencies []Dependency, owner TapID) error {
 			errs = append(errs, fmt.Errorf("duplicate normalized dependency %q", dependency.ID))
 		}
 		seen[dependency.ID] = struct{}{}
+	}
+	return errors.Join(errs...)
+}
+
+// ValidatePrebuiltArchiveDeclaration validates a policy-eligible stable-source
+// declaration. Authorization remains a separate release-policy decision.
+func ValidatePrebuiltArchiveDeclaration(declaration PrebuiltArchiveDeclaration) error {
+	var errs []error
+	if declaration.Files == nil || len(declaration.Files) == 0 {
+		errs = append(errs, errors.New("files must be a non-empty array"))
+	}
+	if len(declaration.Files) > 2 {
+		errs = append(errs, fmt.Errorf("files has %d entries, limit is 2", len(declaration.Files)))
+	}
+	seen := make(map[string]struct{}, len(declaration.Files))
+	for i, file := range declaration.Files {
+		if file.Tag != "x86_64_linux" && file.Tag != "arm64_linux" {
+			errs = append(errs, fmt.Errorf("files[%d] has unsupported tag %q", i, file.Tag))
+		}
+		if _, duplicate := seen[file.Tag]; duplicate {
+			errs = append(errs, fmt.Errorf("duplicate prebuilt archive tag %q", file.Tag))
+		}
+		seen[file.Tag] = struct{}{}
+		if err := validateHTTPSURL(file.URL, true); err != nil {
+			errs = append(errs, fmt.Errorf("files[%d].url: %w", i, err))
+		}
+		if err := validateSHA256Digest(file.SHA256); err != nil {
+			errs = append(errs, fmt.Errorf("files[%d].sha256: %w", i, err))
+		}
+		if err := validatePrebuiltArchiveFormat(file.Format, file.URL); err != nil {
+			errs = append(errs, fmt.Errorf("files[%d].format: %w", i, err))
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -1041,14 +1091,25 @@ func ValidateBottleArtifact(artifact BottleArtifact) error {
 	if err := validateSHA256Digest(artifact.BottleFormulaSourceDigest); err != nil {
 		errs = append(errs, fmt.Errorf("bottle_formula_source_digest: %w", err))
 	}
-	if artifact.Transport.HTTPS != nil {
+	switch {
+	case artifact.PrebuiltDerivation != nil:
+		if artifact.Transport.HTTPS == nil || artifact.Transport.OCI != nil {
+			errs = append(errs, errors.New("prebuilt-derived bottle requires HTTPS transport"))
+		}
+		if artifact.BottleSourceWaiver != "" {
+			errs = append(errs, errors.New("prebuilt-derived bottle cannot use the native HTTPS bottle source waiver"))
+		}
+		if artifact.BottleSourceRepository != "" || artifact.BottleSourceCommit != "" || artifact.BottleFormulaPath != "" {
+			errs = append(errs, errors.New("prebuilt-derived bottle cannot combine derivation evidence with native bottle source fields"))
+		}
+	case artifact.Transport.HTTPS != nil:
 		if artifact.BottleSourceWaiver != HTTPSBottleSourceWaiver {
 			errs = append(errs, fmt.Errorf("HTTPS bottle requires source waiver %q", HTTPSBottleSourceWaiver))
 		}
 		if artifact.BottleSourceRepository != "" || artifact.BottleSourceCommit != "" || artifact.BottleFormulaPath != "" {
 			errs = append(errs, errors.New("HTTPS bottle source waiver cannot be combined with an asserted historical source"))
 		}
-	} else {
+	default:
 		if artifact.BottleSourceWaiver != "" {
 			errs = append(errs, errors.New("OCI bottle cannot use the HTTPS source waiver"))
 		}
@@ -1084,6 +1145,282 @@ func ValidateBottleArtifact(artifact BottleArtifact) error {
 	}
 	if err := validateProvenance(artifact.Provenance, artifact.SHA256); err != nil {
 		errs = append(errs, fmt.Errorf("provenance: %w", err))
+	}
+	if artifact.PrebuiltDerivation != nil {
+		if artifact.Provenance.Waiver == nil || artifact.Provenance.Waiver.Policy != PrebuiltProvenanceWaiver {
+			errs = append(errs, errors.New("prebuilt derivation requires the dedicated provenance waiver"))
+		}
+		if err := ValidatePrebuiltDerivation(*artifact.PrebuiltDerivation); err != nil {
+			errs = append(errs, fmt.Errorf("prebuilt_derivation: %w", err))
+		}
+		if err := validatePrebuiltDerivationBinding(*artifact.PrebuiltDerivation, artifact); err != nil {
+			errs = append(errs, fmt.Errorf("prebuilt_derivation binding: %w", err))
+		}
+	} else if artifact.Provenance.Waiver != nil && artifact.Provenance.Waiver.Policy == PrebuiltProvenanceWaiver {
+		errs = append(errs, errors.New("prebuilt provenance waiver requires derivation evidence"))
+	}
+	return errors.Join(errs...)
+}
+
+// ValidatePrebuiltDerivation validates the self-contained upstream-source and
+// deterministic derived-bottle evidence. Use ValidateBottleArtifact to also
+// bind it to a selected artifact and target platform.
+func ValidatePrebuiltDerivation(derivation PrebuiltDerivation) error {
+	var errs []error
+	if err := validatePolicyVersion("policy_version", derivation.PolicyVersion); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateSHA256Digest(derivation.PolicyDigest); err != nil {
+		errs = append(errs, fmt.Errorf("policy_digest: %w", err))
+	}
+	if err := validatePrebuiltSourceArtifact(derivation.Source); err != nil {
+		errs = append(errs, fmt.Errorf("source: %w", err))
+	}
+	if err := validatePrebuiltSourceInventory(derivation.SourceInventory); err != nil {
+		errs = append(errs, fmt.Errorf("source_inventory: %w", err))
+	}
+	if err := validatePrebuiltPayloadEvidence(derivation.Payload); err != nil {
+		errs = append(errs, fmt.Errorf("payload: %w", err))
+	}
+	if derivation.Payload.Size > derivation.SourceInventory.ExpandedSize && derivation.SourceInventory.ExpandedSize > 0 {
+		errs = append(errs, errors.New("payload size exceeds verified source expanded size"))
+	}
+	if err := validatePrebuiltELFEvidence(derivation.ELF); err != nil {
+		errs = append(errs, fmt.Errorf("elf: %w", err))
+	}
+	if err := validatePrebuiltFormulaSourceEvidence(derivation.FormulaSource); err != nil {
+		errs = append(errs, fmt.Errorf("formula_source: %w", err))
+	}
+	if err := validateSHA256Digest(derivation.RecipeDigest); err != nil {
+		errs = append(errs, fmt.Errorf("recipe_digest: %w", err))
+	}
+	if err := validatePrebuiltDerivedBottleRelation(derivation.DerivedBottle); err != nil {
+		errs = append(errs, fmt.Errorf("derived_bottle: %w", err))
+	}
+	if derivation.DerivedBottle.FormulaSourceDigest != derivation.FormulaSource.SHA256 {
+		errs = append(errs, errors.New("derived bottle Formula source digest does not match authenticated Formula source"))
+	}
+	if derivation.Source.SHA256 != "" && derivation.Source.SHA256 == derivation.DerivedBottle.SHA256 {
+		errs = append(errs, errors.New("upstream source archive and derived bottle must have distinct digests"))
+	}
+	return errors.Join(errs...)
+}
+
+// ValidatePrebuiltDerivationSource binds a derivation to one platform file in
+// an authenticated prebuilt archive declaration.
+func ValidatePrebuiltDerivationSource(declaration PrebuiltArchiveDeclaration, tag string, derivation PrebuiltDerivation) error {
+	var errs []error
+	if err := ValidatePrebuiltArchiveDeclaration(declaration); err != nil {
+		errs = append(errs, fmt.Errorf("declaration: %w", err))
+	}
+	if err := ValidatePrebuiltDerivation(derivation); err != nil {
+		errs = append(errs, fmt.Errorf("derivation: %w", err))
+	}
+	var selected *PrebuiltArchiveFile
+	for i := range declaration.Files {
+		if declaration.Files[i].Tag == tag {
+			selected = &declaration.Files[i]
+			break
+		}
+	}
+	if selected == nil {
+		errs = append(errs, fmt.Errorf("declaration has no prebuilt archive for tag %q", tag))
+		return errors.Join(errs...)
+	}
+	if derivation.Source.Transport.HTTPS == nil {
+		errs = append(errs, errors.New("derivation source has no HTTPS transport"))
+		return errors.Join(errs...)
+	}
+	if derivation.Source.Transport.HTTPS.URL != selected.URL {
+		errs = append(errs, errors.New("derivation source URL does not match prebuilt declaration"))
+	}
+	if derivation.Source.SHA256 != selected.SHA256 {
+		errs = append(errs, errors.New("derivation source digest does not match prebuilt declaration"))
+	}
+	if derivation.Source.Format != selected.Format {
+		errs = append(errs, errors.New("derivation source format does not match prebuilt declaration"))
+	}
+	return errors.Join(errs...)
+}
+
+func validatePrebuiltSourceArtifact(source PrebuiltSourceArtifact) error {
+	var errs []error
+	if err := validateSafeFilename(source.Filename); err != nil {
+		errs = append(errs, fmt.Errorf("filename: %w", err))
+	}
+	if source.Size <= 0 || source.Size > MaxBottleBytes {
+		errs = append(errs, fmt.Errorf("size %d is outside 1..%d", source.Size, MaxBottleBytes))
+	}
+	if err := validateSHA256Digest(source.SHA256); err != nil {
+		errs = append(errs, fmt.Errorf("sha256: %w", err))
+	}
+	if (source.Transport.OCI == nil) == (source.Transport.HTTPS == nil) {
+		errs = append(errs, errors.New("transport must set exactly one of oci or https"))
+	}
+	if source.Transport.OCI != nil {
+		errs = append(errs, errors.New("transport must use HTTPS, not OCI"))
+	}
+	if source.Transport.HTTPS != nil {
+		binding := BottleArtifact{Filename: source.Filename, Size: source.Size, SHA256: source.SHA256}
+		if err := validateHTTPSTransport(*source.Transport.HTTPS, binding); err != nil {
+			errs = append(errs, fmt.Errorf("transport.https: %w", err))
+		}
+		if parsed, err := url.Parse(source.Transport.HTTPS.URL); err == nil {
+			name, unescapeErr := url.PathUnescape(path.Base(parsed.EscapedPath()))
+			if unescapeErr != nil || name != source.Filename {
+				errs = append(errs, fmt.Errorf("filename %q does not match source URL basename %q", source.Filename, name))
+			}
+		}
+		if err := validatePrebuiltArchiveFormat(source.Format, source.Transport.HTTPS.URL); err != nil {
+			errs = append(errs, fmt.Errorf("format: %w", err))
+		}
+	} else if source.Format != PrebuiltArchiveFormatTarGzip {
+		errs = append(errs, fmt.Errorf("unsupported format %q", source.Format))
+	}
+	return errors.Join(errs...)
+}
+
+func validatePrebuiltSourceInventory(inventory PrebuiltSourceInventory) error {
+	var errs []error
+	if err := validateSHA256Digest(inventory.InventoryDigest); err != nil {
+		errs = append(errs, fmt.Errorf("inventory_digest: %w", err))
+	}
+	if inventory.EntryCount <= 0 || inventory.EntryCount > MaxPrebuiltArchiveEntries {
+		errs = append(errs, fmt.Errorf("entry_count %d is outside 1..%d", inventory.EntryCount, MaxPrebuiltArchiveEntries))
+	}
+	if inventory.ExpandedSize <= 0 || inventory.ExpandedSize > MaxPrebuiltArchiveExpandedBytes {
+		errs = append(errs, fmt.Errorf("expanded_size %d is outside 1..%d", inventory.ExpandedSize, MaxPrebuiltArchiveExpandedBytes))
+	}
+	return errors.Join(errs...)
+}
+
+func validatePrebuiltPayloadEvidence(payload PrebuiltPayloadEvidence) error {
+	var errs []error
+	if err := validateContainedSlashPath(payload.SourcePath); err != nil {
+		errs = append(errs, fmt.Errorf("source_path: %w", err))
+	}
+	if err := validateContainedSlashPath(payload.DestinationPath); err != nil {
+		errs = append(errs, fmt.Errorf("destination_path: %w", err))
+	}
+	if err := validateSHA256Digest(payload.SHA256); err != nil {
+		errs = append(errs, fmt.Errorf("sha256: %w", err))
+	}
+	if payload.Size <= 0 || payload.Size > MaxPrebuiltArchiveExpandedBytes {
+		errs = append(errs, fmt.Errorf("size %d is outside 1..%d", payload.Size, MaxPrebuiltArchiveExpandedBytes))
+	}
+	if payload.ArchiveMode == 0 || payload.ArchiveMode&^0o777 != 0 || payload.ArchiveMode&0o111 == 0 || payload.ArchiveMode&0o022 != 0 {
+		errs = append(errs, fmt.Errorf("archive_mode %#o is not a non-group-writable executable mode", payload.ArchiveMode))
+	}
+	if payload.DerivedMode != 0o555 {
+		errs = append(errs, fmt.Errorf("derived_mode %#o must be 0555", payload.DerivedMode))
+	}
+	return errors.Join(errs...)
+}
+
+func validatePrebuiltELFEvidence(evidence PrebuiltELFEvidence) error {
+	var errs []error
+	if evidence.Format != PrebuiltELFFormatELF64 {
+		errs = append(errs, fmt.Errorf("unsupported format %q", evidence.Format))
+	}
+	if evidence.Machine != PrebuiltELFMachineX8664 && evidence.Machine != PrebuiltELFMachineAArch64 {
+		errs = append(errs, fmt.Errorf("unsupported machine %q", evidence.Machine))
+	}
+	if !evidence.StaticallyLinked {
+		errs = append(errs, errors.New("statically_linked must be true"))
+	}
+	if evidence.Interpreter != "" {
+		errs = append(errs, errors.New("interpreter must be empty for a static executable"))
+	}
+	if evidence.NeededLibraries == nil || len(evidence.NeededLibraries) != 0 {
+		errs = append(errs, errors.New("needed_libraries must be an explicit empty array"))
+	}
+	if evidence.RPaths == nil || len(evidence.RPaths) != 0 {
+		errs = append(errs, errors.New("rpaths must be an explicit empty array"))
+	}
+	if evidence.WritableExecutableSegments {
+		errs = append(errs, errors.New("writable_executable_segments must be false"))
+	}
+	return errors.Join(errs...)
+}
+
+func validatePrebuiltFormulaSourceEvidence(evidence PrebuiltFormulaSourceEvidence) error {
+	var errs []error
+	if err := validateTapSource(evidence.Transport.Tap); err != nil {
+		errs = append(errs, fmt.Errorf("transport.tap: %w", err))
+	}
+	if err := validateFormulaSourceFilePath(evidence.Transport.Path); err != nil {
+		errs = append(errs, fmt.Errorf("transport.path: %w", err))
+	}
+	if err := validateSHA256Digest(evidence.SHA256); err != nil {
+		errs = append(errs, fmt.Errorf("sha256: %w", err))
+	}
+	if evidence.Size <= 0 || evidence.Size > MaxPrebuiltFormulaSourceBytes {
+		errs = append(errs, fmt.Errorf("size %d is outside 1..%d", evidence.Size, MaxPrebuiltFormulaSourceBytes))
+	}
+	return errors.Join(errs...)
+}
+
+func validatePrebuiltDerivedBottleRelation(relation PrebuiltDerivedBottleRelation) error {
+	var errs []error
+	if relation.Tag != "x86_64_linux" && relation.Tag != "arm64_linux" {
+		errs = append(errs, fmt.Errorf("unsupported tag %q", relation.Tag))
+	}
+	if err := validateSafeFilename(relation.Filename); err != nil {
+		errs = append(errs, fmt.Errorf("filename: %w", err))
+	}
+	if err := validateSHA256Digest(relation.SHA256); err != nil {
+		errs = append(errs, fmt.Errorf("sha256: %w", err))
+	}
+	if relation.Size <= 0 || relation.Size > MaxBottleBytes {
+		errs = append(errs, fmt.Errorf("size %d is outside 1..%d", relation.Size, MaxBottleBytes))
+	}
+	if err := validateBottleVerification(relation.Verification); err != nil {
+		errs = append(errs, fmt.Errorf("verification: %w", err))
+	}
+	if err := validateSHA256Digest(relation.FormulaSourceDigest); err != nil {
+		errs = append(errs, fmt.Errorf("formula_source_digest: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
+func validatePrebuiltDerivationBinding(derivation PrebuiltDerivation, artifact BottleArtifact) error {
+	var errs []error
+	if !artifact.Tab.Receiptless {
+		errs = append(errs, errors.New("derived bottle must be marked receiptless"))
+	}
+	if derivation.DerivedBottle.Tag != artifact.Tag {
+		errs = append(errs, errors.New("derived bottle tag does not match selected artifact"))
+	}
+	if derivation.DerivedBottle.Filename != artifact.Filename {
+		errs = append(errs, errors.New("derived bottle filename does not match selected artifact"))
+	}
+	if derivation.DerivedBottle.SHA256 != artifact.SHA256 {
+		errs = append(errs, errors.New("derived bottle digest does not match selected artifact"))
+	}
+	if derivation.DerivedBottle.Size != artifact.Size {
+		errs = append(errs, errors.New("derived bottle size does not match selected artifact"))
+	}
+	if derivation.DerivedBottle.Verification != artifact.Verification {
+		errs = append(errs, errors.New("derived bottle verification does not match selected artifact"))
+	}
+	if derivation.FormulaSource.Transport.Tap.ID != artifact.ID.Tap() {
+		errs = append(errs, errors.New("Formula source tap does not match selected Formula ID"))
+	}
+	if err := validateFormulaSourcePath(derivation.FormulaSource.Transport.Path, artifact.ID.Name()); err != nil {
+		errs = append(errs, fmt.Errorf("Formula source path: %w", err))
+	}
+	if derivation.FormulaSource.SHA256 != artifact.CurrentFormulaSourceDigest || derivation.FormulaSource.SHA256 != artifact.BottleFormulaSourceDigest || derivation.DerivedBottle.FormulaSourceDigest != artifact.BottleFormulaSourceDigest {
+		errs = append(errs, errors.New("Formula source digest does not bind current, embedded, and derived-bottle evidence"))
+	}
+	expectedMachine := PrebuiltELFMachineX8664
+	if artifact.Platform.Architecture == "arm64" {
+		expectedMachine = PrebuiltELFMachineAArch64
+	}
+	if derivation.ELF.Machine != expectedMachine {
+		errs = append(errs, fmt.Errorf("ELF machine %q does not match platform %s", derivation.ELF.Machine, artifact.Platform.key()))
+	}
+	if !slices.Contains(artifact.ExecutablePaths, derivation.Payload.DestinationPath) {
+		errs = append(errs, errors.New("payload destination is absent from selected executable paths"))
 	}
 	return errors.Join(errs...)
 }
@@ -1274,7 +1611,7 @@ func validateProvenance(provenance Provenance, subjectDigest string) error {
 		return errors.New("must set exactly one of verified or waiver")
 	}
 	if provenance.Waiver != nil {
-		if provenance.Waiver.Policy != ChecksumProvenanceWaiver {
+		if provenance.Waiver.Policy != ChecksumProvenanceWaiver && provenance.Waiver.Policy != PrebuiltProvenanceWaiver {
 			return fmt.Errorf("unsupported waiver policy %q", provenance.Waiver.Policy)
 		}
 		return nil
@@ -1567,6 +1904,62 @@ func validateOCIRepository(repository string) error {
 		return fmt.Errorf("repository %q does not follow OCI repository grammar", repository)
 	}
 	return nil
+}
+
+func validatePolicyVersion(name, value string) error {
+	if value == "" || len(value) > 256 || hasControl(value) || value != strings.ToLower(value) {
+		return fmt.Errorf("%s is empty, overlong, contains control characters, or is not lowercase", name)
+	}
+	for i := range len(value) {
+		c := value[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-' || c == '/') {
+			return fmt.Errorf("%s contains unsupported character %q", name, c)
+		}
+	}
+	if !isASCIILowerAlphaNumeric(value[0]) || !isASCIILowerAlphaNumeric(value[len(value)-1]) {
+		return fmt.Errorf("%s must start and end with a lowercase letter or digit", name)
+	}
+	return nil
+}
+
+func validatePrebuiltArchiveFormat(format, sourceURL string) error {
+	if format != PrebuiltArchiveFormatTarGzip {
+		return fmt.Errorf("unsupported archive format %q", format)
+	}
+	if sourceURL == "" {
+		return nil
+	}
+	parsed, err := url.Parse(sourceURL)
+	if err != nil {
+		return err
+	}
+	archivePath := parsed.Path
+	if !strings.HasSuffix(archivePath, ".tar.gz") && !strings.HasSuffix(archivePath, ".tgz") {
+		return fmt.Errorf("URL path %q does not match %q", archivePath, format)
+	}
+	return nil
+}
+
+func validateContainedSlashPath(value string) error {
+	if value == "" || len(value) > MaxSourcePathBytes || hasControl(value) || strings.Contains(value, "\\") || path.IsAbs(value) {
+		return errors.New("must be a bounded relative slash-separated path")
+	}
+	clean := path.Clean(value)
+	if clean != value || clean == "." || strings.HasPrefix(clean, "../") {
+		return fmt.Errorf("path %q is not clean and contained", value)
+	}
+	return nil
+}
+
+func validateFormulaSourceFilePath(value string) error {
+	if err := validateContainedSlashPath(value); err != nil {
+		return err
+	}
+	base := path.Base(value)
+	if !strings.HasSuffix(base, ".rb") || base == ".rb" {
+		return errors.New("path must name a Formula .rb file")
+	}
+	return validateFormulaName(strings.TrimSuffix(base, ".rb"))
 }
 
 func validateFormulaSourcePath(value, formulaName string) error {
