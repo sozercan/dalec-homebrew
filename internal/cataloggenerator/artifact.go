@@ -384,7 +384,14 @@ func catalogBottleTab(tab resolution.BottleTab) (catalog.BottleTab, error) {
 	if err != nil {
 		return catalog.BottleTab{}, err
 	}
-	return catalog.BottleTab{HomebrewVersion: tab.HomebrewVersion, Arch: tab.Arch, Compiler: tab.Compiler, ChangedFiles: slices.Clone(tab.ChangedFiles), BuiltOn: catalog.BottleBuiltOn{OS: tab.BuiltOn.OS, OSVersion: tab.BuiltOn.OSVersion, CPUFamily: tab.BuiltOn.CPUFamily, OldestCPUFamily: tab.BuiltOn.OldestCPUFamily, GlibcVersion: tab.BuiltOn.GlibcVersion}, Dependencies: converted}, nil
+	if len(converted) == 0 {
+		converted = nil
+	}
+	changedFiles := slices.Clone(tab.ChangedFiles)
+	if len(changedFiles) == 0 {
+		changedFiles = nil
+	}
+	return catalog.BottleTab{HomebrewVersion: tab.HomebrewVersion, Arch: tab.Arch, Compiler: tab.Compiler, ChangedFiles: changedFiles, BuiltOn: catalog.BottleBuiltOn{OS: tab.BuiltOn.OS, OSVersion: tab.BuiltOn.OSVersion, CPUFamily: tab.BuiltOn.CPUFamily, OldestCPUFamily: tab.BuiltOn.OldestCPUFamily, GlibcVersion: tab.BuiltOn.GlibcVersion}, Dependencies: converted}, nil
 }
 
 func descriptor(value ocispec.Descriptor) catalog.Descriptor {

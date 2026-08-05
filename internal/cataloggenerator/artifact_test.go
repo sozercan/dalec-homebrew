@@ -12,6 +12,7 @@ import (
 
 	"github.com/sozercan/dalec-homebrew/internal/bottle"
 	"github.com/sozercan/dalec-homebrew/internal/fetcher"
+	"github.com/sozercan/dalec-homebrew/internal/resolution"
 )
 
 type artifactResolver struct{}
@@ -61,5 +62,15 @@ func TestVerifyAnnotatedFormulaSourceBindsEmbeddedBytes(t *testing.T) {
 	inspection.Formula.SHA256 = "sha256:" + strings.Repeat("f", 64)
 	if err := builder.verifyAnnotatedFormulaSource(t.Context(), "https://github.com/acme/homebrew-tools", strings.Repeat("a", 40), "Formula/widget.rb", inspection); err == nil || !strings.Contains(err.Error(), "embedded Formula") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCatalogBottleTabCanonicalizesEmptySlices(t *testing.T) {
+	converted, err := catalogBottleTab(resolution.BottleTab{ChangedFiles: []string{}, Dependencies: []resolution.RuntimeDependency{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.ChangedFiles != nil || converted.Dependencies != nil {
+		t.Fatalf("empty slices were not canonicalized: %+v", converted)
 	}
 }
