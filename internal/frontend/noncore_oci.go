@@ -17,7 +17,7 @@ import (
 
 // ResolveNonCoreOCIArtifacts independently repeats descriptor-chain and
 // annotation validation for every non-core GHCR artifact and requires exact
-// agreement with the signed catalog-service result.
+// agreement with the generated catalog result.
 func ResolveNonCoreOCIArtifacts(ctx context.Context, client *hboci.Client, core catalogresolver.CoreCatalog, result catalog.PlatformResult, catalogs map[catalog.TapID]*catalog.TapCatalog) (catalog.PlatformResult, error) {
 	if client == nil {
 		return catalog.PlatformResult{}, fmt.Errorf("nil OCI client")
@@ -63,7 +63,7 @@ func ResolveNonCoreOCIArtifacts(ctx context.Context, client *hboci.Client, core 
 				return catalog.PlatformResult{}, err
 			}
 			if artifact.Filename != resolved.Filename || artifact.Tag != resolved.SelectedBottleTag || artifact.Cellar != resolved.Cellar || artifact.SHA256 != "sha256:"+resolved.HomebrewSHA256 || artifact.Size != resolved.Layer.Size || !reflect.DeepEqual(canonicalOCITransport(*artifact.Transport.OCI), canonicalOCITransport(recomputed)) || !reflect.DeepEqual(artifact.Tab, resolvedTab) || !slices.Equal(artifact.ExecutablePaths, resolved.ExecutablePaths) {
-				return catalog.PlatformResult{}, fmt.Errorf("signed core OCI artifact for %s differs from official metadata resolution", artifact.ID)
+				return catalog.PlatformResult{}, fmt.Errorf("generated core OCI artifact for %s differs from official metadata resolution", artifact.ID)
 			}
 			result.Artifacts[i].Transport.OCI = &recomputed
 			continue
@@ -115,7 +115,7 @@ func ResolveNonCoreOCIArtifacts(ctx context.Context, client *hboci.Client, core 
 			}
 			declaration, ok := selectCatalogBottleFile(entry.formula.Bottle.Files, artifact.Tag)
 			if !ok || declaration.URL != artifact.Transport.HTTPS.URL || declaration.SHA256 != artifact.SHA256 || declaration.Cellar != artifact.Cellar || artifact.Transport.HTTPS.SHA256 != artifact.SHA256 || artifact.Transport.HTTPS.Filename != artifact.Filename || artifact.Transport.HTTPS.ExpectedSize != artifact.Size {
-				return catalog.PlatformResult{}, fmt.Errorf("signed HTTPS artifact for %s differs from its authenticated Formula declaration", artifact.ID)
+				return catalog.PlatformResult{}, fmt.Errorf("generated HTTPS artifact for %s differs from its authenticated Formula declaration", artifact.ID)
 			}
 			continue
 		}
@@ -138,10 +138,10 @@ func ResolveNonCoreOCIArtifacts(ctx context.Context, client *hboci.Client, core 
 			return catalog.PlatformResult{}, err
 		}
 		if artifact.Filename != resolved.Filename || artifact.Tag != resolved.SelectedBottleTag || artifact.Cellar != resolved.Cellar || artifact.SHA256 != "sha256:"+resolved.HomebrewSHA256 || artifact.Size != resolved.Layer.Size || !reflect.DeepEqual(artifact.Tab, resolvedTab) || !slices.Equal(artifact.ExecutablePaths, resolved.ExecutablePaths) {
-			return catalog.PlatformResult{}, fmt.Errorf("signed OCI artifact identity for %s differs from independent resolution", artifact.ID)
+			return catalog.PlatformResult{}, fmt.Errorf("generated OCI artifact identity for %s differs from independent resolution", artifact.ID)
 		}
 		if !reflect.DeepEqual(canonicalOCITransport(*artifact.Transport.OCI), canonicalOCITransport(recomputed)) {
-			return catalog.PlatformResult{}, fmt.Errorf("signed OCI descriptor chain for %s differs from independent resolution", artifact.ID)
+			return catalog.PlatformResult{}, fmt.Errorf("generated OCI descriptor chain for %s differs from independent resolution", artifact.ID)
 		}
 		result.Artifacts[i].Transport.OCI = &recomputed
 	}
@@ -210,6 +210,10 @@ func catalogBottleTab(tab resolution.BottleTab) (catalog.BottleTab, error) {
 	}
 	if len(dependencies) == 0 {
 		dependencies = nil
+	} else {
+		slices.SortFunc(dependencies, func(a, b catalog.BottleRuntimeDependency) int {
+			return strings.Compare(string(a.ID), string(b.ID))
+		})
 	}
 	return catalog.BottleTab{HomebrewVersion: tab.HomebrewVersion, Arch: tab.Arch, Compiler: tab.Compiler, ChangedFiles: changedFiles, BuiltOn: catalog.BottleBuiltOn{OS: tab.BuiltOn.OS, OSVersion: tab.BuiltOn.OSVersion, CPUFamily: tab.BuiltOn.CPUFamily, OldestCPUFamily: tab.BuiltOn.OldestCPUFamily, GlibcVersion: tab.BuiltOn.GlibcVersion}, Dependencies: dependencies}, nil
 }
