@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,4 +153,23 @@ func writePublicKey(t *testing.T, dir string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestRunBuildLocalBindings(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "bindings.json")
+	ref := "ghcr.io/example/catalog-extractor@sha256:" + strings.Repeat("c", 64)
+	if err := run([]string{"--catalog-extractor-ref", ref, "--output", output}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bindings release.V2Bindings
+	if err := json.Unmarshal(data, &bindings); err != nil {
+		t.Fatal(err)
+	}
+	if bindings.CatalogExtractorRef != ref || bindings.IngestionJWSKeyPolicyDigest != "" {
+		t.Fatalf("bindings = %+v", bindings)
+	}
 }

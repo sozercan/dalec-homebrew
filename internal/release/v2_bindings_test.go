@@ -33,7 +33,7 @@ func TestGenerateV2Bindings(t *testing.T) {
 	if got, want := bindings.SupportedFetchPolicyVersions, "homebrew-bottle-fetch-v1"; got != want {
 		t.Fatalf("fetch policy versions = %q, want %q", got, want)
 	}
-	if got, want := bindings.SupportedProvenancePolicyVersions, "homebrew-jws-and-verified-oci-chain-v1,https-bottle-embedded-formula-digest-only-v1,prebuilt-archive-tap-catalog-jws-and-verified-checksum-v1,sigstore-in-toto-v1,tap-catalog-jws-and-verified-checksum-v1"; got != want {
+	if got, want := bindings.SupportedProvenancePolicyVersions, "homebrew-jws-and-verified-oci-chain-v1,https-bottle-embedded-formula-digest-only-v1,prebuilt-archive-buildkit-and-verified-checksum-v1,sigstore-in-toto-v1,tap-catalog-buildkit-and-verified-checksum-v1"; got != want {
 		t.Fatalf("provenance policy versions = %q, want %q", got, want)
 	}
 
@@ -183,5 +183,24 @@ func testV2BindingsInput(t *testing.T) V2BindingsInput {
 		PublicKeyPEM:           pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicKey}),
 		CatalogServiceDigest:   "sha256:" + strings.Repeat("a", 64),
 		CatalogExtractorDigest: "sha256:" + strings.Repeat("b", 64),
+	}
+}
+
+func TestGenerateBuildLocalV2Bindings(t *testing.T) {
+	ref := "ghcr.io/example/catalog-extractor@sha256:" + strings.Repeat("c", 64)
+	bindings, err := GenerateBuildLocalV2Bindings(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bindings.CatalogExtractorRef != ref || bindings.IngestionJWSKeyPolicyDigest != "" || bindings.IngestionJWSKeyPolicyBase64 != "" {
+		t.Fatalf("build-local bindings = %+v", bindings)
+	}
+	if err := ValidateV2Bindings(bindings); err != nil {
+		t.Fatal(err)
+	}
+	mutated := *bindings
+	mutated.CatalogExtractorRef = ""
+	if err := ValidateV2Bindings(&mutated); err == nil {
+		t.Fatal("missing build-local extractor accepted")
 	}
 }

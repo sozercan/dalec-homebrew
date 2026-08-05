@@ -22,11 +22,14 @@ import (
 
 const (
 	MetadataRollbackPolicyV1         = "monotonic-sequence-v1"
+	BuildLocalExtractionPolicyV1     = "build-local-tap-extraction-v1"
+	BuildLocalRollbackPolicyV1       = "build-local-exact-commit-no-cross-build-rollback-v1"
 	CoreMetadataRollbackPolicyV1     = "homebrew-core-generated-at-v1"
 	HTTPSFetchPolicyVersionV1        = "homebrew-bottle-fetch-v1"
+	BuildLocalArtifactPolicyV1       = "build-local-artifact-v1"
 	VerifiedProvenancePolicyV1       = "sigstore-in-toto-v1"
-	ProvenanceWaiverPolicyV1         = "tap-catalog-jws-and-verified-checksum-v1"
-	PrebuiltProvenanceWaiverPolicyV1 = "prebuilt-archive-tap-catalog-jws-and-verified-checksum-v1"
+	ProvenanceWaiverPolicyV1         = "tap-catalog-buildkit-and-verified-checksum-v1"
+	PrebuiltProvenanceWaiverPolicyV1 = "prebuilt-archive-buildkit-and-verified-checksum-v1"
 	PrebuiltDerivedBottlePolicyV1    = "prebuilt-derived-bottle-v1"
 	HTTPSBottleSourceWaiverPolicyV1  = "https-bottle-embedded-formula-digest-only-v1"
 	BottleVerificationPolicyV1       = "homebrew-bottle-static-v1"
@@ -74,11 +77,12 @@ type RecordV2 struct {
 // does not embed the V1 Components type so V2-only bindings cannot be dropped
 // by projecting through a V1 value.
 type ComponentsV2 struct {
-	FrontendIndexRef string `json:"frontend_index_ref"`
-	FrontendRef      string `json:"frontend_ref"`
-	RuntimeBaseRef   string `json:"runtime_base_ref"`
-	MaterializerRef  string `json:"materializer_ref"`
-	BottleFetcherRef string `json:"bottle_fetcher_ref"`
+	FrontendIndexRef    string `json:"frontend_index_ref"`
+	FrontendRef         string `json:"frontend_ref"`
+	RuntimeBaseRef      string `json:"runtime_base_ref"`
+	MaterializerRef     string `json:"materializer_ref"`
+	BottleFetcherRef    string `json:"bottle_fetcher_ref"`
+	CatalogExtractorRef string `json:"catalog_extractor_ref,omitempty"`
 
 	CatalogServiceOrigin          string `json:"catalog_service_origin"`
 	IngestionJWSKeyPolicyDigest   string `json:"ingestion_jws_key_policy_digest"`
@@ -103,11 +107,23 @@ type MetadataSource struct {
 	Commit               string             `json:"commit"`
 	CatalogPolicyVersion string             `json:"catalog_policy_version,omitempty"`
 	Signer               Signature          `json:"signer"`
+	Extraction           *TapExtractionV2   `json:"extraction,omitempty"`
 	Documents            []MetadataDocument `json:"documents"`
 	GeneratedAt          time.Time          `json:"generated_at"`
 	FetchedAt            time.Time          `json:"fetched_at"`
 	Sequence             uint64             `json:"sequence"`
 	Rollback             RollbackEvidence   `json:"rollback"`
+}
+
+// TapExtractionV2 binds a build-local catalog to the exact release-pinned
+// extractor and immutable Git source observed by the current BuildKit solve.
+type TapExtractionV2 struct {
+	PolicyVersion string `json:"policy_version"`
+	ExtractorRef  string `json:"extractor_ref"`
+	Repository    string `json:"repository"`
+	TreeDigest    string `json:"tree_digest"`
+	ArchiveDigest string `json:"archive_digest"`
+	CatalogDigest string `json:"catalog_digest"`
 }
 
 // MetadataDocument binds one canonical metadata payload and, when present,
@@ -293,6 +309,7 @@ type RuntimeDependencyV2 struct {
 type BottleTransport struct {
 	OCI   *OCITransport   `json:"oci,omitempty"`
 	HTTPS *HTTPSTransport `json:"https,omitempty"`
+	Local *LocalTransport `json:"local,omitempty"`
 }
 
 // OCITransport binds the complete descriptor chain used to replay one bottle.
@@ -314,6 +331,15 @@ type HTTPSTransport struct {
 	Filename             string   `json:"filename"`
 	AllowedRedirectHosts []string `json:"allowed_redirect_hosts"`
 	FetchPolicyVersion   string   `json:"fetch_policy_version"`
+}
+
+// LocalTransport binds generated bottle bytes supplied directly by the
+// current content-addressed BuildKit solve.
+type LocalTransport struct {
+	PolicyVersion string `json:"policy_version"`
+	SHA256        string `json:"sha256"`
+	Size          int64  `json:"size"`
+	Filename      string `json:"filename"`
 }
 
 // Provenance is a strict union: every node has either verified evidence or the
@@ -489,14 +515,27 @@ func ValidateV2(r *RecordV2) error {
 		if len(source.Commit) != 40 || !isLowerHex(source.Commit) {
 			errs = append(errs, fmt.Errorf("%s.commit is not a lowercase 40-character Git commit", label))
 		}
-		if strings.TrimSpace(source.Signer.KeyID) == "" {
-			errs = append(errs, fmt.Errorf("%s.signer.key_id is required", label))
-		}
-		if source.Signer.Algorithm != "PS512" {
-			errs = append(errs, fmt.Errorf("%s.signer.algorithm %q is unsupported", label, source.Signer.Algorithm))
-		}
-		if !source.Signer.Verified {
-			errs = append(errs, fmt.Errorf("%s.signer is not verified", label))
+		localExtraction := source.Extraction != nil
+		if localExtraction {
+			if tapErr != nil || tap == formulaid.CoreTap() {
+				errs = append(errs, fmt.Errorf("%s build-local extraction is valid only for non-core taps", label))
+			}
+			if source.Signer != (Signature{}) {
+				errs = append(errs, fmt.Errorf("%s build-local extraction cannot claim a JWS signer", label))
+			}
+			if err := validateTapExtractionV2(*source.Extraction, source, r.Components); err != nil {
+				errs = append(errs, fmt.Errorf("%s.extraction: %w", label, err))
+			}
+		} else {
+			if strings.TrimSpace(source.Signer.KeyID) == "" {
+				errs = append(errs, fmt.Errorf("%s.signer.key_id is required", label))
+			}
+			if source.Signer.Algorithm != "PS512" {
+				errs = append(errs, fmt.Errorf("%s.signer.algorithm %q is unsupported", label, source.Signer.Algorithm))
+			}
+			if !source.Signer.Verified {
+				errs = append(errs, fmt.Errorf("%s.signer is not verified", label))
+			}
 		}
 		if len(source.Documents) == 0 {
 			errs = append(errs, fmt.Errorf("%s has no authenticated documents", label))
@@ -521,7 +560,7 @@ func ValidateV2(r *RecordV2) error {
 			}
 		}
 		if tapErr == nil {
-			if err := validateMetadataDocumentsV2(label, tap == formulaid.CoreTap(), source.Documents); err != nil {
+			if err := validateMetadataDocumentsV2(label, tap == formulaid.CoreTap(), localExtraction, source.Documents); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -550,6 +589,11 @@ func ValidateV2(r *RecordV2) error {
 			expectedRollbackPolicy = CoreMetadataRollbackPolicyV1
 			if !source.GeneratedAt.IsZero() && source.Sequence != uint64(source.GeneratedAt.Unix()) {
 				errs = append(errs, fmt.Errorf("%s.sequence must equal authenticated core generated_at", label))
+			}
+		} else if localExtraction {
+			expectedRollbackPolicy = BuildLocalRollbackPolicyV1
+			if source.Sequence != 1 || source.Rollback.SequenceFloor != 0 {
+				errs = append(errs, fmt.Errorf("%s build-local rollback evidence must use sequence 1 and floor 0", label))
 			}
 		}
 		if source.Rollback.Policy != expectedRollbackPolicy {
@@ -796,14 +840,30 @@ func validateComponentsV2(components ComponentsV2) error {
 	if strings.Split(components.FrontendIndexRef, "@")[0] != strings.Split(components.FrontendRef, "@")[0] {
 		errs = append(errs, errors.New("V2 frontend index and child use different repositories"))
 	}
-	if err := validateHTTPSOriginV2(components.CatalogServiceOrigin); err != nil {
-		errs = append(errs, fmt.Errorf("V2 catalog service origin: %w", err))
+	localMode := components.CatalogExtractorRef != ""
+	serviceMode := components.CatalogServiceOrigin != "" || components.IngestionJWSKeyPolicyDigest != ""
+	if localMode == serviceMode {
+		errs = append(errs, errors.New("V2 component tuple must select exactly one of build-local extractor or hosted catalog service"))
+	}
+	if localMode {
+		if err := validatePinnedReference(components.CatalogExtractorRef); err != nil {
+			errs = append(errs, fmt.Errorf("V2 catalog extractor component: %w", err))
+		}
+		if components.CatalogServiceOrigin != "" || components.IngestionJWSKeyPolicyDigest != "" {
+			errs = append(errs, errors.New("V2 build-local tuple contains hosted catalog-service fields"))
+		}
+	} else {
+		if err := validateHTTPSOriginV2(components.CatalogServiceOrigin); err != nil {
+			errs = append(errs, fmt.Errorf("V2 catalog service origin: %w", err))
+		}
+		if err := validateDigest(components.IngestionJWSKeyPolicyDigest); err != nil {
+			errs = append(errs, fmt.Errorf("V2 ingestion JWS key policy: %w", err))
+		}
 	}
 	for _, field := range []struct {
 		name  string
 		value string
 	}{
-		{name: "ingestion JWS key policy", value: components.IngestionJWSKeyPolicyDigest},
 		{name: "tap policy", value: components.TapPolicyDigest},
 		{name: "executable runtime policy", value: components.ExecutableRuntimePolicyDigest},
 		{name: "verification key set", value: components.VerificationKeys},
@@ -898,7 +958,35 @@ func stringSet(values []string) map[string]struct{} {
 	return result
 }
 
-func validateMetadataDocumentsV2(label string, core bool, documents []MetadataDocument) error {
+func validateTapExtractionV2(extraction TapExtractionV2, source MetadataSource, components ComponentsV2) error {
+	var errs []error
+	if extraction.PolicyVersion != BuildLocalExtractionPolicyV1 {
+		errs = append(errs, fmt.Errorf("unsupported policy_version %q", extraction.PolicyVersion))
+	}
+	if err := validatePinnedReference(extraction.ExtractorRef); err != nil {
+		errs = append(errs, fmt.Errorf("extractor_ref: %w", err))
+	} else if extraction.ExtractorRef != components.CatalogExtractorRef {
+		errs = append(errs, errors.New("extractor_ref does not match component tuple"))
+	}
+	tap, err := parseCanonicalTapID(source.Tap)
+	if err == nil {
+		want := "https://github.com/" + tap.Owner() + "/homebrew-" + tap.Name()
+		if extraction.Repository != want {
+			errs = append(errs, fmt.Errorf("repository %q does not match %q", extraction.Repository, want))
+		}
+	}
+	for name, value := range map[string]string{"tree_digest": extraction.TreeDigest, "archive_digest": extraction.ArchiveDigest, "catalog_digest": extraction.CatalogDigest} {
+		if err := validateDigest(value); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		}
+	}
+	if len(source.Documents) == 1 && source.Documents[0].Name == "catalog" && source.Documents[0].Digest != extraction.CatalogDigest {
+		errs = append(errs, errors.New("catalog_digest does not match metadata document"))
+	}
+	return errors.Join(errs...)
+}
+
+func validateMetadataDocumentsV2(label string, core, local bool, documents []MetadataDocument) error {
 	type requirement struct {
 		name             string
 		requiresEnvelope bool
@@ -908,6 +996,10 @@ func validateMetadataDocumentsV2(label string, core bool, documents []MetadataDo
 		{name: "set", requiresEnvelope: true},
 	}
 	description := "catalog and set"
+	if local {
+		requirements = []requirement{{name: "catalog", requiresEnvelope: false}}
+		description = "catalog"
+	}
 	if core {
 		requirements = []requirement{
 			{name: "formula", requiresEnvelope: true},
@@ -1002,8 +1094,8 @@ func validateBottleV2(platform Platform, id FormulaID, bottle BottleV2, executab
 			}
 		}
 		if bottle.PrebuiltDerivation != nil {
-			if bottle.Transport.HTTPS == nil {
-				errs = append(errs, fmt.Errorf("node %q prebuilt-derived bottle requires HTTPS transport", id))
+			if bottle.Transport.HTTPS == nil && bottle.Transport.Local == nil {
+				errs = append(errs, fmt.Errorf("node %q prebuilt-derived bottle requires HTTPS or build-local transport", id))
 			}
 			if bottle.BottleSourceWaiver != "" || bottle.BottleSourceRepository != "" || bottle.BottleSourceCommit != "" || bottle.BottleFormulaPath != "" {
 				errs = append(errs, fmt.Errorf("node %q prebuilt-derived bottle conflicts with native bottle source evidence", id))
@@ -1015,6 +1107,8 @@ func validateBottleV2(platform Platform, id FormulaID, bottle BottleV2, executab
 			if bottle.BottleSourceRepository != "" || bottle.BottleSourceCommit != "" || bottle.BottleFormulaPath != "" {
 				errs = append(errs, fmt.Errorf("node %q HTTPS source waiver conflicts with asserted historical source", id))
 			}
+		} else if bottle.Transport.Local != nil {
+			errs = append(errs, fmt.Errorf("node %q build-local transport is limited to prebuilt-derived bottles", id))
 		} else {
 			if bottle.BottleSourceWaiver != "" {
 				errs = append(errs, fmt.Errorf("node %q OCI bottle cannot use an HTTPS source waiver", id))
@@ -1087,12 +1181,15 @@ func validateBottleV2(platform Platform, id FormulaID, bottle BottleV2, executab
 	if bottle.Transport.HTTPS != nil {
 		members++
 	}
+	if bottle.Transport.Local != nil {
+		members++
+	}
 	if members != 1 {
-		errs = append(errs, fmt.Errorf("node %q bottle transport must set exactly one of oci or https", id))
+		errs = append(errs, fmt.Errorf("node %q bottle transport must set exactly one of oci, https, or local", id))
 		return "", errors.Join(errs...)
 	}
-	if bottle.Tab.Receiptless && bottle.Transport.HTTPS == nil {
-		errs = append(errs, fmt.Errorf("node %q receiptless tab marker is supported only for HTTPS bottles", id))
+	if bottle.Tab.Receiptless && bottle.Transport.HTTPS == nil && bottle.Transport.Local == nil {
+		errs = append(errs, fmt.Errorf("node %q receiptless tab marker is supported only for HTTPS or build-local bottles", id))
 	}
 
 	var artifactDigest string
@@ -1181,6 +1278,21 @@ func validateBottleV2(platform Platform, id FormulaID, bottle BottleV2, executab
 		fetchRequest := fetcher.Request{SchemaVersion: fetcher.RequestSchemaVersion, FetchPolicyVersion: transport.FetchPolicyVersion, ArtifactID: id.String(), URL: transport.URL, ExpectedSize: transport.ExpectedSize, SHA256: strings.TrimPrefix(transport.SHA256, "sha256:"), Filename: transport.Filename, AllowedRedirectHosts: slices.Clone(transport.AllowedRedirectHosts)}
 		if err := fetcher.ValidateRequest(fetchRequest); err != nil {
 			errs = append(errs, fmt.Errorf("node %q HTTPS fetch contract: %w", id, err))
+		}
+		if err := validateBottleTarget(platform, id, bottle.Tag, bottle.Tab.Arch, nil); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if transport := bottle.Transport.Local; transport != nil {
+		artifactDigest = transport.SHA256
+		if transport.PolicyVersion != BuildLocalArtifactPolicyV1 {
+			errs = append(errs, fmt.Errorf("node %q build-local policy %q is unsupported", id, transport.PolicyVersion))
+		}
+		if transport.SHA256 != bottle.SHA256 || transport.Size != bottle.Size || transport.Filename != bottle.Filename {
+			errs = append(errs, fmt.Errorf("node %q build-local transport does not match bottle identity", id))
+		}
+		if err := validateDigest(transport.SHA256); err != nil {
+			errs = append(errs, fmt.Errorf("node %q build-local digest: %w", id, err))
 		}
 		if err := validateBottleTarget(platform, id, bottle.Tag, bottle.Tab.Arch, nil); err != nil {
 			errs = append(errs, err)

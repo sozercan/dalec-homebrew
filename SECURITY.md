@@ -22,8 +22,8 @@ The V1 implementation is expected to preserve these properties:
 V2 public-tap releases additionally preserve these properties:
 
 15. Prebuilt executable archives are accepted only for exact Formula IDs in the embedded tap policy. The policy binds the Formula source digest, version, platform URLs and checksums, complete archive inventory, payload mapping, archive limits, static ELF properties, Go module identity, and CGO setting; Dalec input cannot provide or override any of those values.
-16. The catalog service never runs a prebuilt Formula's `install` or `post_install` method. It verifies the upstream archive, derives a canonical receiptless bottle containing only the selected executable and authenticated Formula source, stores that derived bottle by digest, and signs the upstream and derived identities separately. Native bottles take precedence.
-17. Derived bottles pass the same hostile-bottle verification, offline per-package installation, receipt normalization, prefix-delta containment, runtime allowlisting, pruning, and SBOM attribution as upstream bottles. The explicit prebuilt derivation evidence prevents the service-generated artifact from being represented as an upstream-published bottle.
+16. Build-local ingestion never runs a prebuilt Formula's `install` or `post_install` method. It verifies the upstream archive, derives a canonical receiptless bottle containing only the selected executable and authenticated Formula source, and binds the upstream and derived identities separately. Native bottles take precedence.
+17. Derived bottles pass the same hostile-bottle verification, offline per-package installation, receipt normalization, prefix-delta containment, runtime allowlisting, pruning, and SBOM attribution as upstream bottles. The explicit prebuilt derivation evidence prevents the build-locally generated artifact from being represented as an upstream-published bottle.
 
 ## Upstream trust limitations
 
@@ -59,15 +59,17 @@ Please report vulnerabilities privately to the repository maintainers. Include a
 
 ## V2 non-core tap properties
 
-A release may accept `owner/tap/formula` only when its frontend binary contains the complete V2 capability tuple: bottle-fetcher reference, catalog-service HTTPS origin, concrete ingestion-key policy and digest, tap-policy digest, executable runtime-policy digest, and the exact supported catalog/fetch/provenance policy versions. Invocation build arguments cannot upgrade a core-only frontend.
+A release may accept `owner/tap/formula` only when its frontend binary contains the complete V2 capability tuple: bottle-fetcher and catalog-extractor references, tap-policy digest, executable runtime-policy digest, and the exact supported catalog/fetch/provenance policy versions. Invocation build arguments cannot upgrade a core-only frontend.
 
 V2 additionally enforces:
 
 1. Formula graph identity is always `owner/tap/formula`; Cellar rack names are separate and collisions fail closed.
-2. Catalog-set PS512 signatures bind the canonical per-platform request, verified core snapshot, reached tap commits and catalog digests, closure, artifacts, source evidence, static bottle verification, and verified Sigstore/in-toto provenance or the explicit checksum waiver. Advertised Sigstore bundles are checked against the release-bound trusted root and repository-scoped GitHub Actions identity; malformed advertised evidence cannot fall back to a waiver.
-3. Catalog documents are fetched only from the compiled service origin with signed size, 64 MiB per-document and 256 MiB aggregate limits, duplicate-member rejection, and SHA-256 verification.
-4. Non-core GHCR bottles repeat the full descriptor and annotation validation. Other bottles pass through the release-bound HTTPS fetcher; private, authenticated, IP-literal, non-public, downgraded, oversized, or unapproved-redirect sources are rejected.
-5. Preparation re-verifies every bottle and fetch-evidence file before Homebrew executes. Bottle-embedded Formula source is staged under its exact synthetic Tap identity; current catalog source and embedded bottle source remain distinct evidence. GHCR historical source annotations are checked against the exact GitHub commit/path bytes. Receiptless generic HTTPS bottles carry explicit receiptless-tab and historical-source-waiver markers rather than fabricated provenance.
-6. One network-disabled exec installs each bottle. Protected tap trees and the exact Formula trust store cannot be replaced or modified by the runtime user.
-7. Core-only generated-runtime and post-install capabilities are keyed by full Formula ID. A non-core Formula that reuses a core rack name receives no core-specific exception.
-8. V1 records remain immutable and V1-only materializers continue to reject V2. Verification tooling decodes both schemas explicitly.
+2. BuildKit fetches only the derived public default-GitHub repository. Formula evaluation runs in a release-pinned extractor exec with networking disabled, read-only source mounts, no secrets or SSH, and disposable writable state.
+3. Extraction evidence binds the extractor reference, repository, exact commit, tree/archive digests, and canonical catalog digest. Catalog documents remain bounded to 64 MiB each and 256 MiB aggregate with duplicate-member rejection.
+4. Build-local ingestion has no centralized monotonic rollback database. Records explicitly use `build-local-exact-commit-no-cross-build-rollback-v1`; retained releases must reuse exact catalog and bottle bytes rather than re-resolve mutable branches.
+5. Non-core GHCR bottles repeat the full descriptor and annotation validation. Other bottles pass through the release-bound HTTPS fetcher; private, authenticated, IP-literal, non-public, downgraded, oversized, or unapproved-redirect sources are rejected.
+6. Policy-authorized prebuilt archives are verified and transformed into deterministic receiptless bottles during the gateway build. Their bytes use `build-local-artifact-v1` transport and are passed directly to materialization; replay requires retained bytes matching the recorded size and digest.
+7. Preparation re-verifies every bottle before Homebrew executes. Bottle-embedded Formula source is staged under its exact synthetic Tap identity; current catalog source and embedded bottle source remain distinct evidence.
+8. One network-disabled exec installs each bottle. Protected tap trees and the exact Formula trust store cannot be replaced or modified by the runtime user.
+9. Core-only generated-runtime and post-install capabilities are keyed by full Formula ID. A non-core Formula that reuses a core rack name receives no core-specific exception.
+10. V1 records remain immutable and V1-only materializers continue to reject V2. Verification tooling decodes both schemas explicitly.

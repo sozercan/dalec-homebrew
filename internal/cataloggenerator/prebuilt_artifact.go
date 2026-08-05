@@ -30,8 +30,8 @@ const (
 	derivedBottleCellar = "/home/linuxbrew/.linuxbrew/Cellar"
 
 	// Keep this explicit until the catalog schema grows a distinct prebuilt
-	// provenance-waiver constant. The current catalog validator accepts only the
-	// checksum/JWS waiver for an artifact without verified provenance.
+	// provenance-waiver type. The current validator accepts only the build-local
+	// catalog/checksum waiver for an artifact without verified provenance.
 	prebuiltDerivedBottleProvenanceWaiver = catalog.PrebuiltProvenanceWaiver
 )
 
@@ -42,7 +42,7 @@ type artifactFetcher interface {
 	FetchObserved(context.Context, string, int64, string, []string, io.Writer) (fetcher.Evidence, error)
 }
 
-type generatedArtifactStore interface {
+type GeneratedArtifactStore interface {
 	Put(digest.Digest, int64, io.Reader) error
 	Verify(digest.Digest, int64) error
 }
@@ -77,7 +77,7 @@ type selectedPrebuilt struct {
 }
 
 func (b *ProductionArtifactBuilder) buildExternalPrebuilt(ctx context.Context, request *catalog.Request, document *catalog.TapCatalog, formula catalog.Formula, node catalog.Node, platform catalog.Platform) (catalog.BottleArtifact, error) {
-	if b.serviceOrigin == "" || b.artifactStore == nil {
+	if b.artifactStore == nil {
 		return catalog.BottleArtifact{}, fmt.Errorf("Formula %s has no supported native bottle and prebuilt artifact storage is unavailable", node.ID)
 	}
 	if b.derivePrebuilt == nil || b.inspectBottle == nil || b.tapPolicy == nil {
@@ -176,13 +176,17 @@ func (b *ProductionArtifactBuilder) buildExternalPrebuilt(ctx context.Context, r
 	}
 	provenance := catalog.Provenance{Waiver: &catalog.ProvenanceWaiver{Policy: prebuiltDerivedBottleProvenanceWaiver}}
 	artifact := baseArtifact(node, platform, formula.SourceDigest, "", "", "", derivedFilename, tag, derivedBottleCellar, derivedDigest, derivedSize, inspection, tab, executablePathsFromInventory(inspection.Inventory), provenance)
-	artifact.Transport.HTTPS = &catalog.HTTPSTransport{
-		URL:                  b.derivedArtifactURL(derivedDigest),
-		ExpectedSize:         derivedSize,
-		SHA256:               derivedDigest,
-		Filename:             derivedFilename,
-		AllowedRedirectHosts: []string{serviceOriginHost(b.serviceOrigin)},
-		FetchPolicyVersion:   catalog.HTTPSFetchPolicyVersion,
+	if b.serviceOrigin != "" {
+		artifact.Transport.HTTPS = &catalog.HTTPSTransport{
+			URL:                  b.derivedArtifactURL(derivedDigest),
+			ExpectedSize:         derivedSize,
+			SHA256:               derivedDigest,
+			Filename:             derivedFilename,
+			AllowedRedirectHosts: []string{serviceOriginHost(b.serviceOrigin)},
+			FetchPolicyVersion:   catalog.HTTPSFetchPolicyVersion,
+		}
+	} else {
+		artifact.Transport.Local = &catalog.LocalTransport{PolicyVersion: catalog.BuildLocalArtifactPolicyVersion, SHA256: derivedDigest, Size: derivedSize, Filename: derivedFilename}
 	}
 	artifact.PrebuiltDerivation = mapPrebuiltDerivation(selected, b.tapPolicyDigest, document.Tap, formula, sourceFilename, sourceProbe.Size, sourceHosts, derivedFilename, verification, derived)
 	if err := catalog.ValidatePrebuiltDerivationSource(*formula.PrebuiltArchive, tag, *artifact.PrebuiltDerivation); err != nil {

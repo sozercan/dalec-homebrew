@@ -24,6 +24,9 @@ type NonCoreTarget struct {
 
 type NonCoreResolution struct {
 	Request           *catalog.Request
+	Local             bool
+	ExtractorRef      string
+	LocalBottles      map[string]map[catalog.FormulaID][]byte
 	Payload           *catalog.CatalogSetPayload
 	Catalogs          map[catalog.TapID]*catalog.TapCatalog
 	ByPlatform        map[string]catalog.PlatformResult

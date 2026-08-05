@@ -205,7 +205,7 @@ func TestCanonicalV2StableAcrossSetOrdering(t *testing.T) {
 	if digestA != digestB {
 		t.Fatalf("canonical V2 digests differ: %s != %s", digestA, digestB)
 	}
-	const wantDigest = "sha256:cb1bbeeaed68a53fe34764f3b2a465815574a2dcc22f6806873f972e50866833"
+	const wantDigest = "sha256:65706c7853a63dc3d8deb2d3cf518b1c7a33096876835649fbf04cf07e2435db"
 	if digestA.String() != wantDigest {
 		t.Fatalf("canonical V2 digest = %s, want stable %s", digestA, wantDigest)
 	}
@@ -756,5 +756,32 @@ func TestCanonicalV2SortsPrebuiltDerivationSets(t *testing.T) {
 	}
 	if string(left) != string(right) {
 		t.Fatal("prebuilt derivation canonical bytes depend on redirect-host order")
+	}
+}
+
+func TestValidateV2BuildLocalCatalogEvidence(t *testing.T) {
+	record := validRecordV2()
+	record.Components.CatalogExtractorRef = "ghcr.io/example/catalog-extractor@sha256:" + strings.Repeat("e", 64)
+	record.Components.CatalogServiceOrigin = ""
+	record.Components.IngestionJWSKeyPolicyDigest = ""
+	source := metadataSourceV2(record, "acme/tools")
+	source.Signer = Signature{}
+	source.Documents = []MetadataDocument{{Name: "catalog", Digest: "sha256:" + strings.Repeat("a", 64)}}
+	source.Extraction = &TapExtractionV2{
+		PolicyVersion: BuildLocalExtractionPolicyV1,
+		ExtractorRef:  record.Components.CatalogExtractorRef,
+		Repository:    "https://github.com/acme/homebrew-tools",
+		TreeDigest:    "sha256:" + strings.Repeat("b", 64),
+		ArchiveDigest: "sha256:" + strings.Repeat("c", 64),
+		CatalogDigest: source.Documents[0].Digest,
+	}
+	source.Sequence = 1
+	source.Rollback = RollbackEvidence{Policy: BuildLocalRollbackPolicyV1, StateDigest: source.Documents[0].Digest}
+	if err := ValidateV2(record); err != nil {
+		t.Fatal(err)
+	}
+	source.Extraction.ExtractorRef = "ghcr.io/example/other@sha256:" + strings.Repeat("f", 64)
+	if err := ValidateV2(record); err == nil || !strings.Contains(err.Error(), "extractor_ref does not match") {
+		t.Fatalf("tampered extraction error = %v", err)
 	}
 }

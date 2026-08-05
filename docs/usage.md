@@ -7,9 +7,9 @@
 - A Linux `amd64` or `arm64` target
 - Docker Buildx or `buildctl` backed by BuildKit 0.31.2 or newer
 - A `dalec-homebrew` frontend reference pinned by digest
-- Network access from the BuildKit daemon to the frontend and its bound components, `formulae.brew.sh`, and `ghcr.io`; V2 non-core builds also require the release-bound catalog-service origin and selected public bottle or prebuilt-archive hosts
+- Network access from the BuildKit daemon to the frontend and its bound components, `formulae.brew.sh`, `ghcr.io`, public default-GitHub taps, and selected public bottle or prebuilt-archive hosts
 
-The frontend, runtime base, materializer, and—when V2 non-core support is compiled—bottle fetcher, catalog-service origin, ingestion key policy, tap policy, and executable runtime policy are treated as one release component tuple. Mutable image tags are not accepted as trusted inputs.
+The frontend, runtime base, materializer, and—when V2 non-core support is compiled—bottle fetcher, catalog extractor, tap policy, and executable runtime policy are treated as one release component tuple. Mutable image tags are not accepted as trusted inputs.
 
 ## Build an image
 

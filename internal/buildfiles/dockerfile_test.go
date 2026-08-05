@@ -62,6 +62,7 @@ func TestFrontendImageContainsOnlyGatewayAndCABundle(t *testing.T) {
 	stage := dockerfileStage(t, dockerfileText(t), "FROM scratch AS frontend")
 	for _, want := range []string{
 		"COPY --from=ca-bundle /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt",
+		"COPY --from=helper-build /out/frontend-rootfs/ /",
 		"COPY --from=frontend-build /out/dalec-homebrew-frontend /dalec-homebrew-frontend",
 		`moby.buildkit.frontend.caps="moby.buildkit.frontend.inputs"`,
 		`ENTRYPOINT ["/dalec-homebrew-frontend"]`,
@@ -70,8 +71,8 @@ func TestFrontendImageContainsOnlyGatewayAndCABundle(t *testing.T) {
 			t.Fatalf("frontend stage is missing %q", want)
 		}
 	}
-	if got := strings.Count(stage, "\nCOPY "); got != 2 {
-		t.Fatalf("frontend stage has %d COPY instructions, want 2", got)
+	if got := strings.Count(stage, "\nCOPY "); got != 3 {
+		t.Fatalf("frontend stage has %d COPY instructions, want 3", got)
 	}
 	for _, forbidden := range []string{"test-runner", "materializer", "record-verify", "release-verify", "homebrew-1.pub"} {
 		if strings.Contains(stage, forbidden) {
@@ -159,7 +160,7 @@ func TestV2ComponentImagesAreExplicitAndMinimal(t *testing.T) {
 	}
 	for _, binding := range []string{
 		"internal/config.MaterializerV2BindingsRequired=1",
-		"internal/config.IngestionJWSKeyPolicyDigest=${INGESTION_JWS_KEY_POLICY_DIGEST}",
+		"internal/config.CatalogExtractorRef=${CATALOG_EXTRACTOR_REF}",
 		"internal/config.TapPolicyDigest=${TAP_POLICY_DIGEST}",
 		"internal/config.ExecutableRuntimePolicyDigest=${EXECUTABLE_RUNTIME_POLICY_DIGEST}",
 		"internal/config.SupportedCatalogPolicyVersions=${SUPPORTED_CATALOG_POLICY_VERSIONS}",
@@ -184,19 +185,8 @@ func TestV2ComponentImagesAreExplicitAndMinimal(t *testing.T) {
 		t.Fatalf("bottle-fetcher stage has %d COPY instructions, want 2", got)
 	}
 
-	service := dockerfileStage(t, data, "FROM scratch AS catalog-service")
-	for _, want := range []string{
-		"COPY --from=ca-bundle /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt",
-		"COPY --from=helper-build /out/dalec-homebrew-catalog-service /dalec-homebrew-catalog-service",
-		"COPY --from=helper-build --chown=65532:65532 /out/catalog-service-rootfs/ /",
-		`ENTRYPOINT ["/dalec-homebrew-catalog-service"]`,
-	} {
-		if !strings.Contains(service, want) {
-			t.Fatalf("catalog-service stage is missing %q", want)
-		}
-	}
-	if got := strings.Count(service, "\nCOPY "); got != 3 {
-		t.Fatalf("catalog-service stage has %d COPY instructions, want 3", got)
+	if strings.Contains(data, "FROM scratch AS catalog-service") || strings.Contains(data, "dalec-homebrew-catalog-service") {
+		t.Fatal("Dockerfile retains the hosted catalog-service component")
 	}
 
 	extractorRoot := dockerfileStage(t, data, "FROM materializer-rootfs AS catalog-extractor-rootfs")
@@ -213,9 +203,7 @@ func TestFrontendBuildBindsCompleteNonCoreTuple(t *testing.T) {
 	stage := dockerfileStage(t, dockerfileText(t), "FROM go-source AS frontend-build")
 	for _, want := range []string{
 		"internal/config.BottleFetcherRef=${BOTTLE_FETCHER_REF}",
-		"internal/config.CatalogServiceOrigin=${CATALOG_SERVICE_ORIGIN}",
-		"internal/config.IngestionJWSKeyPolicyDigest=${INGESTION_JWS_KEY_POLICY_DIGEST}",
-		"internal/config.IngestionJWSKeyPolicyBase64=${INGESTION_JWS_KEY_POLICY_BASE64}",
+		"internal/config.CatalogExtractorRef=${CATALOG_EXTRACTOR_REF}",
 		"internal/config.TapPolicyDigest=${TAP_POLICY_DIGEST}",
 		"internal/config.ExecutableRuntimePolicyDigest=${EXECUTABLE_RUNTIME_POLICY_DIGEST}",
 		"internal/config.SupportedCatalogPolicyVersions=${SUPPORTED_CATALOG_POLICY_VERSIONS}",

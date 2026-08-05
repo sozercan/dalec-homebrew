@@ -81,8 +81,11 @@ func ResolveNonCoreOCIArtifacts(ctx context.Context, client *hboci.Client, core 
 					return catalog.PlatformResult{}, fmt.Errorf("prebuilt artifact for %s cannot replace an available native bottle", artifact.ID)
 				}
 			}
-			if artifact.Transport.HTTPS == nil || artifact.Transport.OCI != nil {
-				return catalog.PlatformResult{}, fmt.Errorf("prebuilt artifact for %s must use service-hosted HTTPS transport", artifact.ID)
+			if artifact.Transport.HTTPS == nil && artifact.Transport.Local == nil {
+				return catalog.PlatformResult{}, fmt.Errorf("prebuilt artifact for %s must use HTTPS or build-local transport", artifact.ID)
+			}
+			if artifact.Transport.OCI != nil {
+				return catalog.PlatformResult{}, fmt.Errorf("prebuilt artifact for %s cannot use OCI transport", artifact.ID)
 			}
 			if err := catalog.ValidatePrebuiltDerivationSource(*entry.formula.PrebuiltArchive, artifact.Tag, *artifact.PrebuiltDerivation); err != nil {
 				return catalog.PlatformResult{}, fmt.Errorf("independently bind prebuilt source for %s: %w", artifact.ID, err)

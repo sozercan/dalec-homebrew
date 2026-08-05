@@ -20,7 +20,7 @@ const (
 	ResolverPolicyVersion     = "homebrew-runtime-v2"
 	FetchPolicyVersion        = "homebrew-bottle-fetch-v1"
 	ProvenancePolicyVersion   = "homebrew-bottle-provenance-v1"
-	NonCoreProvenanceWaiver   = "tap-catalog-jws-and-verified-checksum-v1"
+	NonCoreProvenanceWaiver   = "tap-catalog-buildkit-and-verified-checksum-v1"
 	DefaultMaxNonCoreTaps     = 16
 	DefaultMaxClosureNodes    = 256
 	DefaultMaxCatalogBytes    = int64(64 << 20)

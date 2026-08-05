@@ -125,14 +125,14 @@ Use `DALEC_HOMEBREW_LIVE_SPEC` to run the same helper with a focused example:
 
 Pull requests run [`scripts/noncore-e2e.sh`](scripts/noncore-e2e.sh) on
 `linux/amd64`. Unlike the core-only live helper, this test assembles the full V2
-path: a local registry, a component BuildKit worker, a separate catalog
-extraction worker, the production catalog-service generator, an ephemeral PS512
-signer and key policy, HTTPS service termination, the bottle fetcher, and
-release-bound V2 materializer/frontend images. It then builds
+path: a local registry, one component BuildKit worker, the release-bound
+catalog extractor and bottle fetcher, and V2 materializer/frontend images. Tap
+metadata and policy-derived bottles remain content-addressed BuildKit states;
+no catalog service, signing key, or public tunnel is started. It then builds
 [`examples/ci-noncore-multi-package.yaml`](examples/ci-noncore-multi-package.yaml)
 from public-tap Formulae plus a core Formula and reruns runtime checks with
-networking disabled. The catalog service resolves each tap's default branch
-and records the exact observed commit in authenticated evidence.
+networking disabled. Build-local ingestion resolves each tap's default branch
+and records the exact observed commit in extraction evidence.
 
 The script is CI-oriented and requires explicit digest-pinned BuildKit,
 registry, and HTTPS-tunnel image inputs:
@@ -140,16 +140,13 @@ registry, and HTTPS-tunnel image inputs:
 ```console
 DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE=docker.io/moby/buildkit@sha256:<digest> \
 DALEC_HOMEBREW_E2E_REGISTRY_IMAGE=docker.io/library/registry@sha256:<digest> \
-DALEC_HOMEBREW_E2E_CLOUDFLARED_IMAGE=docker.io/cloudflare/cloudflared@sha256:<digest> \
 DALEC_HOMEBREW_E2E_RUN_ID=local-1 \
 ./scripts/noncore-e2e.sh
 ```
 
-It needs Docker privilege to start the dedicated ingestion worker, public
-network access to GitHub, Homebrew metadata, GHCR, and the selected tap bottle
-hosts, and unused loopback ports `1234` and `5000`. The catalog origin is an
-ephemeral Cloudflare Quick Tunnel; the catalog signing private key is
-invocation-local and is never added to a build context.
+It needs Docker privilege for the BuildKit worker, public network access to
+GitHub, Homebrew metadata, GHCR, and the selected tap bottle hosts, and unused
+loopback port `5000` for the ephemeral local registry.
 
 ## Validate a published image on a VM
 

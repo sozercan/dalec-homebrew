@@ -30,6 +30,7 @@ const (
 	CoreWaiverPolicyVersionV1         = DefaultAttestationWaiver
 
 	BottleFetcherBuildArg                     = "DALEC_HOMEBREW_BOTTLE_FETCHER"
+	CatalogExtractorBuildArg                  = "DALEC_HOMEBREW_CATALOG_EXTRACTOR"
 	CatalogServiceOriginBuildArg              = "DALEC_HOMEBREW_CATALOG_SERVICE_ORIGIN"
 	IngestionJWSKeyPolicyDigestBuildArg       = "DALEC_HOMEBREW_INGESTION_JWS_KEY_POLICY_DIGEST"
 	TapPolicyDigestBuildArg                   = "DALEC_HOMEBREW_TAP_POLICY_DIGEST"
@@ -48,6 +49,7 @@ var dalecBuildArgs = []string{
 	"DALEC_HOMEBREW_ALLOW_UNATTESTED",
 	"DALEC_HOMEBREW_ATTESTATION_WAIVER",
 	BottleFetcherBuildArg,
+	CatalogExtractorBuildArg,
 	CatalogServiceOriginBuildArg,
 	"DALEC_HOMEBREW_COMMIT",
 	ExecutableRuntimePolicyDigestBuildArg,
@@ -83,6 +85,7 @@ var (
 	PortableRubyVersion    string
 
 	BottleFetcherRef            string
+	CatalogExtractorRef         string
 	CatalogServiceOrigin        string
 	IngestionJWSKeyPolicyDigest string
 	// IngestionJWSKeyPolicyBase64 contains the release-pinned public-key
@@ -113,6 +116,7 @@ type Config struct {
 	AttestationWaiver      string
 
 	BottleFetcherRef            string
+	CatalogExtractorRef         string
 	CatalogServiceOrigin        string
 	IngestionJWSKeyPolicyDigest string
 	// IngestionJWSKeyPolicyBase64 contains the release-pinned public-key
@@ -188,6 +192,7 @@ func FromBuildOpts(opts map[string]string) (Config, error) {
 		AttestationWaiver:      get("DALEC_HOMEBREW_ATTESTATION_WAIVER", DefaultAttestationWaiver),
 
 		BottleFetcherRef:                  bindCapability(BottleFetcherBuildArg, BottleFetcherRef),
+		CatalogExtractorRef:               bindCapability(CatalogExtractorBuildArg, CatalogExtractorRef),
 		CatalogServiceOrigin:              bindCapability(CatalogServiceOriginBuildArg, CatalogServiceOrigin),
 		IngestionJWSKeyPolicyDigest:       bindCapability(IngestionJWSKeyPolicyDigestBuildArg, IngestionJWSKeyPolicyDigest),
 		TapPolicyDigest:                   bindCapability(TapPolicyDigestBuildArg, TapPolicyDigest),
@@ -257,7 +262,7 @@ func FromBuildOpts(opts map[string]string) (Config, error) {
 	if err := validateNonCoreBindings(cfg); err != nil {
 		errs = append(errs, err)
 	}
-	if hasCompiledNonCoreBindings() {
+	if hasCompiledNonCoreBindings() && CatalogExtractorRef == "" {
 		if _, err := CompiledCatalogKeyPolicy(); err != nil {
 			errs = append(errs, fmt.Errorf("compiled ingestion JWS key policy: %w", err))
 		}
@@ -280,6 +285,7 @@ func (c Config) SupportsNonCoreTaps() bool {
 		c.VerificationKeysDigest == compiled.VerificationKeysDigest &&
 		c.PortableRubyVersion == compiled.PortableRubyVersion &&
 		c.BottleFetcherRef == compiled.BottleFetcherRef &&
+		c.CatalogExtractorRef == compiled.CatalogExtractorRef &&
 		c.CatalogServiceOrigin == compiled.CatalogServiceOrigin &&
 		c.IngestionJWSKeyPolicyDigest == compiled.IngestionJWSKeyPolicyDigest &&
 		c.TapPolicyDigest == compiled.TapPolicyDigest &&
@@ -309,8 +315,10 @@ func compiledNonCoreConfig() (Config, bool) {
 	if err != nil {
 		return Config{}, false
 	}
-	if _, err := CompiledCatalogKeyPolicy(); err != nil {
-		return Config{}, false
+	if CatalogExtractorRef == "" {
+		if _, err := CompiledCatalogKeyPolicy(); err != nil {
+			return Config{}, false
+		}
 	}
 	if RuntimeBaseRef == "" || MaterializerRef == "" || HomebrewCommit == "" || VerificationKeysDigest == "" || PortableRubyVersion == "" {
 		return Config{}, false
@@ -319,6 +327,7 @@ func compiledNonCoreConfig() (Config, bool) {
 		RuntimeBaseRef: RuntimeBaseRef, MaterializerRef: MaterializerRef, HomebrewCommit: HomebrewCommit,
 		VerificationKeysDigest: VerificationKeysDigest, PortableRubyVersion: PortableRubyVersion,
 		BottleFetcherRef:                  BottleFetcherRef,
+		CatalogExtractorRef:               CatalogExtractorRef,
 		CatalogServiceOrigin:              CatalogServiceOrigin,
 		IngestionJWSKeyPolicyDigest:       IngestionJWSKeyPolicyDigest,
 		TapPolicyDigest:                   TapPolicyDigest,
@@ -342,14 +351,30 @@ func validateNonCoreBindings(cfg Config) error {
 	if err := validatePinnedRef(cfg.BottleFetcherRef); err != nil {
 		errs = append(errs, fmt.Errorf("bottle fetcher: %w", err))
 	}
-	if err := validateHTTPSOrigin(cfg.CatalogServiceOrigin); err != nil {
-		errs = append(errs, fmt.Errorf("catalog service origin: %w", err))
+	localMode := cfg.CatalogExtractorRef != ""
+	serviceMode := cfg.CatalogServiceOrigin != "" || cfg.IngestionJWSKeyPolicyDigest != ""
+	if localMode == serviceMode {
+		errs = append(errs, errors.New("non-core bindings must select exactly one of build-local extractor or hosted catalog service"))
+	}
+	if localMode {
+		if err := validatePinnedRef(cfg.CatalogExtractorRef); err != nil {
+			errs = append(errs, fmt.Errorf("catalog extractor: %w", err))
+		}
+		if cfg.CatalogServiceOrigin != "" || cfg.IngestionJWSKeyPolicyDigest != "" || cfg.IngestionJWSKeyPolicyBase64 != "" {
+			errs = append(errs, errors.New("build-local extraction cannot include hosted catalog-service bindings"))
+		}
+	} else {
+		if err := validateHTTPSOrigin(cfg.CatalogServiceOrigin); err != nil {
+			errs = append(errs, fmt.Errorf("catalog service origin: %w", err))
+		}
+		if err := validateDigest(cfg.IngestionJWSKeyPolicyDigest); err != nil {
+			errs = append(errs, fmt.Errorf("ingestion JWS key policy: %w", err))
+		}
 	}
 	for _, field := range []struct {
 		name  string
 		value string
 	}{
-		{name: "ingestion JWS key policy", value: cfg.IngestionJWSKeyPolicyDigest},
 		{name: "tap policy", value: cfg.TapPolicyDigest},
 		{name: "executable runtime policy", value: cfg.ExecutableRuntimePolicyDigest},
 	} {
@@ -399,6 +424,7 @@ func validateNonCoreBindings(cfg Config) error {
 
 func hasNonCoreBindings(cfg Config) bool {
 	return cfg.BottleFetcherRef != "" ||
+		cfg.CatalogExtractorRef != "" ||
 		cfg.CatalogServiceOrigin != "" ||
 		cfg.IngestionJWSKeyPolicyDigest != "" ||
 		cfg.TapPolicyDigest != "" ||
@@ -414,6 +440,7 @@ func compiledReleaseBound() bool {
 		HomebrewCommit != "" ||
 		VerificationKeysDigest != "" ||
 		BottleFetcherRef != "" ||
+		CatalogExtractorRef != "" ||
 		CatalogServiceOrigin != "" ||
 		IngestionJWSKeyPolicyDigest != "" ||
 		IngestionJWSKeyPolicyBase64 != "" ||
@@ -449,7 +476,7 @@ func CompiledCatalogKeyPolicy() (*catalogkeys.Policy, error) {
 }
 
 func hasCompiledNonCoreBindings() bool {
-	return BottleFetcherRef != "" || CatalogServiceOrigin != "" || IngestionJWSKeyPolicyDigest != "" ||
+	return BottleFetcherRef != "" || CatalogExtractorRef != "" || CatalogServiceOrigin != "" || IngestionJWSKeyPolicyDigest != "" ||
 		IngestionJWSKeyPolicyBase64 != "" || TapPolicyDigest != "" || ExecutableRuntimePolicyDigest != "" ||
 		SupportedCatalogPolicyVersions != "" || SupportedFetchPolicyVersions != "" || SupportedProvenancePolicyVersions != ""
 }

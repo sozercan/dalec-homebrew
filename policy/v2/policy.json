@@ -30,7 +30,7 @@
   },
   "provenance_policy": {
     "version": "homebrew-bottle-provenance-v1",
-    "waiver": "tap-catalog-jws-and-verified-checksum-v1"
+    "waiver": "tap-catalog-buildkit-and-verified-checksum-v1"
   },
   "writable_path_template": "/home/linuxbrew/.linuxbrew/var/<rack-name>",
   "package_capabilities": {

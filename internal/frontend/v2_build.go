@@ -27,7 +27,7 @@ import (
 	speccontract "github.com/sozercan/dalec-homebrew/internal/spec"
 )
 
-func resolveInvocationNonCore(ctx context.Context, cfg config.Config, snapshot *metadata.Snapshot, preflight []preflightPlatform) (*NonCoreResolution, error) {
+func resolveInvocationNonCore(ctx context.Context, gatewayClient gwclient.Client, cfg config.Config, snapshot *metadata.Snapshot, preflight []preflightPlatform) (*NonCoreResolution, error) {
 	targets := make([]NonCoreTarget, len(preflight))
 	hasExternal := false
 	for i, input := range preflight {
@@ -47,6 +47,9 @@ func resolveInvocationNonCore(ctx context.Context, cfg config.Config, snapshot *
 	}
 	if !cfg.SupportsNonCoreTaps() {
 		return nil, errors.New("qualified roots require a complete release-bound non-core capability")
+	}
+	if cfg.CatalogExtractorRef != "" {
+		return ResolveNonCoreLocally(ctx, gatewayClient, snapshot, targets, cfg.HomebrewCommit, cfg.CatalogExtractorRef)
 	}
 	keyPolicy, err := config.CompiledCatalogKeyPolicy()
 	if err != nil {
@@ -78,7 +81,7 @@ func buildV2(ctx context.Context, client gwclient.Client, dc *dockerui.Client, c
 				break
 			}
 		}
-		if catalogSigner.KeyID == "" {
+		if !nonCore.Local && catalogSigner.KeyID == "" {
 			return nil, errors.New("catalog-set verification produced no verified PS512 signer evidence")
 		}
 	}
@@ -122,7 +125,7 @@ func buildV2(ctx context.Context, client gwclient.Client, dc *dockerui.Client, c
 		}
 		components := resolution.ComponentsV2{
 			FrontendIndexRef: invokingFrontend, FrontendRef: frontendChildRef, RuntimeBaseRef: baseRef, MaterializerRef: materializerRef, BottleFetcherRef: fetcherRef,
-			CatalogServiceOrigin: cfg.CatalogServiceOrigin, IngestionJWSKeyPolicyDigest: cfg.IngestionJWSKeyPolicyDigest,
+			CatalogExtractorRef: cfg.CatalogExtractorRef, CatalogServiceOrigin: cfg.CatalogServiceOrigin, IngestionJWSKeyPolicyDigest: cfg.IngestionJWSKeyPolicyDigest,
 			TapPolicyDigest: cfg.TapPolicyDigest, ExecutableRuntimePolicyDigest: cfg.ExecutableRuntimePolicyDigest,
 			HomebrewCommit: cfg.HomebrewCommit, RubyRuntime: cfg.PortableRubyVersion, VerificationKeys: cfg.VerificationKeysDigest,
 			DalecModule: moduleVersion("github.com/project-dalec/dalec"), BuildKitModule: moduleVersion("github.com/moby/buildkit"),
@@ -175,7 +178,14 @@ func buildV2(ctx context.Context, client gwclient.Client, dc *dockerui.Client, c
 		if err := resolution.ValidateV2(record); err != nil {
 			return nil, err
 		}
-		materialized, err := llbutil.MaterializeV2(materializerRef, fetcherRef, p, record)
+		var localBottleStates map[resolution.FormulaID]llb.State
+		if nonCore != nil && nonCore.Local {
+			localBottleStates, err = buildLocalBottleStates(nonCore.LocalBottles[key], record.SourceDateEpoch)
+			if err != nil {
+				return nil, err
+			}
+		}
+		materialized, err := llbutil.MaterializeV2(materializerRef, fetcherRef, p, record, localBottleStates)
 		if err != nil {
 			return nil, err
 		}
@@ -246,6 +256,21 @@ func v2RequestedRoots(core catalogresolver.CoreCatalog, catalogs map[catalog.Tap
 		requested = append(requested, resolver.V2RequestedRoot{Requested: root.Requested, ID: id})
 	}
 	return requested, nil
+}
+
+func buildLocalBottleStates(values map[catalog.FormulaID][]byte, sourceDateEpoch int64) (map[resolution.FormulaID]llb.State, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	epoch := time.Unix(sourceDateEpoch, 0).UTC()
+	result := make(map[resolution.FormulaID]llb.State, len(values))
+	for id, data := range values {
+		if len(data) == 0 || int64(len(data)) > catalog.MaxBottleBytes {
+			return nil, fmt.Errorf("build-local bottle %s size %d is invalid", id, len(data))
+		}
+		result[resolution.FormulaID(id)] = llb.Scratch().File(llb.Mkfile("/bottle", 0o444, data, llb.WithCreatedTime(epoch)))
+	}
+	return result, nil
 }
 
 func coreRollbackFloor(value time.Time) uint64 {

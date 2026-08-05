@@ -7,9 +7,7 @@ variable "RUNTIME_BASE_REF" { default = "" }
 variable "MATERIALIZER_REF" { default = "" }
 variable "FRONTEND_REF" { default = "" }
 variable "BOTTLE_FETCHER_REF" { default = "" }
-variable "CATALOG_SERVICE_ORIGIN" { default = "" }
-variable "INGESTION_JWS_KEY_POLICY_DIGEST" { default = "" }
-variable "INGESTION_JWS_KEY_POLICY_BASE64" { default = "" }
+variable "CATALOG_EXTRACTOR_REF" { default = "" }
 variable "TAP_POLICY_DIGEST" { default = "" }
 variable "EXECUTABLE_RUNTIME_POLICY_DIGEST" { default = "" }
 variable "SUPPORTED_CATALOG_POLICY_VERSIONS" { default = "" }
@@ -17,7 +15,7 @@ variable "SUPPORTED_FETCH_POLICY_VERSIONS" { default = "" }
 variable "SUPPORTED_PROVENANCE_POLICY_VERSIONS" { default = "" }
 
 group "default" { targets = ["frontend"] }
-group "release-children" { targets = ["runtime-base-amd64", "runtime-base-arm64", "materializer-amd64", "materializer-arm64"] }
+group "release-children" { targets = ["runtime-base-amd64", "runtime-base-arm64", "bottle-fetcher-amd64", "bottle-fetcher-arm64", "catalog-extractor-amd64", "catalog-extractor-arm64", "materializer-amd64", "materializer-arm64"] }
 
 target "runtime-base-amd64" {
   target = "runtime-base"
@@ -40,9 +38,7 @@ target "materializer-amd64" {
     RUNTIME_BASE = RUNTIME_BASE_AMD64
     SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH
     BOTTLE_FETCHER_REF = BOTTLE_FETCHER_REF
-    CATALOG_SERVICE_ORIGIN = CATALOG_SERVICE_ORIGIN
-    INGESTION_JWS_KEY_POLICY_DIGEST = INGESTION_JWS_KEY_POLICY_DIGEST
-    INGESTION_JWS_KEY_POLICY_BASE64 = INGESTION_JWS_KEY_POLICY_BASE64
+    CATALOG_EXTRACTOR_REF = CATALOG_EXTRACTOR_REF
     TAP_POLICY_DIGEST = TAP_POLICY_DIGEST
     EXECUTABLE_RUNTIME_POLICY_DIGEST = EXECUTABLE_RUNTIME_POLICY_DIGEST
     SUPPORTED_CATALOG_POLICY_VERSIONS = SUPPORTED_CATALOG_POLICY_VERSIONS
@@ -59,9 +55,7 @@ target "materializer-arm64" {
     RUNTIME_BASE = RUNTIME_BASE_ARM64
     SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH
     BOTTLE_FETCHER_REF = BOTTLE_FETCHER_REF
-    CATALOG_SERVICE_ORIGIN = CATALOG_SERVICE_ORIGIN
-    INGESTION_JWS_KEY_POLICY_DIGEST = INGESTION_JWS_KEY_POLICY_DIGEST
-    INGESTION_JWS_KEY_POLICY_BASE64 = INGESTION_JWS_KEY_POLICY_BASE64
+    CATALOG_EXTRACTOR_REF = CATALOG_EXTRACTOR_REF
     TAP_POLICY_DIGEST = TAP_POLICY_DIGEST
     EXECUTABLE_RUNTIME_POLICY_DIGEST = EXECUTABLE_RUNTIME_POLICY_DIGEST
     SUPPORTED_CATALOG_POLICY_VERSIONS = SUPPORTED_CATALOG_POLICY_VERSIONS
@@ -78,11 +72,20 @@ target "bottle-fetcher" {
   tags = ["${REGISTRY}/dalec-homebrew-bottle-fetcher:${VERSION}"]
 }
 
-target "catalog-service" {
-  target = "catalog-service"
-  platforms = ["linux/amd64", "linux/arm64"]
+group "bottle-fetcher-children" { targets = ["bottle-fetcher-amd64", "bottle-fetcher-arm64"] }
+
+target "bottle-fetcher-amd64" {
+  target = "bottle-fetcher"
+  platforms = ["linux/amd64"]
   args = { SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH }
-  tags = ["${REGISTRY}/dalec-homebrew-catalog-service:${VERSION}"]
+  tags = ["${REGISTRY}/dalec-homebrew-bottle-fetcher:${VERSION}-amd64"]
+}
+
+target "bottle-fetcher-arm64" {
+  target = "bottle-fetcher"
+  platforms = ["linux/arm64"]
+  args = { SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH }
+  tags = ["${REGISTRY}/dalec-homebrew-bottle-fetcher:${VERSION}-arm64"]
 }
 
 group "catalog-extractor" { targets = ["catalog-extractor-amd64", "catalog-extractor-arm64"] }
@@ -109,9 +112,7 @@ target "frontend" {
     MATERIALIZER_REF = MATERIALIZER_REF
     FRONTEND_REF = FRONTEND_REF
     BOTTLE_FETCHER_REF = BOTTLE_FETCHER_REF
-    CATALOG_SERVICE_ORIGIN = CATALOG_SERVICE_ORIGIN
-    INGESTION_JWS_KEY_POLICY_DIGEST = INGESTION_JWS_KEY_POLICY_DIGEST
-    INGESTION_JWS_KEY_POLICY_BASE64 = INGESTION_JWS_KEY_POLICY_BASE64
+    CATALOG_EXTRACTOR_REF = CATALOG_EXTRACTOR_REF
     TAP_POLICY_DIGEST = TAP_POLICY_DIGEST
     EXECUTABLE_RUNTIME_POLICY_DIGEST = EXECUTABLE_RUNTIME_POLICY_DIGEST
     SUPPORTED_CATALOG_POLICY_VERSIONS = SUPPORTED_CATALOG_POLICY_VERSIONS

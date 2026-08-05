@@ -1093,8 +1093,11 @@ func ValidateBottleArtifact(artifact BottleArtifact) error {
 	}
 	switch {
 	case artifact.PrebuiltDerivation != nil:
-		if artifact.Transport.HTTPS == nil || artifact.Transport.OCI != nil {
-			errs = append(errs, errors.New("prebuilt-derived bottle requires HTTPS transport"))
+		if artifact.Transport.HTTPS == nil && artifact.Transport.Local == nil {
+			errs = append(errs, errors.New("prebuilt-derived bottle requires HTTPS or build-local transport"))
+		}
+		if artifact.Transport.OCI != nil {
+			errs = append(errs, errors.New("prebuilt-derived bottle cannot use OCI transport"))
 		}
 		if artifact.BottleSourceWaiver != "" {
 			errs = append(errs, errors.New("prebuilt-derived bottle cannot use the native HTTPS bottle source waiver"))
@@ -1137,8 +1140,8 @@ func ValidateBottleArtifact(artifact BottleArtifact) error {
 	if err := validateTransport(artifact.Transport, artifact); err != nil {
 		errs = append(errs, fmt.Errorf("transport: %w", err))
 	}
-	if artifact.Tab.Receiptless && artifact.Transport.HTTPS == nil {
-		errs = append(errs, errors.New("receiptless tab marker is supported only for HTTPS bottles"))
+	if artifact.Tab.Receiptless && artifact.Transport.HTTPS == nil && artifact.Transport.Local == nil {
+		errs = append(errs, errors.New("receiptless tab marker is supported only for HTTPS or build-local bottles"))
 	}
 	if err := validateBottleVerification(artifact.Verification); err != nil {
 		errs = append(errs, fmt.Errorf("verification: %w", err))
@@ -1466,13 +1469,55 @@ func validateBottleTab(tab BottleTab, platform Platform, tag string) error {
 }
 
 func validateTransport(transport Transport, artifact BottleArtifact) error {
-	if (transport.OCI == nil) == (transport.HTTPS == nil) {
-		return errors.New("must set exactly one of oci or https")
+	members := 0
+	if transport.OCI != nil {
+		members++
+	}
+	if transport.HTTPS != nil {
+		members++
+	}
+	if transport.Local != nil {
+		members++
+	}
+	if members != 1 {
+		return errors.New("must set exactly one of oci, https, or local")
 	}
 	if transport.OCI != nil {
 		return validateOCITransport(*transport.OCI, artifact)
 	}
-	return validateHTTPSTransport(*transport.HTTPS, artifact)
+	if transport.HTTPS != nil {
+		return validateHTTPSTransport(*transport.HTTPS, artifact)
+	}
+	return validateLocalTransport(*transport.Local, artifact)
+}
+
+func validateLocalTransport(transport LocalTransport, artifact BottleArtifact) error {
+	var errs []error
+	if artifact.PrebuiltDerivation == nil {
+		errs = append(errs, errors.New("build-local transport is limited to prebuilt-derived bottles"))
+	}
+	if transport.PolicyVersion != BuildLocalArtifactPolicyVersion {
+		errs = append(errs, fmt.Errorf("unsupported policy_version %q", transport.PolicyVersion))
+	}
+	if transport.SHA256 != artifact.SHA256 {
+		errs = append(errs, errors.New("sha256 does not match artifact digest"))
+	}
+	if transport.Size != artifact.Size {
+		errs = append(errs, errors.New("size does not match artifact size"))
+	}
+	if transport.Filename != artifact.Filename {
+		errs = append(errs, errors.New("filename does not match artifact filename"))
+	}
+	if err := validateSHA256Digest(transport.SHA256); err != nil {
+		errs = append(errs, fmt.Errorf("sha256: %w", err))
+	}
+	if transport.Size <= 0 || transport.Size > MaxBottleBytes {
+		errs = append(errs, fmt.Errorf("size %d is outside 1..%d", transport.Size, MaxBottleBytes))
+	}
+	if err := validateSafeFilename(transport.Filename); err != nil {
+		errs = append(errs, fmt.Errorf("filename: %w", err))
+	}
+	return errors.Join(errs...)
 }
 
 func validateOCITransport(transport OCITransport, artifact BottleArtifact) error {

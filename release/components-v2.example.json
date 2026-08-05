@@ -82,10 +82,8 @@
   "verification_keys_digest": "sha256:ef2d2c9e0219d485df9f07fff7b037feadc36c93085be9ffefb1390f31a3de1d",
   "dalec_module": "v0.21.5-0.20260728234020-5fa2c46d716b",
   "buildkit_module": "v0.31.2",
-  "catalog_service_origin": "https://catalog.example.com",
-  "ingestion_jws_key_policy_digest": "sha256:<ingestion-jws-key-policy-digest>",
-  "tap_policy_digest": "sha256:a2839a42f7fd1e4db73da6da3d0582deb2fdf08a8c7855bf40f84d73840890bf",
-  "executable_runtime_policy_digest": "sha256:8d5ae4ee34cdaa4b25ab061d5f5d0e5ea0adbf74f6031ce876b5762083c84f21",
+  "tap_policy_digest": "sha256:9f5b47c9d241dc16464dd81c350fc6c7755fa35c992bc821e6c3927573a3f217",
+  "executable_runtime_policy_digest": "sha256:dffdd27124b8337839e196dd98dbec93717b4694be1564fd9afd7684baf05d48",
   "supported_catalog_policy_versions": [
     "tap-catalog-v1"
   ],
@@ -95,8 +93,27 @@
   "supported_provenance_policy_versions": [
     "homebrew-jws-and-verified-oci-chain-v1",
     "https-bottle-embedded-formula-digest-only-v1",
-    "prebuilt-archive-tap-catalog-jws-and-verified-checksum-v1",
+    "prebuilt-archive-buildkit-and-verified-checksum-v1",
     "sigstore-in-toto-v1",
-    "tap-catalog-jws-and-verified-checksum-v1"
-  ]
+    "tap-catalog-buildkit-and-verified-checksum-v1"
+  ],
+  "catalog_extractor": {
+    "index": "ghcr.io/sozercan/dalec-homebrew-catalog-extractor@sha256:<index-digest>",
+    "platforms": [
+      {
+        "platform": {
+          "os": "linux",
+          "architecture": "amd64"
+        },
+        "ref": "ghcr.io/sozercan/dalec-homebrew-catalog-extractor@sha256:<amd64-child>"
+      },
+      {
+        "platform": {
+          "os": "linux",
+          "architecture": "arm64"
+        },
+        "ref": "ghcr.io/sozercan/dalec-homebrew-catalog-extractor@sha256:<arm64-child>"
+      }
+    ]
+  }
 }

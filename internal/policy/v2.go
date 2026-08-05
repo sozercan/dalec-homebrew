@@ -121,6 +121,7 @@ func VerifyReleaseBindingsV2(record *resolution.RecordV2) error {
 			errs = append(errs, fmt.Errorf("V2 %s %q does not match release binding %q", name, got, want))
 		}
 	}
+	compare("catalog extractor reference", record.Components.CatalogExtractorRef, config.CatalogExtractorRef)
 	compare("catalog service origin", record.Components.CatalogServiceOrigin, config.CatalogServiceOrigin)
 	compare("ingestion JWS key-policy digest", record.Components.IngestionJWSKeyPolicyDigest, config.IngestionJWSKeyPolicyDigest)
 	compare("tap policy digest", record.Components.TapPolicyDigest, config.TapPolicyDigest)
@@ -205,8 +206,6 @@ func VerifyMaterializerRuntimePolicyV2(record *resolution.RecordV2) (runtimefs.A
 		value string
 	}{
 		{"bottle fetcher reference", config.BottleFetcherRef},
-		{"catalog service origin", config.CatalogServiceOrigin},
-		{"ingestion JWS key-policy digest", config.IngestionJWSKeyPolicyDigest},
 		{"tap policy digest", config.TapPolicyDigest},
 		{"executable runtime policy digest", config.ExecutableRuntimePolicyDigest},
 		{"Homebrew commit", config.HomebrewCommit},
@@ -219,6 +218,11 @@ func VerifyMaterializerRuntimePolicyV2(record *resolution.RecordV2) (runtimefs.A
 		if field.value == "" {
 			return runtimefs.Allowlist{}, fmt.Errorf("materializer V2 release binding %s is empty", field.name)
 		}
+	}
+	localMode := config.CatalogExtractorRef != ""
+	serviceMode := config.CatalogServiceOrigin != "" && config.IngestionJWSKeyPolicyDigest != ""
+	if localMode == serviceMode {
+		return runtimefs.Allowlist{}, fmt.Errorf("materializer V2 release bindings do not select exactly one catalog acquisition mode")
 	}
 	return VerifyRuntimePolicyV2(record)
 }

@@ -41,13 +41,15 @@ func RecordV2FromCatalog(result catalog.PlatformResult, requested []V2RequestedR
 	if err := catalog.ValidatePlatformResult(result); err != nil {
 		return nil, err
 	}
-	if opts.CatalogPayload == nil {
-		return nil, errors.New("catalog-set payload is required")
+	localCatalogs := opts.CatalogPayload == nil && opts.Components.CatalogExtractorRef != ""
+	serviceCatalogs := opts.CatalogPayload != nil
+	if localCatalogs == serviceCatalogs {
+		return nil, errors.New("catalog resolution must select exactly one of build-local catalogs or signed catalog set")
 	}
 	if opts.ResolvedAt.IsZero() {
 		opts.ResolvedAt = time.Now().UTC().Round(0)
 	}
-	if opts.CatalogSigner.KeyID == "" || opts.CatalogSigner.Algorithm != "PS512" || !opts.CatalogSigner.Verified {
+	if serviceCatalogs && (opts.CatalogSigner.KeyID == "" || opts.CatalogSigner.Algorithm != "PS512" || !opts.CatalogSigner.Verified) {
 		return nil, errors.New("verified catalog signer is required")
 	}
 	if result.Platform.OS != "linux" || (result.Platform.Architecture != "amd64" && result.Platform.Architecture != "arm64") {
@@ -249,6 +251,9 @@ func convertCatalogTransportV2(value catalog.Transport) resolution.BottleTranspo
 	if value.HTTPS != nil {
 		result.HTTPS = convertCatalogHTTPSTransportV2(*value.HTTPS)
 	}
+	if value.Local != nil {
+		result.Local = &resolution.LocalTransport{PolicyVersion: value.Local.PolicyVersion, SHA256: value.Local.SHA256, Size: value.Local.Size, Filename: value.Local.Filename}
+	}
 	return result
 }
 
@@ -298,14 +303,40 @@ func metadataSourcesV2(opts V2Options) ([]resolution.MetadataSource, int64, erro
 	core := resolution.MetadataSource{Tap: "homebrew/core", Commit: opts.Components.HomebrewCommit, Signer: coreSignature, GeneratedAt: info.GeneratedAt, FetchedAt: info.FetchedAt, Sequence: coreSequence, Rollback: resolution.RollbackEvidence{Policy: resolution.CoreMetadataRollbackPolicyV1, SequenceFloor: opts.CoreRollbackFloor, StateDigest: info.Digest}, Documents: []resolution.MetadataDocument{{Name: "formula", Digest: info.FormulaDigest, EnvelopeDigest: info.Formula.EnvelopeDigest}, {Name: "migrations", Digest: info.MigrationDigest, EnvelopeDigest: info.Migrations.EnvelopeDigest}}}
 	sources := []resolution.MetadataSource{core}
 	earliest := info.GeneratedAt.Unix()
+	policyVersion := catalog.TapCatalogPolicyVersion
+	if !slices.Contains(opts.Components.SupportedCatalogPolicyVersions, policyVersion) {
+		return nil, 0, fmt.Errorf("catalog policy %q is absent from the component binding", policyVersion)
+	}
+	if opts.CatalogPayload == nil {
+		taps := make([]catalog.TapID, 0, len(opts.Catalogs))
+		for tap := range opts.Catalogs {
+			taps = append(taps, tap)
+		}
+		slices.Sort(taps)
+		for _, tap := range taps {
+			document := opts.Catalogs[tap]
+			if document == nil {
+				return nil, 0, fmt.Errorf("catalog document %s is missing", tap)
+			}
+			canonical, err := catalog.CanonicalTapCatalog(document)
+			if err != nil {
+				return nil, 0, fmt.Errorf("canonicalize build-local catalog %s: %w", tap, err)
+			}
+			catalogDigest := digest.FromBytes(canonical).String()
+			sources = append(sources, resolution.MetadataSource{
+				Tap: resolution.TapID(tap), Commit: document.Tap.Commit, CatalogPolicyVersion: policyVersion,
+				Extraction:  &resolution.TapExtractionV2{PolicyVersion: resolution.BuildLocalExtractionPolicyV1, ExtractorRef: opts.Components.CatalogExtractorRef, Repository: document.Tap.Repository, TreeDigest: document.Tap.TreeDigest, ArchiveDigest: document.Tap.ArchiveDigest, CatalogDigest: catalogDigest},
+				Documents:   []resolution.MetadataDocument{{Name: "catalog", Digest: catalogDigest}},
+				GeneratedAt: info.GeneratedAt, FetchedAt: opts.ResolvedAt, Sequence: 1,
+				Rollback: resolution.RollbackEvidence{Policy: resolution.BuildLocalRollbackPolicyV1, SequenceFloor: 0, StateDigest: catalogDigest},
+			})
+		}
+		return sources, earliest, nil
+	}
 	for name, value := range map[string]string{"catalog-set payload": opts.SetPayloadDigest, "catalog-set envelope": opts.SetEnvelopeDigest} {
 		if d, err := digest.Parse(value); err != nil || d.Algorithm() != digest.SHA256 || d.Validate() != nil {
 			return nil, 0, fmt.Errorf("%s digest is invalid", name)
 		}
-	}
-	policyVersion := catalog.TapCatalogPolicyVersion
-	if !slices.Contains(opts.Components.SupportedCatalogPolicyVersions, policyVersion) {
-		return nil, 0, fmt.Errorf("catalog policy %q is absent from the component binding", policyVersion)
 	}
 	for _, reference := range opts.CatalogPayload.Catalogs {
 		document := opts.Catalogs[reference.Tap.ID]

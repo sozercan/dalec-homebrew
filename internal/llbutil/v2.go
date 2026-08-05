@@ -31,7 +31,7 @@ func ResolutionStateV2(record *resolution.RecordV2) (llb.State, []byte, error) {
 	return llb.Scratch().File(llb.Mkfile("/resolution.json", 0o444, data, llb.WithCreatedTime(epoch))), data, nil
 }
 
-func BottleStatesV2(fetcherRef string, platform ocispec.Platform, record *resolution.RecordV2) (BottleInputsV2, error) {
+func BottleStatesV2(fetcherRef string, platform ocispec.Platform, record *resolution.RecordV2, localInputs ...map[resolution.FormulaID]llb.State) (BottleInputsV2, error) {
 	if record == nil {
 		return BottleInputsV2{}, errors.New("nil V2 resolution")
 	}
@@ -48,6 +48,14 @@ func BottleStatesV2(fetcherRef string, platform ocispec.Platform, record *resolu
 	bottles := llb.Scratch()
 	evidence := llb.Scratch()
 	seenFiles := map[string]struct{}{}
+	local := map[resolution.FormulaID]llb.State(nil)
+	if len(localInputs) > 1 {
+		return BottleInputsV2{}, errors.New("multiple build-local bottle input maps")
+	}
+	if len(localInputs) == 1 {
+		local = localInputs[0]
+	}
+	usedLocal := 0
 	for _, id := range record.InstallOrder {
 		node, ok := findNodeV2(record.Nodes, id)
 		if !ok {
@@ -74,9 +82,19 @@ func BottleStatesV2(fetcherRef string, platform ocispec.Platform, record *resolu
 			bottles = bottles.File(llb.Copy(fetched, "/bottle", "/"+filename, &llb.CopyInfo{CreateDestPath: true, CreatedTime: &epoch}))
 			evidenceName := fmt.Sprintf("%03d.fetch.json", len(seenFiles)-1)
 			evidence = evidence.File(llb.Copy(fetched, "/evidence.json", "/"+evidenceName, &llb.CopyInfo{CreateDestPath: true, CreatedTime: &epoch}))
+		case node.Bottle.Transport.Local != nil:
+			state, ok := local[node.ID]
+			if !ok {
+				return BottleInputsV2{}, fmt.Errorf("build-local bottle %q is missing", id)
+			}
+			usedLocal++
+			bottles = bottles.File(llb.Copy(state, "/bottle", "/"+filename, &llb.CopyInfo{CreateDestPath: true, CreatedTime: &epoch}))
 		default:
 			return BottleInputsV2{}, fmt.Errorf("node %q has no bottle transport", id)
 		}
+	}
+	if usedLocal != len(local) {
+		return BottleInputsV2{}, fmt.Errorf("build-local bottle input set has %d entries, used %d", len(local), usedLocal)
 	}
 	return BottleInputsV2{Bottles: bottles, FetchEvidence: evidence}, nil
 }
@@ -303,8 +321,8 @@ func FinalizeMaterializationV2(materializerRef string, platform ocispec.Platform
 	return run.GetMount("/out"), nil
 }
 
-func MaterializeV2(materializerRef, fetcherRef string, platform ocispec.Platform, record *resolution.RecordV2) (llb.State, error) {
-	inputs, err := BottleStatesV2(fetcherRef, platform, record)
+func MaterializeV2(materializerRef, fetcherRef string, platform ocispec.Platform, record *resolution.RecordV2, localInputs ...map[resolution.FormulaID]llb.State) (llb.State, error) {
+	inputs, err := BottleStatesV2(fetcherRef, platform, record, localInputs...)
 	if err != nil {
 		return llb.Scratch(), err
 	}

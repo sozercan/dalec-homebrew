@@ -29,6 +29,7 @@ func resetCompiledBindings(t *testing.T) {
 	oldVerificationKeysDigest := VerificationKeysDigest
 	oldPortableRubyVersion := PortableRubyVersion
 	oldBottleFetcherRef := BottleFetcherRef
+	oldCatalogExtractorRef := CatalogExtractorRef
 	oldCatalogServiceOrigin := CatalogServiceOrigin
 	oldIngestionJWSKeyPolicyDigest := IngestionJWSKeyPolicyDigest
 	oldIngestionJWSKeyPolicyBase64 := IngestionJWSKeyPolicyBase64
@@ -45,6 +46,7 @@ func resetCompiledBindings(t *testing.T) {
 		VerificationKeysDigest = oldVerificationKeysDigest
 		PortableRubyVersion = oldPortableRubyVersion
 		BottleFetcherRef = oldBottleFetcherRef
+		CatalogExtractorRef = oldCatalogExtractorRef
 		CatalogServiceOrigin = oldCatalogServiceOrigin
 		IngestionJWSKeyPolicyDigest = oldIngestionJWSKeyPolicyDigest
 		IngestionJWSKeyPolicyBase64 = oldIngestionJWSKeyPolicyBase64
@@ -61,6 +63,7 @@ func resetCompiledBindings(t *testing.T) {
 	VerificationKeysDigest = ""
 	PortableRubyVersion = ""
 	BottleFetcherRef = ""
+	CatalogExtractorRef = ""
 	CatalogServiceOrigin = ""
 	IngestionJWSKeyPolicyDigest = ""
 	IngestionJWSKeyPolicyBase64 = ""
@@ -154,6 +157,36 @@ func setCompiledV2(t *testing.T) {
 	SupportedCatalogPolicyVersions = CatalogPolicyVersionV1
 	SupportedFetchPolicyVersions = BottleFetchPolicyVersionV1
 	SupportedProvenancePolicyVersions = ChecksumWaiverPolicyVersionV1 + "," + CoreWaiverPolicyVersionV1 + "," + HTTPSSourceWaiverPolicyVersionV1 + "," + PrebuiltWaiverPolicyVersionV1 + "," + SigstoreProvenancePolicyVersionV1
+}
+
+func setCompiledBuildLocalV2(t *testing.T) {
+	t.Helper()
+	tapDigest, runtimeDigest := v2PolicyDigests(t)
+	BottleFetcherRef = "example/fetcher@" + testDigestA
+	CatalogExtractorRef = "example/extractor@" + testDigestB
+	TapPolicyDigest = tapDigest
+	ExecutableRuntimePolicyDigest = runtimeDigest
+	SupportedCatalogPolicyVersions = CatalogPolicyVersionV1
+	SupportedFetchPolicyVersions = BottleFetchPolicyVersionV1
+	SupportedProvenancePolicyVersions = ChecksumWaiverPolicyVersionV1 + "," + CoreWaiverPolicyVersionV1 + "," + HTTPSSourceWaiverPolicyVersionV1 + "," + PrebuiltWaiverPolicyVersionV1 + "," + SigstoreProvenancePolicyVersionV1
+}
+
+func TestCompiledBuildLocalV2BindingsEnableCapability(t *testing.T) {
+	resetCompiledBindings(t)
+	setCompiledV1()
+	setCompiledBuildLocalV2(t)
+	cfg, err := FromBuildOpts(map[string]string{"source": "example/frontend@" + testDigestA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SupportsNonCoreTaps() || cfg.CatalogExtractorRef != CatalogExtractorRef {
+		t.Fatalf("build-local capability not enabled: %+v", cfg)
+	}
+	tampered := cfg
+	tampered.CatalogExtractorRef = "example/other@" + testDigestA
+	if tampered.SupportsNonCoreTaps() {
+		t.Fatal("tampered extractor retained capability")
+	}
 }
 
 func TestRequiresPinnedComponents(t *testing.T) {

@@ -194,7 +194,7 @@ func validatePreparationEvidenceV2(evidence PreparationEvidenceV2, record *resol
 		item, present := fetchByID[node.ID.String()]
 		if node.Bottle.Transport.HTTPS == nil {
 			if present {
-				return fmt.Errorf("OCI node %s has HTTPS fetch evidence", node.ID)
+				return fmt.Errorf("non-HTTPS node %s has HTTPS fetch evidence", node.ID)
 			}
 			continue
 		}

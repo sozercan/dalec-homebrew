@@ -181,8 +181,9 @@ func ToCatalog(extracted *ExtractedTap, core CoreCatalog) (*catalog.TapCatalog, 
 		return nil, err
 	}
 	// These deterministic placeholders make the unsigned catalog usable by the
-	// generator's independent resolver. The service always replaces both fields
-	// atomically with its publication time and per-tap sequence before signing.
+	// generator's independent resolver. Hosted publication may replace both;
+	// build-local generation binds the core snapshot time and explicit no-shared-
+	// rollback sequence semantics before producing a resolution.
 	return document, nil
 }
 

@@ -30,8 +30,9 @@ type V2BindingsInput struct {
 // comma-separated strings because the compiled bindings use that encoding.
 type V2Bindings struct {
 	SchemaVersion                     string `json:"schema_version"`
-	IngestionJWSKeyPolicyDigest       string `json:"ingestion_jws_key_policy_digest"`
-	IngestionJWSKeyPolicyBase64       string `json:"ingestion_jws_key_policy_base64"`
+	CatalogExtractorRef               string `json:"catalog_extractor_ref,omitempty"`
+	IngestionJWSKeyPolicyDigest       string `json:"ingestion_jws_key_policy_digest,omitempty"`
+	IngestionJWSKeyPolicyBase64       string `json:"ingestion_jws_key_policy_base64,omitempty"`
 	TapPolicyDigest                   string `json:"tap_policy_digest"`
 	ExecutableRuntimePolicyDigest     string `json:"executable_runtime_policy_digest"`
 	SupportedCatalogPolicyVersions    string `json:"supported_catalog_policy_versions"`
@@ -89,6 +90,33 @@ func GenerateV2Bindings(input V2BindingsInput) (*V2Bindings, []byte, error) {
 	return bindings, bytes.Clone(canonicalKeyPolicy), nil
 }
 
+// GenerateBuildLocalV2Bindings returns the service-free V2 policy tuple bound
+// directly to a digest-pinned catalog extractor image.
+func GenerateBuildLocalV2Bindings(extractorRef string) (*V2Bindings, error) {
+	if err := validateRef(extractorRef); err != nil {
+		return nil, fmt.Errorf("catalog extractor reference: %w", err)
+	}
+	tapPolicyDigest, err := policyv2.TapPolicyDigest()
+	if err != nil {
+		return nil, err
+	}
+	runtimePolicyDigest, err := policyv2.Digest()
+	if err != nil {
+		return nil, err
+	}
+	bindings := &V2Bindings{
+		SchemaVersion: V2BindingsSchemaVersion, CatalogExtractorRef: extractorRef,
+		TapPolicyDigest: tapPolicyDigest, ExecutableRuntimePolicyDigest: runtimePolicyDigest,
+		SupportedCatalogPolicyVersions:    joinPolicyVersions(v2CatalogPolicyVersions()),
+		SupportedFetchPolicyVersions:      joinPolicyVersions(v2FetchPolicyVersions()),
+		SupportedProvenancePolicyVersions: joinPolicyVersions(v2ProvenancePolicyVersions()),
+	}
+	if err := ValidateV2Bindings(bindings); err != nil {
+		return nil, err
+	}
+	return bindings, nil
+}
+
 // ValidateV2Bindings verifies that a binding document contains the exact
 // policies implemented by this release and that its embedded key policy is
 // canonical and digest-bound.
@@ -100,11 +128,20 @@ func ValidateV2Bindings(bindings *V2Bindings) error {
 	if bindings.SchemaVersion != V2BindingsSchemaVersion {
 		errs = append(errs, fmt.Errorf("unsupported V2 bindings schema %q", bindings.SchemaVersion))
 	}
+	localMode := bindings.CatalogExtractorRef != ""
+	serviceMode := bindings.IngestionJWSKeyPolicyDigest != "" || bindings.IngestionJWSKeyPolicyBase64 != ""
+	if localMode == serviceMode {
+		errs = append(errs, errors.New("V2 bindings must select exactly one of build-local extractor or ingestion JWS policy"))
+	}
+	if localMode {
+		if err := validateRef(bindings.CatalogExtractorRef); err != nil {
+			errs = append(errs, fmt.Errorf("catalog extractor reference: %w", err))
+		}
+	}
 	for _, field := range []struct {
 		name  string
 		value string
 	}{
-		{name: "ingestion JWS key policy", value: bindings.IngestionJWSKeyPolicyDigest},
 		{name: "tap policy", value: bindings.TapPolicyDigest},
 		{name: "executable runtime policy", value: bindings.ExecutableRuntimePolicyDigest},
 	} {
@@ -113,24 +150,26 @@ func ValidateV2Bindings(bindings *V2Bindings) error {
 		}
 	}
 
-	if len(bindings.IngestionJWSKeyPolicyBase64) == 0 || len(bindings.IngestionJWSKeyPolicyBase64) > base64.StdEncoding.EncodedLen(catalogkeys.MaxPolicyBytes) {
-		errs = append(errs, fmt.Errorf("ingestion JWS key policy base64 size %d is outside the supported range", len(bindings.IngestionJWSKeyPolicyBase64)))
-	} else {
-		keyPolicyData, err := base64.StdEncoding.Strict().DecodeString(bindings.IngestionJWSKeyPolicyBase64)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("decode ingestion JWS key policy base64: %w", err))
-		} else if base64.StdEncoding.EncodeToString(keyPolicyData) != bindings.IngestionJWSKeyPolicyBase64 {
-			errs = append(errs, errors.New("ingestion JWS key policy base64 is not canonical padded standard base64"))
+	if serviceMode {
+		if len(bindings.IngestionJWSKeyPolicyBase64) == 0 || len(bindings.IngestionJWSKeyPolicyBase64) > base64.StdEncoding.EncodedLen(catalogkeys.MaxPolicyBytes) {
+			errs = append(errs, fmt.Errorf("ingestion JWS key policy base64 size %d is outside the supported range", len(bindings.IngestionJWSKeyPolicyBase64)))
 		} else {
-			keyPolicy, err := catalogkeys.Decode(keyPolicyData)
+			keyPolicyData, err := base64.StdEncoding.Strict().DecodeString(bindings.IngestionJWSKeyPolicyBase64)
 			if err != nil {
-				errs = append(errs, fmt.Errorf("decode ingestion JWS key policy: %w", err))
+				errs = append(errs, fmt.Errorf("decode ingestion JWS key policy base64: %w", err))
+			} else if base64.StdEncoding.EncodeToString(keyPolicyData) != bindings.IngestionJWSKeyPolicyBase64 {
+				errs = append(errs, errors.New("ingestion JWS key policy base64 is not canonical padded standard base64"))
 			} else {
-				digest, err := catalogkeys.Digest(keyPolicy)
+				keyPolicy, err := catalogkeys.Decode(keyPolicyData)
 				if err != nil {
-					errs = append(errs, fmt.Errorf("digest ingestion JWS key policy: %w", err))
-				} else if digest.String() != bindings.IngestionJWSKeyPolicyDigest {
-					errs = append(errs, fmt.Errorf("ingestion JWS key policy digest %q does not match embedded policy %q", bindings.IngestionJWSKeyPolicyDigest, digest))
+					errs = append(errs, fmt.Errorf("decode ingestion JWS key policy: %w", err))
+				} else {
+					digest, err := catalogkeys.Digest(keyPolicy)
+					if err != nil {
+						errs = append(errs, fmt.Errorf("digest ingestion JWS key policy: %w", err))
+					} else if digest.String() != bindings.IngestionJWSKeyPolicyDigest {
+						errs = append(errs, fmt.Errorf("ingestion JWS key policy digest %q does not match embedded policy %q", bindings.IngestionJWSKeyPolicyDigest, digest))
+					}
 				}
 			}
 		}

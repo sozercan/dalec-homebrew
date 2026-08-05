@@ -281,3 +281,24 @@ func TestBindingsForV2PreservesCompleteResolutionTuple(t *testing.T) {
 		t.Fatalf("V2 components dropped policy versions: %+v", components)
 	}
 }
+
+func TestV2BuildLocalManifestBindings(t *testing.T) {
+	m := validV2(t)
+	extractor := testComponent("catalog-extractor")
+	m.CatalogExtractor = &extractor
+	m.CatalogServiceOrigin = ""
+	m.IngestionJWSKeyPolicyDigest = ""
+	if err := Validate(m); err != nil {
+		t.Fatal(err)
+	}
+	bindings, err := m.BindingsFor(resolution.Platform{OS: "linux", Architecture: "amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bindings.CatalogExtractorRef == "" || bindings.ComponentsV2.CatalogExtractorRef != bindings.CatalogExtractorRef {
+		t.Fatalf("build-local bindings = %+v", bindings)
+	}
+	if bindings.ComponentsV2.CatalogServiceOrigin != "" || bindings.ComponentsV2.IngestionJWSKeyPolicyDigest != "" {
+		t.Fatalf("build-local tuple retained hosted service fields: %+v", bindings.ComponentsV2)
+	}
+}

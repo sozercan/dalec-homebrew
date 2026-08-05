@@ -35,7 +35,7 @@ type Config struct {
 	OwnedClose []interface{ Close() error }
 }
 
-// Generator is the in-repository production generator used by catalog-service.
+// Generator is the shared fixed-point tap catalog and artifact generator.
 // It ingests only the taps reached by the requested closure and independently
 // binds every selected bottle before returning unsigned data to the signer.
 type Generator struct {
@@ -123,6 +123,9 @@ func (g *Generator) Generate(ctx context.Context, request *catalog.Request) (*ca
 			document, err := catalogextractor.ToCatalog(extracted, core)
 			if err != nil {
 				return nil, catalogservice.NewFailureError(catalog.FailurePolicy, "tap catalog is invalid", err)
+			}
+			if generatedAt := core.Info().GeneratedAt.UTC(); !generatedAt.IsZero() {
+				document.PublishedAt = generatedAt
 			}
 			catalogs[tap] = document
 			delete(pending, tap)

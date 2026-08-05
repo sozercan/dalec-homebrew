@@ -18,7 +18,7 @@ func TestCIExercisesProductionPathNonCoreV2(t *testing.T) {
 	text := string(workflow)
 	for _, want := range []string{
 		"Non-core multi-package container E2E",
-		"docker.io/cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf",
+		"Build and test build-local non-core V2",
 		"DALEC_HOMEBREW_E2E_SPEC: examples/ci-noncore-multi-package.yaml",
 		"run: ./scripts/noncore-e2e.sh",
 	} {
@@ -46,17 +46,16 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 	}
 	text := string(script)
 	for _, want := range []string{
-		"--buildkit-address tcp://catalog-worker:1234",
-		"--extractor-ref \"$EXTRACTOR_REF\"",
-		"--service-digest \"$SERVICE_DIGEST\"",
-		"--extractor-digest \"$EXTRACTOR_DIGEST\"",
-		"cloudflared did not publish a valid HTTPS catalog origin",
-		"trycloudflare",
+		`--catalog-extractor-ref "$EXTRACTOR_REF"`,
+		`--build-arg "CATALOG_EXTRACTOR_REF=$EXTRACTOR_REF"`,
 		"docker run --rm --network none",
+		".components.catalog_extractor_ref as $extractor",
+		".extraction.policy_version == \"build-local-tap-extraction-v1\"",
+		".extraction.extractor_ref == $extractor",
 		".requested == $id and .id == $id",
 		".tap == $tap",
 		".bottle.transport.https.fetch_policy_version == \"homebrew-bottle-fetch-v1\"",
-		".signer.algorithm == \"PS512\"",
+		".bottle.transport.local.policy_version == \"build-local-artifact-v1\"",
 		".artifact_id == $id",
 		".formula_id == $id",
 		"A365_ID=sozercan/repo/a365",
@@ -76,6 +75,12 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 		"DALEC_HOMEBREW_E2E_A365_TAP_COMMIT",
 		"DALEC_HOMEBREW_E2E_AVTOOLS_TAP_COMMIT",
 		"--arg commit",
+		"cloudflared",
+		"trycloudflare",
+		"CATALOG_SERVICE_ORIGIN",
+		"INGESTION_JWS",
+		"catalog-worker",
+		"--buildkit-address",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("non-core E2E contains forbidden release/CI tap control %q", forbidden)

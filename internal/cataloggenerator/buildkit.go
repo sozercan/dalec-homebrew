@@ -163,7 +163,14 @@ func linuxbrewWritableScratch() llb.State {
 }
 
 func (e *BuildKitExtractor) extractionState(tap catalog.TapID) (llb.State, error) {
-	if e == nil || e.extractorRef == "" || e.homebrewCommit == "" {
+	if e == nil {
+		return llb.Scratch(), errors.New("BuildKit extractor is unavailable")
+	}
+	return extractionState(e.extractorRef, e.homebrewCommit, tap)
+}
+
+func extractionState(extractorRef, homebrewCommit string, tap catalog.TapID) (llb.State, error) {
+	if extractorRef == "" || homebrewCommit == "" {
 		return llb.Scratch(), errors.New("BuildKit extractor is unavailable")
 	}
 	if err := tap.Validate(); err != nil || tap.IsCore() {
@@ -176,7 +183,7 @@ func (e *BuildKitExtractor) extractionState(tap catalog.TapID) (llb.State, error
 	// and fetches it before the exec. Keep .git so the offline extractor can bind
 	// the observed commit and deterministic tree/archive digests.
 	source := llb.Git(gitURL, "", llb.KeepGitDir(), llb.GitSkipSubmodules(), llb.AuthTokenSecret(""), llb.AuthHeaderSecret(""))
-	worker := llb.Image(e.extractorRef)
+	worker := llb.Image(extractorRef)
 	metadataRun := worker.Run(
 		llb.Args([]string{
 			"/usr/local/bin/dalec-homebrew-catalog-extractor", "source-metadata",
@@ -214,7 +221,7 @@ func (e *BuildKitExtractor) extractionState(tap catalog.TapID) (llb.State, error
 			"--repository", repository,
 			"--tap-root", tapRoot,
 			"--source-metadata", "/input/source/" + sourceMetadataFilename,
-			"--homebrew-commit", e.homebrewCommit,
+			"--homebrew-commit", homebrewCommit,
 			"--output", "/out/" + untrustedTapFilename,
 		}),
 		llb.User("0:0"),

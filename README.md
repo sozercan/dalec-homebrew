@@ -85,11 +85,11 @@ See the [usage reference](docs/usage.md) for image settings, tests, dependency r
 
 A V2-capable frontend accepts `owner/tap/formula` and derives only the public default GitHub repository `https://github.com/<owner>/homebrew-<tap>`. Bare names and explicit `homebrew/core/formula` canonicalize to the same core identity. The capability is compiled into the signed component tuple; build arguments cannot enable it on a core-only frontend.
 
-Non-core builds use the release-bound catalog service and bottle fetcher. Core-only builds continue to use the official Homebrew JWS and GHCR path and do not contact the catalog service.
+Non-core builds run the release-bound catalog extractor directly on the caller's BuildKit worker. BuildKit fetches the derived public GitHub tap, records the exact observed commit/tree/archive identity, and evaluates Formula metadata in a network-disabled read-only exec. Core-only builds continue to use the official Homebrew JWS and GHCR path and never run the extractor.
 
-The catalog service verifies exact tap commits, bottle checksums and sizes, hostile-archive structure, embedded Formula bytes, and any digest-advertised Sigstore/in-toto bundle covered by the release tap policy. Missing provenance is recorded as an explicit per-artifact waiver; invalid advertised provenance fails the build.
+The frontend verifies bottle checksums and sizes, hostile-archive structure, embedded Formula bytes, and any digest-advertised Sigstore/in-toto bundle covered by the release tap policy. Missing provenance is recorded as an explicit per-artifact waiver; invalid advertised provenance fails the build. No catalog server, signing key, database, or public service origin is required.
 
-A Formula without a bottle remains unsupported unless its exact Formula ID is present in the embedded tap policy as a prebuilt executable archive. For those entries, the service verifies the complete upstream archive and executable properties, creates a deterministic receiptless derived bottle containing only the policy-selected payload, and records the upstream and derived identities separately. Build input cannot add archive recipes or enable another Formula.
+A Formula without a bottle remains unsupported unless its exact Formula ID is present in the embedded tap policy as a prebuilt executable archive. For those entries, build-local ingestion verifies the complete upstream archive and executable properties, creates a deterministic receiptless derived bottle containing only the policy-selected payload, and passes those content-addressed bytes directly into offline materialization. Build input cannot add archive recipes or enable another Formula.
 
 ```yaml
 dependencies:

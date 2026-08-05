@@ -122,7 +122,7 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		return nil, err
 	}
 
-	nonCore, err := resolveInvocationNonCore(ctx, cfg, snapshot, preflight)
+	nonCore, err := resolveInvocationNonCore(ctx, client, cfg, snapshot, preflight)
 	if err != nil {
 		return nil, err
 	}

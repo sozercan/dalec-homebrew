@@ -31,7 +31,7 @@ type ProductionArtifactBuilder struct {
 	registry        *hboci.Client
 	fetcher         artifactFetcher
 	serviceOrigin   string
-	artifactStore   generatedArtifactStore
+	artifactStore   GeneratedArtifactStore
 	tapPolicy       *policyv2.TapPolicy
 	tapPolicyDigest string
 	derivePrebuilt  prebuiltDeriver
@@ -39,6 +39,24 @@ type ProductionArtifactBuilder struct {
 }
 
 func NewProductionArtifactBuilder(fetchConfig fetcher.Config, serviceOrigin string, artifactStore *catalogartifactstore.Store) (*ProductionArtifactBuilder, error) {
+	var store GeneratedArtifactStore
+	if artifactStore != nil {
+		store = catalogArtifactStoreAdapter{store: artifactStore}
+	}
+	return newProductionArtifactBuilder(fetchConfig, serviceOrigin, store)
+}
+
+// NewBuildLocalArtifactBuilder creates a verifier that retains generated
+// prebuilt-derived bottles in invocation-local memory rather than publishing
+// them through an HTTP service.
+func NewBuildLocalArtifactBuilder(fetchConfig fetcher.Config, artifactStore *MemoryArtifactStore) (*ProductionArtifactBuilder, error) {
+	if artifactStore == nil {
+		return nil, errors.New("build-local artifact store is required")
+	}
+	return newProductionArtifactBuilder(fetchConfig, "", artifactStore)
+}
+
+func newProductionArtifactBuilder(fetchConfig fetcher.Config, serviceOrigin string, artifactStore GeneratedArtifactStore) (*ProductionArtifactBuilder, error) {
 	limits := hboci.DefaultLimits()
 	limits.BlobBytes = catalog.MaxBottleBytes
 	registry, err := hboci.NewClient("https://ghcr.io", hboci.WithLimits(limits))
@@ -49,8 +67,8 @@ func NewProductionArtifactBuilder(fetchConfig fetcher.Config, serviceOrigin stri
 	if err != nil {
 		return nil, err
 	}
-	if (serviceOrigin == "") != (artifactStore == nil) {
-		return nil, errors.New("catalog service origin and artifact store must be configured together")
+	if serviceOrigin != "" && artifactStore == nil {
+		return nil, errors.New("catalog service origin requires artifact storage")
 	}
 	if serviceOrigin != "" {
 		if err := catalog.ValidateServiceOrigin(serviceOrigin); err != nil {
@@ -65,15 +83,11 @@ func NewProductionArtifactBuilder(fetchConfig fetcher.Config, serviceOrigin stri
 	if err != nil {
 		return nil, fmt.Errorf("digest tap policy: %w", err)
 	}
-	var store generatedArtifactStore
-	if artifactStore != nil {
-		store = catalogArtifactStoreAdapter{store: artifactStore}
-	}
 	return &ProductionArtifactBuilder{
 		registry:        registry,
 		fetcher:         boundedFetcher,
 		serviceOrigin:   serviceOrigin,
-		artifactStore:   store,
+		artifactStore:   artifactStore,
 		tapPolicy:       tapPolicy,
 		tapPolicyDigest: tapPolicyDigest,
 		derivePrebuilt:  prebuilt.Derive,

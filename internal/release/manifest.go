@@ -39,6 +39,7 @@ type Manifest struct {
 	RuntimeBase            Component  `json:"runtime_base"`
 	Materializer           Component  `json:"materializer"`
 	BottleFetcher          *Component `json:"bottle_fetcher,omitempty"`
+	CatalogExtractor       *Component `json:"catalog_extractor,omitempty"`
 	HomebrewCommit         string     `json:"homebrew_commit"`
 	PortableRubyVersion    string     `json:"portable_ruby_version"`
 	VerificationKeysDigest string     `json:"verification_keys_digest"`
@@ -74,6 +75,7 @@ type Bindings struct {
 	ComponentsV2  resolution.ComponentsV2
 
 	BottleFetcherRef                  string
+	CatalogExtractorRef               string
 	CatalogServiceOrigin              string
 	IngestionJWSKeyPolicyDigest       string
 	TapPolicyDigest                   string
@@ -234,9 +236,17 @@ func (m *Manifest) BindingsFor(platform resolution.Platform) (Bindings, error) {
 		if err != nil {
 			return Bindings{}, fmt.Errorf("bottle fetcher: %w", err)
 		}
+		extractor := ""
+		if m.CatalogExtractor != nil {
+			extractor, err = componentRefFor(*m.CatalogExtractor, platform, true)
+			if err != nil {
+				return Bindings{}, fmt.Errorf("catalog extractor: %w", err)
+			}
+		}
 		bindings.BottleFetcherRef = fetcher
+		bindings.CatalogExtractorRef = extractor
 		bindings.ComponentsV2 = resolution.ComponentsV2{
-			FrontendIndexRef: m.Frontend.Index, FrontendRef: f, RuntimeBaseRef: b, MaterializerRef: mat, BottleFetcherRef: fetcher,
+			FrontendIndexRef: m.Frontend.Index, FrontendRef: f, RuntimeBaseRef: b, MaterializerRef: mat, BottleFetcherRef: fetcher, CatalogExtractorRef: extractor,
 			CatalogServiceOrigin:          m.CatalogServiceOrigin,
 			IngestionJWSKeyPolicyDigest:   m.IngestionJWSKeyPolicyDigest,
 			TapPolicyDigest:               m.TapPolicyDigest,
@@ -280,14 +290,27 @@ func validateV2Bindings(m *Manifest) error {
 	} else if err := validateComponent("bottle_fetcher", *m.BottleFetcher); err != nil {
 		errs = append(errs, err)
 	}
-	if err := validateHTTPSOrigin(m.CatalogServiceOrigin); err != nil {
-		errs = append(errs, fmt.Errorf("catalog service origin: %w", err))
+	localMode := m.CatalogExtractor != nil
+	serviceMode := m.CatalogServiceOrigin != "" || m.IngestionJWSKeyPolicyDigest != ""
+	if localMode == serviceMode {
+		errs = append(errs, errors.New("V2 manifest must select exactly one of build-local catalog extractor or hosted catalog service"))
+	}
+	if localMode {
+		if err := validateComponent("catalog_extractor", *m.CatalogExtractor); err != nil {
+			errs = append(errs, err)
+		}
+	} else {
+		if err := validateHTTPSOrigin(m.CatalogServiceOrigin); err != nil {
+			errs = append(errs, fmt.Errorf("catalog service origin: %w", err))
+		}
+		if err := validateDigest(m.IngestionJWSKeyPolicyDigest); err != nil {
+			errs = append(errs, fmt.Errorf("ingestion JWS key policy: %w", err))
+		}
 	}
 	for _, field := range []struct {
 		name  string
 		value string
 	}{
-		{name: "ingestion JWS key policy", value: m.IngestionJWSKeyPolicyDigest},
 		{name: "tap policy", value: m.TapPolicyDigest},
 		{name: "executable runtime policy", value: m.ExecutableRuntimePolicyDigest},
 	} {
@@ -337,6 +360,7 @@ func validateV2Bindings(m *Manifest) error {
 
 func hasV2Bindings(m *Manifest) bool {
 	return m.BottleFetcher != nil ||
+		m.CatalogExtractor != nil ||
 		m.CatalogServiceOrigin != "" ||
 		m.IngestionJWSKeyPolicyDigest != "" ||
 		m.TapPolicyDigest != "" ||
@@ -443,6 +467,9 @@ func canonicalize(m *Manifest) {
 	if m.BottleFetcher != nil {
 		components = append(components, m.BottleFetcher)
 	}
+	if m.CatalogExtractor != nil {
+		components = append(components, m.CatalogExtractor)
+	}
 	for _, c := range components {
 		slices.SortFunc(c.Platforms, func(a, b PlatformRef) int {
 			if x := strings.Compare(a.Platform.OS, b.Platform.OS); x != 0 {
@@ -466,6 +493,10 @@ func cloneManifest(m Manifest) Manifest {
 	if m.BottleFetcher != nil {
 		fetcher := cloneComponent(*m.BottleFetcher)
 		m.BottleFetcher = &fetcher
+	}
+	if m.CatalogExtractor != nil {
+		extractor := cloneComponent(*m.CatalogExtractor)
+		m.CatalogExtractor = &extractor
 	}
 	m.SupportedCatalogPolicyVersions = append([]string(nil), m.SupportedCatalogPolicyVersions...)
 	m.SupportedFetchPolicyVersions = append([]string(nil), m.SupportedFetchPolicyVersions...)

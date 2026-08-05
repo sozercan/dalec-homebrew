@@ -245,8 +245,8 @@ func verifyReceiptlessMarkerV2(node resolution.NodeV2, result *bottle.Result) er
 	if result == nil {
 		return errors.New("nil verified bottle result")
 	}
-	if node.Bottle.Transport.HTTPS != nil && node.Bottle.Tab.Receiptless != (result.Receipt == nil) {
-		return fmt.Errorf("HTTPS bottle %q receiptless marker does not match verified archive", node.ID)
+	if (node.Bottle.Transport.HTTPS != nil || node.Bottle.Transport.Local != nil) && node.Bottle.Tab.Receiptless != (result.Receipt == nil) {
+		return fmt.Errorf("receiptless bottle %q marker does not match verified archive", node.ID)
 	}
 	return nil
 }
