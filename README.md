@@ -89,15 +89,17 @@ Non-core builds use the release-bound catalog service and bottle fetcher. Core-o
 
 The catalog service verifies exact tap commits, bottle checksums and sizes, hostile-archive structure, embedded Formula bytes, and any digest-advertised Sigstore/in-toto bundle covered by the release tap policy. Missing provenance is recorded as an explicit per-artifact waiver; invalid advertised provenance fails the build.
 
-A Formula without a bottle remains unsupported unless its exact Formula ID is present in the embedded tap policy as a prebuilt executable archive. For those entries, the service verifies the complete upstream archive and executable properties, creates a deterministic receiptless derived bottle containing only the policy-selected payload, and records the upstream and derived identities separately. Build input cannot add archive recipes or enable another Formula.
+A Formula without a bottle remains unsupported unless its exact Formula ID is present in the embedded tap policy as a prebuilt executable archive. For those entries, the service verifies the complete upstream archive and executable properties, creates a deterministic receiptless derived bottle containing only the policy-selected payload, and records the upstream and derived identities separately. Build input cannot add archive recipes or enable another Formula. A single exact `version` value may assert the version already authorized by that release policy; it does not select a historical Formula or tap commit.
 
 ```yaml
 dependencies:
   runtime:
     acme/tools/widget: {}
+    sozercan/repo/a365:
+      version: ["0.3.3"]
 ```
 
-The example identity above is illustrative; use a Formula present in the public tap selected by your release/test environment.
+The first identity above is illustrative. The `a365` assertion is the exact prebuilt profile authorized by the current embedded V2 tap policy.
 
 ## Examples
 

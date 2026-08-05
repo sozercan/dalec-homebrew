@@ -130,20 +130,18 @@ extraction worker, the production catalog-service generator, an ephemeral PS512
 signer and key policy, HTTPS service termination, the bottle fetcher, and
 release-bound V2 materializer/frontend images. It then builds
 [`examples/ci-noncore-multi-package.yaml`](examples/ci-noncore-multi-package.yaml)
-from a bottled public-tap Formula plus a core Formula and reruns runtime
-checks with networking disabled.
+from public-tap Formulae plus a core Formula and reruns runtime checks with
+networking disabled. The fixture uses an exact policy-backed version assertion
+for `sozercan/repo/a365` while the catalog service still resolves each tap's
+default branch and records the exact observed commit.
 
 The script is CI-oriented and requires explicit digest-pinned BuildKit,
-registry, and HTTPS-tunnel image inputs. It also requires the exact public-tap
-commits used by the fixture so a new stable Formula release cannot silently
-change the E2E closure:
+registry, and HTTPS-tunnel image inputs:
 
 ```console
 DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE=docker.io/moby/buildkit@sha256:<digest> \
 DALEC_HOMEBREW_E2E_REGISTRY_IMAGE=docker.io/library/registry@sha256:<digest> \
 DALEC_HOMEBREW_E2E_CLOUDFLARED_IMAGE=docker.io/cloudflare/cloudflared@sha256:<digest> \
-DALEC_HOMEBREW_E2E_A365_TAP_COMMIT=9c84216d0c239c0fabf214ab995bf07960727cab \
-DALEC_HOMEBREW_E2E_AVTOOLS_TAP_COMMIT=44ef54859495a94d474483a64308bfafb9f1e4d9 \
 DALEC_HOMEBREW_E2E_RUN_ID=local-1 \
 ./scripts/noncore-e2e.sh
 ```

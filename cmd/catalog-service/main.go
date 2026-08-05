@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -20,71 +19,6 @@ import (
 	"github.com/sozercan/dalec-homebrew/internal/cataloggenerator"
 	"github.com/sozercan/dalec-homebrew/internal/catalogservice"
 )
-
-type tapCommitFlags map[catalog.TapID]string
-
-func (pins *tapCommitFlags) String() string {
-	if pins == nil || len(*pins) == 0 {
-		return ""
-	}
-	values := make([]string, 0, len(*pins))
-	for tap, commit := range *pins {
-		values = append(values, string(tap)+"="+commit)
-	}
-	slices.Sort(values)
-	return strings.Join(values, ",")
-}
-
-func (pins *tapCommitFlags) Set(value string) error {
-	tapValue, commit, ok := strings.Cut(value, "=")
-	if !ok || tapValue == "" || commit == "" {
-		return errors.New("tap commit must use TAP=COMMIT")
-	}
-	tap, err := catalog.ParseTapID(tapValue)
-	if err != nil {
-		return fmt.Errorf("tap commit tap %q: %w", tapValue, err)
-	}
-	if tap.IsCore() {
-		return errors.New("homebrew/core cannot be pinned with --tap-commit")
-	}
-	if !validTapCommit(commit) {
-		return errors.New("tap commit must be a lowercase 40-hex commit")
-	}
-	if _, exists := (*pins)[tap]; exists {
-		return fmt.Errorf("duplicate tap commit pin for %s", tap)
-	}
-	if len(*pins) >= catalog.MaxTaps {
-		return fmt.Errorf("tap commit pin count exceeds limit %d", catalog.MaxTaps)
-	}
-	if *pins == nil {
-		*pins = make(tapCommitFlags)
-	}
-	(*pins)[tap] = commit
-	return nil
-}
-
-func (pins tapCommitFlags) clone() map[catalog.TapID]string {
-	if len(pins) == 0 {
-		return nil
-	}
-	cloned := make(map[catalog.TapID]string, len(pins))
-	for tap, commit := range pins {
-		cloned[tap] = commit
-	}
-	return cloned
-}
-
-func validTapCommit(value string) bool {
-	if len(value) != 40 {
-		return false
-	}
-	for _, c := range []byte(value) {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			return false
-		}
-	}
-	return true
-}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -97,7 +31,6 @@ func main() {
 
 func run(ctx context.Context, args []string) (retErr error) {
 	flags := flag.NewFlagSet("dalec-homebrew-catalog-service", flag.ContinueOnError)
-	var tapCommits tapCommitFlags
 	listenAddress := flags.String("listen", ":8080", "HTTP listen address")
 	storeDir := flags.String("store", "", "persistent single-writer store directory")
 	origin := flags.String("origin", "", "public HTTPS catalog-service origin")
@@ -107,7 +40,6 @@ func run(ctx context.Context, args []string) (retErr error) {
 	buildkitAddress := flags.String("buildkit-address", "", "dedicated BuildKit worker address for production tap ingestion")
 	extractorRef := flags.String("extractor-ref", "", "digest-pinned multi-platform catalog-extractor image")
 	homebrewCommit := flags.String("homebrew-commit", "", "release-pinned Homebrew commit")
-	flags.Var(&tapCommits, "tap-commit", "exact non-core tap commit TAP=COMMIT (repeatable)")
 	serviceVersion := flags.String("service-version", "", "catalog-service component version")
 	serviceDigest := flags.String("service-digest", "", "catalog-service component sha256 digest")
 	extractorVersion := flags.String("extractor-version", "", "catalog-extractor component version")
@@ -145,9 +77,6 @@ func run(ctx context.Context, args []string) (retErr error) {
 	if (*fixturePath == "") == (*buildkitAddress == "") {
 		return errors.New("exactly one of --buildkit-address or --fixture is required")
 	}
-	if *fixturePath != "" && len(tapCommits) != 0 {
-		return errors.New("--tap-commit is not supported with --fixture")
-	}
 	artifactStore, err := catalogartifactstore.New(*storeDir)
 	if err != nil {
 		return fmt.Errorf("configure generated artifact store: %w", err)
@@ -172,7 +101,7 @@ func run(ctx context.Context, args []string) (retErr error) {
 		if !strings.HasSuffix(*extractorRef, "@"+*extractorDigest) {
 			return errors.New("--extractor-ref digest does not match --extractor-digest")
 		}
-		generator, err = cataloggenerator.NewProduction(ctx, cataloggenerator.ProductionConfig{BuildKitAddress: *buildkitAddress, ExtractorRef: *extractorRef, HomebrewCommit: *homebrewCommit, TapCommits: tapCommits.clone(), CatalogServiceOrigin: *origin, ArtifactStore: artifactStore, CacheDir: filepath.Join(*storeDir, "ingestion-cache"), CacheMaxAge: *catalogRefresh, VerificationIdentity: *serviceDigest + "\x00" + *extractorDigest})
+		generator, err = cataloggenerator.NewProduction(ctx, cataloggenerator.ProductionConfig{BuildKitAddress: *buildkitAddress, ExtractorRef: *extractorRef, HomebrewCommit: *homebrewCommit, CatalogServiceOrigin: *origin, ArtifactStore: artifactStore, CacheDir: filepath.Join(*storeDir, "ingestion-cache"), CacheMaxAge: *catalogRefresh, VerificationIdentity: *serviceDigest + "\x00" + *extractorDigest})
 		if err != nil {
 			return fmt.Errorf("configure BuildKit catalog generator: %w", err)
 		}

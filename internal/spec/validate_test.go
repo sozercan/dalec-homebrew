@@ -93,8 +93,83 @@ targets:
 func TestRejectVersionAndForbiddenFields(t *testing.T) {
 	data := strings.Replace(baseSpec, "    - hello\n    - jq", "    hello:\n      version: ['>=2']\n    jq: {}", 1) + "\nsources:\n  x:\n    http:\n      url: https://example.invalid/x\n"
 	_, err := Validate(load(t, data), "", "amd64", nil)
-	if err == nil || !strings.Contains(err.Error(), "V2 feature") || !strings.Contains(err.Error(), "sources") {
+	if err == nil || !strings.Contains(err.Error(), "version constraints are unsupported") || !strings.Contains(err.Error(), "sources") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestPolicyAuthorizedPrebuiltExactVersionAssertion(t *testing.T) {
+	data := `dependencies:
+  runtime:
+    sozercan/repo/a365:
+      version: ["0.3.3"]
+image:
+  entrypoint: a365
+`
+	order, err := RuntimeDependencyOrder([]byte(data), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := Validate(load(t, data), "", "amd64", order, Capabilities{NonCoreTaps: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selection.Roots) != 1 {
+		t.Fatalf("roots=%+v", selection.Roots)
+	}
+	root := selection.Roots[0]
+	if root.ID.String() != "sozercan/repo/a365" || root.VersionAssertion != "0.3.3" {
+		t.Fatalf("root=%+v", root)
+	}
+}
+
+func TestRejectUnsupportedVersionAssertions(t *testing.T) {
+	tests := []struct {
+		name     string
+		formula  string
+		versions string
+		want     string
+	}{
+		{name: "wrong policy version", formula: "sozercan/repo/a365", versions: `["0.3.4"]`, want: "version assertion must be exactly"},
+		{name: "range", formula: "sozercan/repo/a365", versions: `[">=0.3.3"]`, want: "version assertion must be exactly"},
+		{name: "multiple", formula: "sozercan/repo/a365", versions: `["0.3.3", "<0.4.0"]`, want: "version assertion must be exactly"},
+		{name: "duplicate", formula: "sozercan/repo/a365", versions: `["0.3.3", "0.3.3"]`, want: "version assertion must be exactly"},
+		{name: "empty", formula: "sozercan/repo/a365", versions: `[""]`, want: "version assertion must be exactly"},
+		{name: "other tap", formula: "acme/tools/widget", versions: `["0.3.3"]`, want: "version constraints are unsupported"},
+		{name: "core", formula: "hello", versions: `["0.3.3"]`, want: "version constraints are unsupported"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data := fmt.Sprintf("dependencies:\n  runtime:\n    %s:\n      version: %s\nimage:\n  entrypoint: runtime\n", test.formula, test.versions)
+			order, err := RuntimeDependencyOrder([]byte(data), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = Validate(load(t, data), "", "amd64", order, Capabilities{NonCoreTaps: true})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestPolicyAuthorizedVersionAssertionRequiresNonCoreCapability(t *testing.T) {
+	data := `dependencies:
+  runtime:
+    sozercan/repo/a365:
+      version: ["0.3.3"]
+image:
+  entrypoint: a365
+`
+	if err := PreflightFormulaNames([]byte(data), ""); err == nil || !strings.Contains(err.Error(), "capability bindings") {
+		t.Fatalf("PreflightFormulaNames() error = %v", err)
+	}
+	order, err := RuntimeDependencyOrder([]byte(data), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Validate(load(t, data), "", "amd64", order); err == nil || !strings.Contains(err.Error(), "capability bindings") {
+		t.Fatalf("Validate() error = %v", err)
 	}
 }
 

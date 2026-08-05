@@ -62,7 +62,7 @@ dependencies:
 
 Dependency rules:
 
-- An omitted or empty `version` list selects the current stable Formula in the authenticated Homebrew snapshot. Any non-empty version constraint is rejected; historical versions and version ranges are not supported.
+- An omitted or empty `version` list selects the current stable Formula in the authenticated snapshot. A V2 release accepts a non-empty list only as a single exact assertion for a release-policy-authorized prebuilt archive; the current policy accepts `sozercan/repo/a365` with `version: ["0.3.3"]`. This assertion must match the stable Formula resolved from the tap's default branch and does not select a historical tap commit. Historical versions, ranges, and version assertions for other Formulae remain unsupported.
 - Explicit canonical versioned Formula names such as `python@3.14` are supported. Version-looking requests must be exact canonical names; they do not select arbitrary historical releases.
 - A bare name canonicalizes to `homebrew/core/<name>`; explicit `homebrew/core/<name>` is identical, and duplicate canonical roots such as both forms of `hello` are rejected.
 - A qualified V2 name has exactly `owner/tap/formula`. URL-like input, arbitrary remotes, casks, credentials, uppercase or non-ASCII components, colons, backslashes, control characters, and malformed or overlong components are rejected before metadata access.

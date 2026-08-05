@@ -65,7 +65,22 @@ func buildV2(ctx context.Context, client gwclient.Client, dc *dockerui.Client, c
 	verifiedResults := make(map[string]catalog.PlatformResult)
 	catalogSigner := resolution.Signature{}
 	if nonCore != nil {
+		selections := make(map[string][]speccontract.Root, len(preflight))
+		for _, input := range preflight {
+			key := input.platform.OS + "/" + input.platform.Architecture
+			if _, duplicate := selections[key]; duplicate {
+				return nil, fmt.Errorf("duplicate preflight platform %s", key)
+			}
+			selections[key] = input.selection.Roots
+		}
 		for key, result := range nonCore.ByPlatform {
+			roots, ok := selections[key]
+			if !ok {
+				return nil, fmt.Errorf("catalog service returned unexpected platform %s", key)
+			}
+			if _, err := v2RequestedRoots(snapshot, nonCore.Catalogs, result, roots); err != nil {
+				return nil, err
+			}
 			verified, err := ResolveNonCoreOCIArtifacts(ctx, registry, snapshot, result, nonCore.Catalogs)
 			if err != nil {
 				return nil, err
@@ -160,6 +175,9 @@ func buildV2(ctx context.Context, client gwclient.Client, dc *dockerui.Client, c
 		if err != nil {
 			return nil, err
 		}
+		if err := validateRootVersionAssertionsV2(record, input.selection.Roots); err != nil {
+			return nil, err
+		}
 		finalImage, finalIdentity, _, err := runtime.BuildImageConfigV2(baseImage, input.selection.Image, record)
 		if err != nil {
 			return nil, err
@@ -233,19 +251,56 @@ func v2RequestedRoots(core catalogresolver.CoreCatalog, catalogs map[catalog.Tap
 			return nil, err
 		}
 		id = closure.Requested[0]
-		found := false
-		for _, node := range result.Closure.Nodes {
-			if node.ID == id {
-				found = true
+		var selected *catalog.Node
+		for i := range result.Closure.Nodes {
+			if result.Closure.Nodes[i].ID == id {
+				selected = &result.Closure.Nodes[i]
 				break
 			}
 		}
-		if !found {
+		if selected == nil {
 			return nil, fmt.Errorf("requested Formula %s is absent from the signed catalog closure", id)
+		}
+		if root.VersionAssertion != "" && selected.FormulaVersion != root.VersionAssertion {
+			return nil, fmt.Errorf("runtime dependency %q requires exact Formula version %q, but signed catalog closure selected %q for %s", root.Requested, root.VersionAssertion, selected.FormulaVersion, id)
 		}
 		requested = append(requested, resolver.V2RequestedRoot{Requested: root.Requested, ID: id})
 	}
 	return requested, nil
+}
+
+func validateRootVersionAssertionsV2(record *resolution.RecordV2, roots []speccontract.Root) error {
+	if record == nil {
+		return errors.New("nil V2 resolution record")
+	}
+	requested := make(map[string]resolution.FormulaID, len(record.Requested))
+	for _, root := range record.Requested {
+		if _, duplicate := requested[root.Requested]; duplicate {
+			return fmt.Errorf("V2 resolution repeats requested root %q", root.Requested)
+		}
+		requested[root.Requested] = root.ID
+	}
+	versions := make(map[resolution.FormulaID]string, len(record.Nodes))
+	for _, node := range record.Nodes {
+		versions[node.ID] = node.FormulaVersion
+	}
+	for _, root := range roots {
+		if root.VersionAssertion == "" {
+			continue
+		}
+		id, ok := requested[root.Requested]
+		if !ok {
+			return fmt.Errorf("runtime dependency %q with version assertion is absent from the V2 resolution", root.Requested)
+		}
+		selected, ok := versions[id]
+		if !ok {
+			return fmt.Errorf("runtime dependency %q resolved to missing node %s", root.Requested, id)
+		}
+		if selected != root.VersionAssertion {
+			return fmt.Errorf("runtime dependency %q requires exact Formula version %q, but authenticated resolution selected %q for %s", root.Requested, root.VersionAssertion, selected, id)
+		}
+	}
+	return nil
 }
 
 func coreRollbackFloor(value time.Time) uint64 {

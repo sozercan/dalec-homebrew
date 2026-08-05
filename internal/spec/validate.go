@@ -12,6 +12,7 @@ import (
 
 	"github.com/project-dalec/dalec"
 	"github.com/sozercan/dalec-homebrew/internal/homebrew/formulaid"
+	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
 var supportedArches = map[string]struct{}{"amd64": {}, "arm64": {}}
@@ -27,6 +28,9 @@ type Root struct {
 	Name      string
 	Requested string
 	ID        formulaid.FormulaID
+	// VersionAssertion is an exact current-version assertion authorized by the
+	// embedded prebuilt policy. It never requests historical resolution.
+	VersionAssertion string
 }
 
 // Capabilities are release-bound frontend features. They are passed as a
@@ -98,14 +102,18 @@ func Validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string, 
 			errs = append(errs, fmt.Errorf("%s extra package repositories are not supported", scope))
 		}
 		for name, constraint := range deps.Runtime {
-			id, err := formulaid.Parse(name)
-			if err != nil {
-				errs = append(errs, fmt.Errorf("%s runtime dependency: %w", scope, err))
+			id, parseErr := formulaid.Parse(name)
+			if parseErr != nil {
+				errs = append(errs, fmt.Errorf("%s runtime dependency: %w", scope, parseErr))
 			} else if !caps.NonCoreTaps && !isCoreFormula(id) {
 				errs = append(errs, fmt.Errorf("%s runtime dependency %q requires release-bound non-core capability bindings", scope, name))
 			}
 			if len(constraint.Version) > 0 {
-				errs = append(errs, fmt.Errorf("%s runtime dependency %q has version constraints; historical and ranged resolution is a V2 feature", scope, name))
+				if parseErr != nil {
+					errs = append(errs, fmt.Errorf("%s runtime dependency %q has unsupported version constraints", scope, name))
+				} else if _, err := exactVersionAssertion(id, constraint.Version); err != nil {
+					errs = append(errs, fmt.Errorf("%s runtime dependency %q: %w", scope, name, err))
+				}
 			}
 			seenArch := map[string]struct{}{}
 			for _, a := range constraint.Arch {
@@ -187,7 +195,11 @@ func Validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string, 
 				if isCoreFormula(id) {
 					lookup = id.Name()
 				}
-				roots = append(roots, Root{Name: lookup, Requested: name, ID: id})
+				versionAssertion := ""
+				if len(constraint.Version) == 1 {
+					versionAssertion = constraint.Version[0]
+				}
+				roots = append(roots, Root{Name: lookup, Requested: name, ID: id, VersionAssertion: versionAssertion})
 			}
 		}
 	}
@@ -207,6 +219,24 @@ func ValidateFormulaName(name string) error {
 
 func isCoreFormula(id formulaid.FormulaID) bool {
 	return id.Tap() == formulaid.CoreTap()
+}
+
+func exactVersionAssertion(id formulaid.FormulaID, versions []string) (string, error) {
+	if len(versions) == 0 {
+		return "", nil
+	}
+	policy, err := policyv2.LoadTapPolicy()
+	if err != nil {
+		return "", fmt.Errorf("load release-bound tap policy: %w", err)
+	}
+	authorization, ok := policy.PrebuiltArchiveForFormula(id.String())
+	if !ok {
+		return "", errors.New("version constraints are unsupported; only an exact version assertion for a release-policy-authorized prebuilt archive is accepted")
+	}
+	if len(versions) != 1 || versions[0] != authorization.Version {
+		return "", fmt.Errorf("version assertion must be exactly [%q] for the release-policy-authorized prebuilt archive", authorization.Version)
+	}
+	return authorization.Version, nil
 }
 
 func validateRuntimeRootLimits(ids []formulaid.FormulaID) error {

@@ -8,10 +8,11 @@ license: Apache-2.0
 
 dependencies:
   runtime:
-    # CI resolves the stable Formulae from exact tap commits pinned in ci.yml.
-    # Dependency version constraints remain unsupported by the public contract.
     svt/avtools/libdf: {}
-    sozercan/repo/a365: {}
+    # Exact assertion for the release-policy-authorized current prebuilt; this
+    # does not select a historical Formula version or tap commit.
+    sozercan/repo/a365:
+      version: ["0.3.3"]
     hello: {}
 
 image:
