@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	digest "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
 	"github.com/sozercan/dalec-homebrew/internal/bottle"
 	"github.com/sozercan/dalec-homebrew/internal/fetcher"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
@@ -72,5 +75,12 @@ func TestCatalogBottleTabCanonicalizesEmptySlices(t *testing.T) {
 	}
 	if converted.ChangedFiles != nil || converted.Dependencies != nil {
 		t.Fatalf("empty slices were not canonicalized: %+v", converted)
+	}
+}
+
+func TestDescriptorCanonicalizesEmptyAnnotations(t *testing.T) {
+	converted := descriptor(ocispec.Descriptor{Digest: digest.FromString("x"), Size: 1, MediaType: "application/test", Annotations: map[string]string{}})
+	if converted.Annotations != nil {
+		t.Fatalf("empty annotations were not canonicalized: %+v", converted.Annotations)
 	}
 }

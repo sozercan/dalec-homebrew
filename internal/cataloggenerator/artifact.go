@@ -405,6 +405,9 @@ func descriptor(value ocispec.Descriptor) catalog.Descriptor {
 		}
 		return strings.Compare(a.Value, b.Value)
 	})
+	if len(annotations) == 0 {
+		annotations = nil
+	}
 	var platform *catalog.Platform
 	if value.Platform != nil {
 		platform = &catalog.Platform{OS: value.Platform.OS, Architecture: value.Platform.Architecture, Variant: value.Platform.Variant}
