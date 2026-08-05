@@ -3,6 +3,7 @@ package policy
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -243,5 +244,15 @@ func testRuntimePolicyRecordV2(t *testing.T) *resolution.RecordV2 {
 			SupportedProvenancePolicyVersions: []string{resolution.CoreProvenanceWaiverPolicyV1, resolution.HTTPSBottleSourceWaiverPolicyV1, resolution.ProvenanceWaiverPolicyV1, resolution.PrebuiltProvenanceWaiverPolicyV1, resolution.VerifiedProvenancePolicyV1},
 		},
 		Runtime: resolution.RuntimePolicy{User: "linuxbrew", UID: 1000, GID: 1000, CPUBaseline: "core2"},
+	}
+}
+
+func TestV2RuntimeWritablePathsAreCanonicalized(t *testing.T) {
+	data, err := os.ReadFile("v2.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(data), "slices.Sort(writable)"); got < 2 {
+		t.Fatalf("V2 writable paths are sorted at %d policy boundaries, want at least 2", got)
 	}
 }

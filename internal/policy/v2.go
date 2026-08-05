@@ -50,6 +50,7 @@ func RuntimeAllowlistV2(record *resolution.RecordV2) (runtimefs.Allowlist, []str
 		return runtimefs.Allowlist{}, nil, err
 	}
 	allow, writable := RuntimeAllowlist(projected)
+	slices.Sort(writable)
 	return allow, writable, nil
 }
 
@@ -72,6 +73,7 @@ func runtimePolicyBindingsV2(record *resolution.RecordV2) (runtimefs.Allowlist, 
 		return runtimefs.Allowlist{}, nil, "", err
 	}
 	allow, writable := RuntimeAllowlist(projected)
+	slices.Sort(writable)
 	digest, err := runtimefs.PolicyDigest(allow, runtimefs.DefaultInstallPrefix, projected.Nodes)
 	if err != nil {
 		return runtimefs.Allowlist{}, nil, "", err
