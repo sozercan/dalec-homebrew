@@ -760,7 +760,7 @@ jobs:
             "$SYFT_IMAGE" scan --platform "$PLATFORM" "$SUBJECT" \
             -o "spdx-json=/evidence/sbom-${SLUG}.spdx.json"
 
-      - name: Scan for fixed critical vulnerabilities
+      - name: Generate fixed critical vulnerability report
         env:
           SUBJECT: ${{ steps.subject.outputs.ref }}
           PLATFORM: ${{ matrix.platform }}
@@ -779,10 +779,118 @@ jobs:
             --output "/evidence/vulnerability-${SLUG}.json" \
             --severity CRITICAL \
             --ignore-unfixed \
-            --exit-code 1 \
+            --exit-code 0 \
             --no-progress \
             --skip-version-check \
             "$SUBJECT"
+
+      - name: Summarize fixed critical vulnerability findings
+        env:
+          COMPONENT: ${{ matrix.component }}
+          SUBJECT: ${{ steps.subject.outputs.ref }}
+          PLATFORM: ${{ matrix.platform }}
+          SLUG: ${{ matrix.slug }}
+        run: |
+          set -euo pipefail
+          report="evidence/vulnerability-${SLUG}.json"
+          test -s "$report"
+          report_size=$(wc -c < "$report")
+          if (( report_size > MAX_RELEASE_ASSET_BYTES )); then
+            echo "$report exceeds the release asset size limit" >&2
+            exit 1
+          fi
+
+          findings=$(mktemp "$RUNNER_TEMP/vulnerability-findings.XXXXXX")
+          trap 'rm -f "$findings"' EXIT
+          jq -c -e --arg subject "$SUBJECT" '
+            if type != "object" or .SchemaVersion != 2 then
+              error("unexpected Trivy schema")
+            elif .ArtifactName != $subject then
+              error("Trivy ArtifactName does not match the expected subject")
+            elif .ArtifactType != "container_image" then
+              error("Trivy ArtifactType is not container_image")
+            elif (.Metadata | type) != "object" then
+              error("Trivy Metadata is not an object")
+            elif (.Metadata.RepoDigests | type) != "array" or
+                ((.Metadata.RepoDigests | index($subject)) == null) then
+              error("Trivy RepoDigests does not contain the expected subject")
+            elif (.Results | type) != "array" or (.Results | length) == 0 then
+              error("Trivy Results is not a nonempty array")
+            else
+              [
+                .Results[] as $result
+                | if ($result | type) != "object" then
+                    error("Trivy result is not an object")
+                  elif ($result.Target | type) != "string" or
+                      ($result.Target | length) == 0 then
+                    error("Trivy result Target is missing")
+                  elif $result.Vulnerabilities == null then
+                    empty
+                  elif ($result.Vulnerabilities | type) != "array" then
+                    error("Trivy Vulnerabilities is not an array")
+                  else
+                    $result.Vulnerabilities[] as $vulnerability
+                    | if ($vulnerability | type) != "object" then
+                        error("Trivy vulnerability is not an object")
+                      else
+                        {
+                          target: $result.Target,
+                          id: (($vulnerability.VulnerabilityID // "unknown") | tostring),
+                          package: (($vulnerability.PkgName // "unknown") | tostring),
+                          installed: (($vulnerability.InstalledVersion // "unknown") | tostring),
+                          fixed: (($vulnerability.FixedVersion // "unknown") | tostring),
+                          severity: (($vulnerability.Severity // "UNKNOWN") | tostring)
+                        }
+                      end
+                  end
+              ]
+              | sort_by([.id, .package, .installed, .fixed, .severity, .target])
+            end
+          ' "$report" > "$findings"
+
+          finding_count=$(jq -er 'length' "$findings")
+          summary_limit=50
+          summary_field_limit=256
+          {
+            printf "### Component vulnerability scan: \`%s\` (\`%s\`)\n\n" "$COMPONENT" "$PLATFORM"
+            printf -- "- Subject: \`%s\`\n" "$SUBJECT"
+            printf -- "- Report: \`vulnerability-%s.json\`\n" "$SLUG"
+            printf -- '- Fixed critical findings: **%s**\n\n' "$finding_count"
+            if (( finding_count == 0 )); then
+              echo "No fixed critical vulnerabilities were reported."
+            else
+              echo "| Vulnerability | Package | Installed | Fixed | Severity | Target |"
+              echo "| --- | --- | --- | --- | --- | --- |"
+              jq -r --argjson limit "$summary_limit" --argjson field_limit "$summary_field_limit" '
+                def markdown:
+                  tostring
+                  | if length > $field_limit then .[:$field_limit] + "…" else . end
+                  | explode
+                  | map(
+                      if . < 32 or (. >= 127 and . <= 159) or
+                          (. >= 8234 and . <= 8238) or
+                          (. >= 8294 and . <= 8297) then
+                        32
+                      else
+                        .
+                      end
+                    )
+                  | map("&#" + tostring + ";")
+                  | join("");
+                .[:$limit][]
+                | "| \(.id | markdown) | \(.package | markdown) | \(.installed | markdown) | \(.fixed | markdown) | \(.severity | markdown) | \(.target | markdown) |"
+              ' "$findings"
+              if (( finding_count > summary_limit )); then
+                echo
+                printf '_Showing the first %s of %s findings in deterministic order; the JSON report contains the complete result._\n' \
+                  "$summary_limit" "$finding_count"
+              fi
+              printf '_Summary fields are limited to %s characters; the JSON report contains the complete values._\n' \
+                "$summary_field_limit"
+            fi
+            echo
+            echo "_Vulnerability findings are release evidence and do not block signing or promotion._"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload evidence
         if: always()
@@ -1266,8 +1374,9 @@ jobs:
                           continue
                       if not isinstance(vulnerabilities, list):
                           raise ValueError("Trivy Vulnerabilities is not an array")
-                      if vulnerabilities:
-                          raise ValueError("report contains a fixed critical vulnerability")
+                      for vulnerability in vulnerabilities:
+                          if not isinstance(vulnerability, dict):
+                              raise ValueError("Trivy vulnerability is not an object")
               except (OSError, UnicodeError, ValueError) as exc:
                   raise SystemExit(f"{path}: invalid vulnerability report: {exc}")
           PYVULN

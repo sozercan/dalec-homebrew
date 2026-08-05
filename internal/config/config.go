@@ -15,7 +15,41 @@ const (
 	DefaultAttestationWaiver = "homebrew-jws-and-verified-oci-chain-v1"
 	DefaultFormulaURL        = "https://formulae.brew.sh/api/formula.jws.json"
 	DefaultMigrationsURL     = "https://formulae.brew.sh/api/formula_tap_migrations.jws.json"
+
+	buildArgMetadataURL       = "DALEC_HOMEBREW_METADATA_URL"
+	buildArgMigrationsURL     = "DALEC_HOMEBREW_MIGRATIONS_URL"
+	buildArgMetadataMaxAge    = "DALEC_HOMEBREW_METADATA_MAX_AGE"
+	buildArgMetadataNotBefore = "DALEC_HOMEBREW_METADATA_NOT_BEFORE"
+	buildArgRuntimeBase       = "DALEC_HOMEBREW_RUNTIME_BASE"
+	buildArgMaterializer      = "DALEC_HOMEBREW_MATERIALIZER"
+	buildArgFrontendRef       = "DALEC_HOMEBREW_FRONTEND_REF"
+	buildArgHomebrewCommit    = "DALEC_HOMEBREW_COMMIT"
+	buildArgKeysDigest        = "DALEC_HOMEBREW_KEYS_DIGEST"
+	buildArgRubyVersion       = "DALEC_HOMEBREW_RUBY_VERSION"
+	buildArgAttestationWaiver = "DALEC_HOMEBREW_ATTESTATION_WAIVER"
+	buildArgAllowUnattested   = "DALEC_HOMEBREW_ALLOW_UNATTESTED"
+	buildArgSkipTests         = "DALEC_SKIP_TESTS"
 )
+
+// BuildArgNames returns the frontend-owned build arguments that Dalec must
+// permit without requiring declarations in the user spec.
+func BuildArgNames() []string {
+	return []string{
+		buildArgMetadataURL,
+		buildArgMigrationsURL,
+		buildArgMetadataMaxAge,
+		buildArgMetadataNotBefore,
+		buildArgRuntimeBase,
+		buildArgMaterializer,
+		buildArgFrontendRef,
+		buildArgHomebrewCommit,
+		buildArgKeysDigest,
+		buildArgRubyVersion,
+		buildArgAttestationWaiver,
+		buildArgAllowUnattested,
+		buildArgSkipTests,
+	}
+}
 
 // These are populated in release frontend builds with -X. Digest-pinned build
 // args remain available for local development and reproducibility tests.
@@ -65,10 +99,10 @@ func FromBuildOpts(opts map[string]string) (Config, error) {
 	frontendBinding := firstNonEmpty(FrontendRef, opts["source"])
 	releaseBound := RuntimeBaseRef != "" || MaterializerRef != "" || HomebrewCommit != "" || VerificationKeysDigest != ""
 	cfg := Config{
-		FormulaURL: get("DALEC_HOMEBREW_METADATA_URL", DefaultFormulaURL), MigrationsURL: get("DALEC_HOMEBREW_MIGRATIONS_URL", DefaultMigrationsURL), MetadataMaxAge: 7 * 24 * time.Hour,
-		RuntimeBaseRef: bind("DALEC_HOMEBREW_RUNTIME_BASE", RuntimeBaseRef), MaterializerRef: bind("DALEC_HOMEBREW_MATERIALIZER", MaterializerRef), FrontendRef: bind("DALEC_HOMEBREW_FRONTEND_REF", frontendBinding),
-		HomebrewCommit: bind("DALEC_HOMEBREW_COMMIT", HomebrewCommit), VerificationKeysDigest: bind("DALEC_HOMEBREW_KEYS_DIGEST", VerificationKeysDigest), PortableRubyVersion: bind("DALEC_HOMEBREW_RUBY_VERSION", firstNonEmpty(PortableRubyVersion, "4.0.6")),
-		AttestationWaiver: get("DALEC_HOMEBREW_ATTESTATION_WAIVER", DefaultAttestationWaiver),
+		FormulaURL: get(buildArgMetadataURL, DefaultFormulaURL), MigrationsURL: get(buildArgMigrationsURL, DefaultMigrationsURL), MetadataMaxAge: 7 * 24 * time.Hour,
+		RuntimeBaseRef: bind(buildArgRuntimeBase, RuntimeBaseRef), MaterializerRef: bind(buildArgMaterializer, MaterializerRef), FrontendRef: bind(buildArgFrontendRef, frontendBinding),
+		HomebrewCommit: bind(buildArgHomebrewCommit, HomebrewCommit), VerificationKeysDigest: bind(buildArgKeysDigest, VerificationKeysDigest), PortableRubyVersion: bind(buildArgRubyVersion, firstNonEmpty(PortableRubyVersion, "4.0.6")),
+		AttestationWaiver: get(buildArgAttestationWaiver, DefaultAttestationWaiver),
 	}
 	if source := opts["source"]; source != "" && cfg.FrontendRef != source {
 		errs = append(errs, errors.New("frontend binding differs from the invoking gateway source"))
@@ -76,29 +110,29 @@ func FromBuildOpts(opts map[string]string) (Config, error) {
 	if releaseBound && (cfg.FormulaURL != DefaultFormulaURL || cfg.MigrationsURL != DefaultMigrationsURL) {
 		errs = append(errs, errors.New("release-bound frontends cannot override official Homebrew metadata endpoints"))
 	}
-	if raw := get("DALEC_HOMEBREW_METADATA_MAX_AGE", ""); raw != "" {
+	if raw := get(buildArgMetadataMaxAge, ""); raw != "" {
 		d, err := time.ParseDuration(raw)
 		if err != nil || d <= 0 {
-			errs = append(errs, fmt.Errorf("invalid DALEC_HOMEBREW_METADATA_MAX_AGE %q", raw))
+			errs = append(errs, fmt.Errorf("invalid %s %q", buildArgMetadataMaxAge, raw))
 		} else if releaseBound && d > 7*24*time.Hour {
 			errs = append(errs, fmt.Errorf("release-bound metadata max age %s exceeds 168h", d))
 		} else {
 			cfg.MetadataMaxAge = d
 		}
 	}
-	if raw := get("DALEC_HOMEBREW_METADATA_NOT_BEFORE", ""); raw != "" {
+	if raw := get(buildArgMetadataNotBefore, ""); raw != "" {
 		t, err := time.Parse(time.RFC3339, raw)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("invalid DALEC_HOMEBREW_METADATA_NOT_BEFORE %q: %w", raw, err))
+			errs = append(errs, fmt.Errorf("invalid %s %q: %w", buildArgMetadataNotBefore, raw, err))
 		} else {
 			cfg.MetadataNotBefore = t
 		}
 	}
-	cfg.SkipTests = parseBool(get("DALEC_SKIP_TESTS", ""))
+	cfg.SkipTests = parseBool(get(buildArgSkipTests, ""))
 	if releaseBound && cfg.SkipTests {
 		errs = append(errs, errors.New("release-bound frontends cannot skip runtime tests"))
 	}
-	cfg.AllowUnattested = parseBool(get("DALEC_HOMEBREW_ALLOW_UNATTESTED", "1"))
+	cfg.AllowUnattested = parseBool(get(buildArgAllowUnattested, "1"))
 	for name, ref := range map[string]string{"runtime base": cfg.RuntimeBaseRef, "materializer": cfg.MaterializerRef} {
 		if err := validatePinnedRef(ref); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))

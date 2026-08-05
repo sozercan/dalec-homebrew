@@ -111,9 +111,18 @@ Release CI must reject:
 - conflicting `SOURCE_DATE_EPOCH` values
 - changed Chisel, release-definition, snapshot, or Ubuntu pins without review
 - unsigned or mixed component tuples
-- any fixed `CRITICAL` vulnerability in a component child; signing and promotion
-  both revalidate the digest-bound Trivy reports before proceeding
 - exporter settings that differ between test and promotion
+
+Component vulnerability scans are evidence-producing checks, not release
+gates. Trivy scans every component child for fixed `CRITICAL` findings and must
+complete normally with a nonempty, size-bounded, schema-valid JSON report bound
+to the expected image digest. Each evidence job writes the finding count and a
+bounded, safely escaped table in deterministic order to the GitHub job summary;
+the complete report is uploaded as release evidence. Findings do not fail the
+evidence matrix or block signing and promotion. Scanner execution, image access,
+report generation, malformed or mismatched reports, and evidence upload failures
+remain fatal. Signing and draft-recovery promotion revalidate report size,
+schema, and subject binding without requiring an empty findings list.
 
 ## Automated component release
 
@@ -182,17 +191,21 @@ For a new tuple, the workflow:
 3. Runs every focused integration spec on native `amd64` and `arm64` workers,
    requires one authenticated Homebrew metadata snapshot across every spec and
    platform, produces deterministic runtime evidence, and separately generates
-   SPDX SBOMs and vulnerability reports for each component child.
+   SPDX SBOMs and vulnerability reports for each component child. Fixed
+   `CRITICAL` findings are surfaced in the corresponding evidence job summary
+   and retained in the reports without blocking the release.
 4. Generates provenance, signs every component child and index with keyless
    Cosign, attaches the exact SLSA predicate to all nine subjects and the
    matching SPDX predicate to the six children, and signs the component
    manifest, metadata snapshot, and checksum set.
 
 Promotion revalidates the tag and signed bundle, creates or resumes the draft,
-and verifies its exact asset inventory. Each component version tag must be
-absent or already resolve to the tested index digest; the workflow creates only
-missing tags, verifies them, rechecks the draft, and then publishes it. It never
-rebuilds during promotion or publishes a `latest` tag.
+verifies its exact asset inventory, and validates each vulnerability report's
+size, schema, and digest-bound subject without rejecting reported findings. Each
+component version tag must be absent or already resolve to the tested index
+digest; the workflow creates only missing tags, verifies them, rechecks the
+draft, and then publishes it. It never rebuilds during promotion or publishes a
+`latest` tag.
 
 The workflow records the accepted metadata snapshot but does not compare it
 with earlier releases. See [`../SECURITY.md`](../SECURITY.md) for the resulting

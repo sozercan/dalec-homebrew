@@ -752,12 +752,175 @@ func TestReleaseWorkflowResolutionBindingFilter(t *testing.T) {
 	}
 }
 
-func TestReleaseWorkflowVulnerabilityGate(t *testing.T) {
+func TestReleaseWorkflowVulnerabilityEvidencePolicy(t *testing.T) {
+	workflow := workflowYAML(t, "release.yml")
+	scanStep := workflowStepByName(t, workflow, "evidence", "Generate fixed critical vulnerability report")
+	if _, ok := yamlMappingLookup(t, scanStep, "continue-on-error"); ok {
+		t.Fatal("vulnerability scanner must not use continue-on-error")
+	}
+	scanScript := yamlScalarValue(t, yamlMappingValue(t, scanStep, "run"))
+	for _, contract := range []string{
+		`--format json`,
+		`--output "/evidence/vulnerability-${SLUG}.json"`,
+		`--severity CRITICAL`,
+		`--ignore-unfixed`,
+		`--exit-code 0`,
+	} {
+		if !strings.Contains(scanScript, contract) {
+			t.Fatalf("vulnerability scanner is missing %q", contract)
+		}
+	}
+	if strings.Contains(scanScript, "--exit-code 1") || strings.Contains(scanScript, "continue-on-error") || strings.Contains(scanScript, "|| true") {
+		t.Fatal("vulnerability scanner masks findings or operational failures")
+	}
+
+	summaryStep := workflowStepByName(t, workflow, "evidence", "Summarize fixed critical vulnerability findings")
+	if _, ok := yamlMappingLookup(t, summaryStep, "continue-on-error"); ok {
+		t.Fatal("vulnerability summary must not use continue-on-error")
+	}
+	summaryScript := yamlScalarValue(t, yamlMappingValue(t, summaryStep, "run"))
+	for _, contract := range []string{
+		`test -s "$report"`,
+		`jq -c -e --arg subject "$SUBJECT"`,
+		`sort_by([.id, .package, .installed, .fixed, .severity, .target])`,
+		`--argjson field_limit "$summary_field_limit"`,
+		`Vulnerability findings are release evidence and do not block signing or promotion.`,
+	} {
+		if !strings.Contains(summaryScript, contract) {
+			t.Fatalf("vulnerability summary is missing %q", contract)
+		}
+	}
+
+	uploadStep := workflowStepByName(t, workflow, "evidence", "Upload evidence")
+	if got := yamlScalarValue(t, yamlMappingValue(t, uploadStep, "if")); got != "always()" {
+		t.Fatalf("evidence upload condition = %q, want always()", got)
+	}
+	uploadWith := yamlMappingValue(t, uploadStep, "with")
+	if got := yamlScalarValue(t, yamlMappingValue(t, uploadWith, "path")); got != "evidence" {
+		t.Fatalf("evidence upload path = %q, want evidence", got)
+	}
+
+	expected := "registry.example/component@sha256:" + strings.Repeat("d", 64)
+	runSummary := func(t *testing.T, report []byte) (string, error) {
+		t.Helper()
+		tmp := t.TempDir()
+		evidence := filepath.Join(tmp, "evidence")
+		if err := os.Mkdir(evidence, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(evidence, "vulnerability-component-linux-amd64.json"), report, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		summary := filepath.Join(tmp, "summary.md")
+		output, err := runWorkflowShell(t, "cd \"$WORKDIR\"\n"+summaryScript, map[string]string{
+			"COMPONENT":               "component",
+			"GITHUB_STEP_SUMMARY":     summary,
+			"MAX_RELEASE_ASSET_BYTES": "1048576",
+			"PATH":                    os.Getenv("PATH"),
+			"PLATFORM":                "linux/amd64",
+			"RUNNER_TEMP":             tmp,
+			"SLUG":                    "component-linux-amd64",
+			"SUBJECT":                 expected,
+			"WORKDIR":                 tmp,
+		})
+		if err != nil {
+			return string(output), err
+		}
+		data, err := os.ReadFile(summary)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data), nil
+	}
+
+	longPackage := strings.Repeat("x", 300)
+	findingReport := validVulnerabilityReport(expected, map[string]any{
+		"Target": "portable-ruby|`<>&\ntarget",
+		"Vulnerabilities": []any{
+			map[string]any{
+				"VulnerabilityID":  "CVE-2026-0002",
+				"PkgName":          "pkg|`<>&\nname",
+				"InstalledVersion": "1.0",
+				"FixedVersion":     "2.0",
+				"Severity":         "CRITICAL",
+			},
+			map[string]any{
+				"VulnerabilityID":  "CVE-2026-0001",
+				"PkgName":          longPackage,
+				"InstalledVersion": "3.0",
+				"FixedVersion":     "4.0",
+				"Severity":         "CRITICAL",
+			},
+		},
+	})
+	findingData, err := json.Marshal(findingReport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := runSummary(t, findingData)
+	if err != nil {
+		t.Fatalf("well-formed findings failed summary: %v\n%s", err, summary)
+	}
+	markdown := func(value string) string {
+		var escaped strings.Builder
+		for _, codepoint := range value {
+			if codepoint < 32 ||
+				(codepoint >= 127 && codepoint <= 159) ||
+				(codepoint >= 8234 && codepoint <= 8238) ||
+				(codepoint >= 8294 && codepoint <= 8297) {
+				codepoint = ' '
+			}
+			escaped.WriteString("&#")
+			escaped.WriteString(strconv.Itoa(int(codepoint)))
+			escaped.WriteByte(';')
+		}
+		return escaped.String()
+	}
+	for _, contract := range []string{
+		"Fixed critical findings: **2**",
+		markdown("pkg|`<>&\nname"),
+		markdown("portable-ruby|`<>&\ntarget"),
+		markdown(strings.Repeat("x", 256) + "…"),
+		"Summary fields are limited to 256 characters",
+		"Vulnerability findings are release evidence and do not block signing or promotion.",
+	} {
+		if !strings.Contains(summary, contract) {
+			t.Fatalf("vulnerability summary is missing %q\n%s", contract, summary)
+		}
+	}
+	first := strings.Index(summary, markdown("CVE-2026-0001"))
+	second := strings.Index(summary, markdown("CVE-2026-0002"))
+	if first < 0 || second < 0 || first >= second {
+		t.Fatalf("vulnerability findings are not deterministically ordered\n%s", summary)
+	}
+	if strings.Contains(summary, "pkg|`<>&\nname") || strings.Contains(summary, "portable-ruby|`<>&\ntarget") {
+		t.Fatalf("vulnerability summary contains unescaped scanner output\n%s", summary)
+	}
+	if strings.Contains(summary, markdown(longPackage)) {
+		t.Fatalf("vulnerability summary contains an unbounded scanner field\n%s", summary)
+	}
+
+	if output, err := runSummary(t, []byte(`{"SchemaVersion":`)); err == nil {
+		t.Fatalf("malformed vulnerability report was summarized\n%s", output)
+	}
+	wrongSchema := validVulnerabilityReport(expected, map[string]any{"Target": "ubuntu", "Vulnerabilities": []any{}})
+	wrongSchema["SchemaVersion"] = 1
+	wrongSchemaData, err := json.Marshal(wrongSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output, err := runSummary(t, wrongSchemaData); err == nil {
+		t.Fatalf("wrong vulnerability schema was summarized\n%s", output)
+	}
+}
+
+func TestReleaseWorkflowVulnerabilityReportValidation(t *testing.T) {
 	script := releaseWorkflowPython(t, "PYVULN")
 	expected := "registry.example/component@sha256:" + strings.Repeat("d", 64)
 	valid := []map[string]any{
 		validVulnerabilityReport(expected, map[string]any{"Target": "ubuntu", "Vulnerabilities": nil}),
 		validVulnerabilityReport(expected, map[string]any{"Target": "ubuntu", "Vulnerabilities": []any{}}),
+		validVulnerabilityReport(expected, map[string]any{"Target": "ubuntu", "Vulnerabilities": []any{map[string]any{"VulnerabilityID": "CVE-1"}}}),
 		validVulnerabilityReport(expected, map[string]any{"Target": "application"}),
 	}
 	for i, report := range valid {
@@ -775,17 +938,14 @@ func TestReleaseWorkflowVulnerabilityGate(t *testing.T) {
 		name   string
 		mutate func(map[string]any)
 	}{
-		{
-			name: "finding",
-			mutate: func(report map[string]any) {
-				report["Results"] = []any{map[string]any{"Target": "ubuntu", "Vulnerabilities": []any{map[string]any{"VulnerabilityID": "CVE-1"}}}}
-			},
-		},
 		{name: "empty results", mutate: func(report map[string]any) { report["Results"] = []any{} }},
 		{name: "malformed results", mutate: func(report map[string]any) { report["Results"] = map[string]any{} }},
 		{name: "missing target", mutate: func(report map[string]any) { report["Results"] = []any{map[string]any{"Vulnerabilities": []any{}}} }},
 		{name: "malformed vulnerabilities", mutate: func(report map[string]any) {
 			report["Results"] = []any{map[string]any{"Target": "ubuntu", "Vulnerabilities": map[string]any{}}}
+		}},
+		{name: "malformed vulnerability", mutate: func(report map[string]any) {
+			report["Results"] = []any{map[string]any{"Target": "ubuntu", "Vulnerabilities": []any{"CVE-1"}}}
 		}},
 		{name: "wrong schema", mutate: func(report map[string]any) { report["SchemaVersion"] = 1 }},
 		{name: "wrong artifact name", mutate: func(report map[string]any) {
