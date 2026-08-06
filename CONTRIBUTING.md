@@ -219,6 +219,24 @@ REGISTRY=registry.example VERSION=dev \
   docker buildx bake --push runtime-base-amd64 materializer-amd64
 ```
 
+After loading a materializer child, exercise its pinned Homebrew checkout with
+the digest-bound `glibc` regression bottle:
+
+```console
+./scripts/materializer-compat.sh \
+  --image ghcr.io/sozercan/dalec-homebrew-materializer:dev-amd64 \
+  --platform linux/amd64
+```
+
+Add `--current` to authenticate the current Homebrew Formula metadata, resolve
+the exact `glibc` OCI layer, and pour that bottle with networking disabled. The
+fixed check uses minimized, reviewed resolver records under `scripts/testdata/`
+only to drive the production hostile-archive verifier; they are test fixtures,
+not replayable release records. The fixed check is deterministic regression
+coverage, while the moving check detects new Formula DSL requirements. Both are
+focused materializer probes and do not replace `examples/live-glibc.yaml`
+through the complete offline frontend path.
+
 The two `--load` commands are local single-platform smoke builds. `--load`
 exports their results to the local Docker daemon; the final command demonstrates
 staging Bake output with explicit `REGISTRY`, `VERSION`, and `--push` values.

@@ -1,0 +1,152 @@
+{
+  "schema_version": "dalec-homebrew-resolution/v1",
+  "policy_version": "homebrew-runtime-v1",
+  "input": {
+    "dalec_spec_digest": "sha256:1b11757d33424678ba2d9d6fbd9eb6293a7bfa196dca15a29af179af778c235d",
+    "platform": {
+      "os": "linux",
+      "architecture": "arm64"
+    }
+  },
+  "metadata": {
+    "digest": "sha256:a05e2fba673f457f6d3c6008ada6954e2ef52ecd5bcb2efc91649e2025a13dd7",
+    "formula_digest": "sha256:a453b8fc84d21d7202d7b0b29c033e03f5bd50a1ead92f458d1f16c59ba2e648",
+    "migration_digest": "sha256:166d39d9f0e80919c2a17be105f8954c2a1c34e0b8ddd71a89e528c3dfba8936",
+    "generated_at": "2026-08-05T21:00:00Z",
+    "fetched_at": "2026-08-05T21:18:00.696186Z"
+  },
+  "resolved_at": "2026-08-05T21:18:02.327704Z",
+  "source_date_epoch": 1785963600,
+  "requested": [
+    {
+      "requested": "glibc",
+      "canonical": "glibc",
+      "keg_only": true
+    }
+  ],
+  "nodes": [
+    {
+      "name": "glibc",
+      "full_name": "homebrew/core/glibc",
+      "formula_version": "2.39",
+      "formula_revision": 1,
+      "pkg_version": "2.39_1",
+      "version_scheme": 0,
+      "bottle_rebuild": 2,
+      "dependencies": [
+        {
+          "name": "linux-headers@6.8",
+          "minimum_pkg_version": "6.8.12_1",
+          "minimum_revision": 1,
+          "minimum_bottle_rebuild": 0,
+          "declared_directly": true
+        }
+      ],
+      "bottle": {
+        "tag": "arm64_linux",
+        "filename": "glibc--2.39_1.arm64_linux.bottle.2.tar.gz",
+        "repository": "ghcr.io/homebrew/core/glibc",
+        "index": {
+          "digest": "sha256:fd4b8e36870b76ca7696882d2ffc323fdf0e3bfadccf8483aee523b89dc02896",
+          "size": 8796,
+          "media_type": "application/vnd.oci.image.index.v1+json"
+        },
+        "manifest": {
+          "digest": "sha256:0e253c080325af100512ee56ce0e0afeae852dfd35d4b13b7243c4f7187cbb34",
+          "size": 4936,
+          "media_type": "application/vnd.oci.image.manifest.v1+json",
+          "platform": {
+            "os": "linux",
+            "architecture": "arm64"
+          }
+        },
+        "config": {
+          "digest": "sha256:a038938f94f8418d606983928ea9af9a87006be82dc7cb308639f351cb03a2dd",
+          "size": 225,
+          "media_type": "application/vnd.oci.image.config.v1+json"
+        },
+        "layer": {
+          "digest": "sha256:01a46dbd217ab6379da50f9285da81ebaf0928c3457fbb04542b745bc80cb27f",
+          "size": 13869188,
+          "media_type": "application/vnd.oci.image.layer.v1.tar+gzip"
+        },
+        "homebrew_sha256": "01a46dbd217ab6379da50f9285da81ebaf0928c3457fbb04542b745bc80cb27f",
+        "tab": {
+          "homebrew_version": "6.0.15-9-g2bdc553",
+          "arch": "arm64",
+          "compiler": "gcc-13",
+          "runtime_dependencies": [
+            {
+              "full_name": "linux-headers@6.8",
+              "version": "6.8.12",
+              "revision": 1,
+              "bottle_rebuild": 0,
+              "pkg_version": "6.8.12_1",
+              "declared_directly": true
+            }
+          ]
+        }
+      },
+      "upstream_formula_identity": "homebrew/core/glibc"
+    },
+    {
+      "name": "linux-headers@6.8",
+      "full_name": "homebrew/core/linux-headers@6.8",
+      "formula_version": "6.8.12",
+      "formula_revision": 1,
+      "pkg_version": "6.8.12_1",
+      "version_scheme": 0,
+      "bottle_rebuild": 0,
+      "dependencies": [],
+      "bottle": {
+        "tag": "arm64_linux",
+        "filename": "linux-headers@6.8--6.8.12_1.arm64_linux.bottle.tar.gz",
+        "repository": "ghcr.io/homebrew/core/linux-headers/6.8",
+        "index": {
+          "digest": "sha256:03ed265066ee44bab718e2016a1e55f30c62dcf6cce6598e87bc6e6fb101529e",
+          "size": 3126,
+          "media_type": "application/vnd.oci.image.index.v1+json"
+        },
+        "manifest": {
+          "digest": "sha256:d09335c9c9fdbf049be2d2f2186026af6e1179c9ce84a0e917e221287bcb44bc",
+          "size": 2128,
+          "media_type": "application/vnd.oci.image.manifest.v1+json",
+          "platform": {
+            "os": "linux",
+            "architecture": "arm64"
+          }
+        },
+        "config": {
+          "digest": "sha256:229b68d4505629ff3bf6afe74421b80fc89852b09af917ffb7489a6bee68273e",
+          "size": 225,
+          "media_type": "application/vnd.oci.image.config.v1+json"
+        },
+        "layer": {
+          "digest": "sha256:9607ed3374bbe242f556083e33fa70895dde9d095740b8cdd77adeb4893d6ca9",
+          "size": 1717105,
+          "media_type": "application/vnd.oci.image.layer.v1.tar+gzip"
+        },
+        "homebrew_sha256": "9607ed3374bbe242f556083e33fa70895dde9d095740b8cdd77adeb4893d6ca9",
+        "tab": {
+          "homebrew_version": "5.1.1-71-g86fe878",
+          "arch": "arm64",
+          "compiler": "gcc-12",
+          "runtime_dependencies": []
+        }
+      },
+      "upstream_formula_identity": "homebrew/core/linux-headers@6.8"
+    }
+  ],
+  "install_order": [
+    "linux-headers@6.8",
+    "glibc"
+  ],
+  "runtime": {
+    "user": "linuxbrew",
+    "uid": 1000,
+    "gid": 1000
+  },
+  "attestation_policy": {
+    "waiver": "homebrew-jws-and-verified-oci-chain-v1"
+  }
+}

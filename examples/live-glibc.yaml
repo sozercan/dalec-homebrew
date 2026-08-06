@@ -87,6 +87,8 @@ tests:
         not_exist: true
       /home/linuxbrew/.cache/Homebrew:
         not_exist: true
+      /home/linuxbrew/.linuxbrew/etc/ld.so.conf:
+        not_exist: true
       /usr/bin/apt:
         not_exist: true
       /usr/bin/dpkg:
@@ -112,7 +114,10 @@ tests:
         contains: ['dalec-homebrew-runtime-inventory/v1']
       /usr/share/dalec-homebrew/prune-manifest.json:
         permissions: 0o444
-        contains: ['dalec-homebrew-prune-manifest/v2']
+        contains:
+          - 'dalec-homebrew-prune-manifest/v2'
+          - 'etc/ld.so.conf'
+          - 'not_allowlisted'
       /usr/share/dalec-homebrew/sbom.spdx.json:
         permissions: 0o444
         contains:
