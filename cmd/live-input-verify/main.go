@@ -276,8 +276,8 @@ func validateDalecFrontendPin(pin dalecFrontendPin) error {
 	if pin.Module.Path != dalecModulePath {
 		errs = append(errs, fmt.Errorf("module path must be exactly %q", dalecModulePath))
 	}
-	if pin.Module.Version == "" || strings.TrimSpace(pin.Module.Version) != pin.Module.Version {
-		errs = append(errs, errors.New("module version is required and must not contain surrounding whitespace"))
+	if !stableModuleVersionPattern.MatchString(pin.Module.Version) {
+		errs = append(errs, errors.New("module version must use stable vMAJOR.MINOR.PATCH form"))
 	}
 	if err := resolution.ValidatePinnedReference(pin.Index); err != nil {
 		errs = append(errs, fmt.Errorf("index must be a digest-pinned OCI reference using sha256: %w", err))
@@ -419,6 +419,8 @@ func validatePinnedReference(ref namedPinnedRef) error {
 	}
 	return nil
 }
+
+var stableModuleVersionPattern = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
 var rfc3339Pattern = regexp.MustCompile(
 	`^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?(Z|([+-])([0-9]{2}):([0-9]{2}))$`,

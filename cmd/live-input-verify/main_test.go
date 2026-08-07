@@ -150,6 +150,8 @@ func TestDalecFrontendPin(t *testing.T) {
 		}, want: "unsupported platform"},
 		{name: "same child", mutate: func(pin *dalecFrontendPin) { pin.Platforms["linux/arm64"] = pin.Platforms["linux/amd64"] }, want: "must use different manifests"},
 		{name: "wrong route", mutate: func(pin *dalecFrontendPin) { pin.Route = "homebrew/debug" }, want: "route must be exactly \"homebrew/image\""},
+		{name: "unstable module version", mutate: func(pin *dalecFrontendPin) { pin.Module.Version = "v0.21.5-rc.1" }, want: "stable vMAJOR.MINOR.PATCH"},
+		{name: "malformed module version", mutate: func(pin *dalecFrontendPin) { pin.Module.Version = "garbage" }, want: "stable vMAJOR.MINOR.PATCH"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

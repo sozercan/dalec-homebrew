@@ -419,7 +419,7 @@ func TestReleaseWorkflowBindsExternalDalecFrontend(t *testing.T) {
 	validationScript := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "sign", "Validate release tuple before signing"), "run"))
 	for _, want := range []string{
 		`.schema_version == "dalec-homebrew-release-inputs/v2"`,
-		`(.dalec_frontend.module.version | type == "string" and length > 0)`,
+		`test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")`,
 		`.invocation.parameters.dalec_frontend == $inputs[0].dalec_frontend`,
 		`.materials[1].uri == ("oci://" + $dalec_frontend.repository)`,
 		`upstream Dalec frontend $platform child`,

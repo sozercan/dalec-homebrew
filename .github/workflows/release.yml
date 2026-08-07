@@ -1553,7 +1553,8 @@ jobs:
             .dalec_frontend.schema_version == "dalec-homebrew-dalec-frontend/v1" and
             ((.dalec_frontend.module | keys) == ["path", "version"]) and
             .dalec_frontend.module.path == "github.com/project-dalec/dalec" and
-            (.dalec_frontend.module.version | type == "string" and length > 0) and
+            (.dalec_frontend.module.version | type == "string" and
+              test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")) and
             .dalec_frontend.route == "homebrew/image" and
             (.dalec_frontend.index | pinned) and
             ((.dalec_frontend.platforms | keys) == ["linux/amd64", "linux/arm64"]) and
