@@ -785,10 +785,16 @@ func TestReleaseWorkflowMetadataFilter(t *testing.T) {
 		t.Fatalf("non-identity metadata changed the normalized snapshot:\nbase: %s\nnew:  %s", baseOutput, output)
 	}
 
+	identityTimestampDrift := cloneJSONRecord(t, base)
+	identityTimestampDrift["metadata"].(map[string]any)["generated_at"] = "2026-08-03T00:02:00Z"
+	if output := runWorkflowJQ(t, filter, identityTimestampDrift); bytes.Equal(baseOutput, output) {
+		t.Fatal("metadata timestamp drift did not change the normalized snapshot")
+	}
+
 	identityDrift := cloneJSONRecord(t, base)
-	identityDrift["metadata"].(map[string]any)["generated_at"] = "2026-08-03T00:02:00Z"
+	identityDrift["metadata"].(map[string]any)["formula_digest"] = "sha256:" + strings.Repeat("b", 64)
 	if output := runWorkflowJQ(t, filter, identityDrift); bytes.Equal(baseOutput, output) {
-		t.Fatal("identity metadata drift did not change the normalized snapshot")
+		t.Fatal("authenticated metadata drift did not change the normalized snapshot")
 	}
 
 	tests := []struct {
@@ -805,6 +811,12 @@ func TestReleaseWorkflowMetadataFilter(t *testing.T) {
 			name: "missing fetched at",
 			mutate: func(record map[string]any) {
 				delete(record["metadata"].(map[string]any), "fetched_at")
+			},
+		},
+		{
+			name: "missing generated at",
+			mutate: func(record map[string]any) {
+				delete(record["metadata"].(map[string]any), "generated_at")
 			},
 		},
 		{
@@ -832,6 +844,239 @@ func TestReleaseWorkflowMetadataFilter(t *testing.T) {
 			cmd.Stdin = bytes.NewReader(data)
 			if output, err := cmd.CombinedOutput(); err == nil {
 				t.Fatalf("invalid metadata accepted\n%s", output)
+			}
+		})
+	}
+}
+
+func TestReleaseWorkflowRuntimeEvidenceArtifactLayout(t *testing.T) {
+	workflow := workflowYAML(t, "release.yml")
+	upload := yamlMappingValue(t, workflowStepByName(t, workflow, "integration", "Upload runtime evidence"), "with")
+	for key, want := range map[string]string{
+		"name": "runtime-evidence-${{ matrix.slug }}",
+		"path": "runtime-evidence-${{ matrix.slug }}-*.tar.gz",
+	} {
+		if got := yamlScalarValue(t, yamlMappingValue(t, upload, key)); got != want {
+			t.Fatalf("runtime evidence upload %s = %q, want %q", key, got, want)
+		}
+	}
+
+	download := yamlMappingValue(t, workflowStepByName(t, workflow, "sign", "Download runtime evidence"), "with")
+	for key, want := range map[string]string{
+		"pattern":        "runtime-evidence-*",
+		"path":           "dist/release/runtime-evidence",
+		"merge-multiple": "true",
+	} {
+		if got := yamlScalarValue(t, yamlMappingValue(t, download, key)); got != want {
+			t.Fatalf("runtime evidence download %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestReleaseWorkflowRuntimeEvidenceValidation(t *testing.T) {
+	workflow := workflowYAML(t, "release.yml")
+	step := workflowStepByName(t, workflow, "sign", "Validate runtime evidence and metadata snapshot")
+	script := yamlScalarValue(t, yamlMappingValue(t, step, "run"))
+
+	digest := func(value string) string {
+		return "sha256:" + strings.Repeat(value, 64)
+	}
+	frontendRepository := "registry.example/frontend"
+	runtimeBaseRepository := "registry.example/runtime-base"
+	materializerRepository := "registry.example/materializer"
+	frontendChildren := map[string]string{
+		"linux/amd64": digest("1"),
+		"linux/arm64": digest("2"),
+	}
+	runtimeBaseIndex := digest("3")
+	runtimeBaseChildren := map[string]string{
+		"linux/amd64": digest("4"),
+		"linux/arm64": digest("5"),
+	}
+	materializerIndex := digest("6")
+	materializerChildren := map[string]string{
+		"linux/amd64": digest("7"),
+		"linux/arm64": digest("8"),
+	}
+
+	digests := map[string]any{
+		"components": map[string]any{
+			"frontend": map[string]any{
+				"repository": frontendRepository,
+				"index":      digest("9"),
+				"platforms":  frontendChildren,
+			},
+			"runtime-base": map[string]any{
+				"repository": runtimeBaseRepository,
+				"index":      runtimeBaseIndex,
+				"platforms":  runtimeBaseChildren,
+			},
+			"materializer": map[string]any{
+				"repository": materializerRepository,
+				"index":      materializerIndex,
+				"platforms":  materializerChildren,
+			},
+		},
+	}
+	manifest := map[string]any{"policy_version": "policy-v1"}
+	inputs := map[string]any{
+		"homebrew_commit":          "homebrew",
+		"portable_ruby_version":    "ruby",
+		"verification_keys_digest": "keys",
+		"dalec_module":             "dalec",
+		"buildkit_module":          "buildkit",
+	}
+
+	makeRecord := func(platform, generatedAt string, sourceDateEpoch int64) map[string]any {
+		record := validResolutionMetadataRecord()
+		architecture := strings.TrimPrefix(platform, "linux/")
+		record["input"] = map[string]any{"platform": map[string]any{"os": "linux", "architecture": architecture}}
+		record["policy_version"] = "policy-v1"
+		record["source_date_epoch"] = sourceDateEpoch
+		record["metadata"].(map[string]any)["generated_at"] = generatedAt
+		record["components"] = map[string]any{
+			"frontend_ref":             frontendRepository + "@" + frontendChildren[platform],
+			"runtime_base_ref":         runtimeBaseRepository + "@" + runtimeBaseIndex,
+			"materializer_ref":         materializerRepository + "@" + materializerIndex,
+			"homebrew_commit":          "homebrew",
+			"ruby_runtime":             "ruby",
+			"verification_keys_digest": "keys",
+			"dalec_module":             "dalec",
+			"buildkit_module":          "buildkit",
+		}
+		return record
+	}
+
+	type validationCase struct {
+		name         string
+		flat         bool
+		omitPlatform string
+		mutate       func(map[string]map[string]any)
+		wantError    string
+	}
+	tests := []validationCase{
+		{name: "download artifact layout"},
+		{name: "signed bundle layout", flat: true},
+		{
+			name: "runtime base child ref",
+			mutate: func(records map[string]map[string]any) {
+				records["linux/amd64"]["components"].(map[string]any)["runtime_base_ref"] = runtimeBaseRepository + "@" + runtimeBaseChildren["linux/amd64"]
+			},
+			wantError: "runtime evidence binding mismatch for live-test on linux/amd64",
+		},
+		{
+			name: "materializer child ref",
+			mutate: func(records map[string]map[string]any) {
+				records["linux/amd64"]["components"].(map[string]any)["materializer_ref"] = materializerRepository + "@" + materializerChildren["linux/amd64"]
+			},
+			wantError: "runtime evidence binding mismatch for live-test on linux/amd64",
+		},
+		{
+			name: "metadata timestamp drift",
+			mutate: func(records map[string]map[string]any) {
+				records["linux/arm64"]["metadata"].(map[string]any)["generated_at"] = "2026-08-03T00:00:01Z"
+				records["linux/arm64"]["source_date_epoch"] = int64(1785715201)
+			},
+			wantError: `"generated_at": "2026-08-03T00:00:01Z"`,
+		},
+		{
+			name:         "missing archive",
+			omitPlatform: "linux/arm64",
+			wantError:    "missing or empty runtime evidence archive: dist/release/runtime-evidence/runtime-evidence-linux-arm64-live-test.tar.gz",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			releaseDirectory := filepath.Join(root, "dist", "release")
+			runtimeEvidenceDirectory := filepath.Join(releaseDirectory, "runtime-evidence")
+			if tt.flat {
+				runtimeEvidenceDirectory = releaseDirectory
+			}
+			if err := os.MkdirAll(runtimeEvidenceDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			writeJSON := func(name string, value any) {
+				data, err := json.Marshal(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(releaseDirectory, name), data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeJSON("digests.json", digests)
+			writeJSON("components.json", manifest)
+			writeJSON("inputs.json", inputs)
+
+			records := map[string]map[string]any{
+				"linux/amd64": makeRecord("linux/amd64", "2026-08-03T00:00:00Z", 1785715200),
+				"linux/arm64": makeRecord("linux/arm64", "2026-08-03T00:00:00Z", 1785715200),
+			}
+			if tt.mutate != nil {
+				tt.mutate(records)
+			}
+			for _, platform := range []string{"linux/amd64", "linux/arm64"} {
+				if platform == tt.omitPlatform {
+					continue
+				}
+				body, err := json.Marshal(records[platform])
+				if err != nil {
+					t.Fatal(err)
+				}
+				archive := writeRuntimeEvidenceArchive(t, []tarEntry{{name: "./resolution.json", body: body}})
+				archiveData, err := os.ReadFile(archive)
+				if err != nil {
+					t.Fatal(err)
+				}
+				name := "runtime-evidence-" + strings.ReplaceAll(platform, "/", "-") + "-live-test.tar.gz"
+				if err := os.WriteFile(filepath.Join(runtimeEvidenceDirectory, name), archiveData, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			runnerTemp := filepath.Join(root, "runner-temp")
+			if err := os.MkdirAll(runnerTemp, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			output, err := runWorkflowShellInDir(t, root, script, map[string]string{
+				"MAX_RELEASE_ASSET_BYTES":             strconv.Itoa(1 << 20),
+				"MAX_RUNTIME_EVIDENCE_EXPANDED_BYTES": strconv.Itoa(1 << 20),
+				"PATH":                                os.Getenv("PATH"),
+				"RELEASE_SHA":                         strings.Repeat("f", 40),
+				"RELEASE_SPECS":                       "live-test",
+				"RELEASE_TAG":                         "v0.1.4",
+				"RUNNER_TEMP":                         runnerTemp,
+			})
+			if tt.wantError != "" {
+				if err == nil {
+					t.Fatalf("invalid runtime evidence accepted\n%s", output)
+				}
+				if !strings.Contains(string(output), tt.wantError) {
+					t.Fatalf("runtime evidence error = %q, want substring %q", output, tt.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("valid runtime evidence rejected: %v\n%s", err, output)
+			}
+
+			data, err := os.ReadFile(filepath.Join(releaseDirectory, "metadata-snapshot.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var snapshot struct {
+				AcceptedSnapshot struct {
+					GeneratedAt string `json:"generated_at"`
+				} `json:"accepted_snapshot"`
+			}
+			if err := json.Unmarshal(data, &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := snapshot.AcceptedSnapshot.GeneratedAt, "2026-08-03T00:00:00Z"; got != want {
+				t.Fatalf("accepted snapshot generated_at = %q, want %q", got, want)
 			}
 		})
 	}
@@ -1375,6 +1620,11 @@ func provenanceRunValidationShell(t *testing.T, script string) string {
 
 func runWorkflowShell(t *testing.T, script string, environment map[string]string) ([]byte, error) {
 	t.Helper()
+	return runWorkflowShellInDir(t, "", script, environment)
+}
+
+func runWorkflowShellInDir(t *testing.T, directory, script string, environment map[string]string) ([]byte, error) {
+	t.Helper()
 	keys := make([]string, 0, len(environment))
 	for key := range environment {
 		keys = append(keys, key)
@@ -1385,6 +1635,7 @@ func runWorkflowShell(t *testing.T, script string, environment map[string]string
 		variables = append(variables, key+"="+environment[key])
 	}
 	cmd := exec.Command("bash", "-c", script)
+	cmd.Dir = directory
 	cmd.Env = variables
 	return cmd.CombinedOutput()
 }
