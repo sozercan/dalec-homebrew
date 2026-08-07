@@ -22,6 +22,14 @@ func RuntimeDependencyOrder(data []byte, targetKey string) ([]string, error) {
 	root := doc.Content[0]
 	global := mappingPath(root, "dependencies", "runtime")
 	selected := mappingPath(root, "targets", targetKey, "dependencies", "runtime")
+	if err := requireRuntimeDependencyMap("global", global); err != nil {
+		return nil, err
+	}
+	if targetKey != "" {
+		if err := requireRuntimeDependencyMap("target "+targetKey, selected); err != nil {
+			return nil, err
+		}
+	}
 	if nodeLength(selected) > 0 {
 		return namesFromNode(selected)
 	}
@@ -83,6 +91,16 @@ func nodeLength(n *yaml.Node) int {
 		return len(n.Content) / 2
 	}
 	return len(n.Content)
+}
+
+func requireRuntimeDependencyMap(scope string, n *yaml.Node) error {
+	if n == nil {
+		return nil
+	}
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("%s dependencies.runtime must use map form", scope)
+	}
+	return nil
 }
 
 func namesFromNode(n *yaml.Node) ([]string, error) {

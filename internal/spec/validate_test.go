@@ -67,6 +67,59 @@ func TestRuntimeDependencyNamesRejectsListShorthand(t *testing.T) {
 	}
 }
 
+func TestRuntimeDependencyOrderValidatesGlobalAndSelectedShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{
+			name: "global list with selected map",
+			data: `dependencies:
+  runtime: [hello]
+targets:
+  homebrew:
+    dependencies:
+      runtime:
+        jq: {}
+`,
+			want: "global dependencies.runtime must use map form",
+		},
+		{
+			name: "selected list",
+			data: `dependencies:
+  runtime:
+    hello: {}
+targets:
+  homebrew:
+    dependencies:
+      runtime: [jq]
+`,
+			want: "target homebrew dependencies.runtime must use map form",
+		},
+		{
+			name: "empty selected list",
+			data: `dependencies:
+  runtime:
+    hello: {}
+targets:
+  homebrew:
+    dependencies:
+      runtime: []
+`,
+			want: "target homebrew dependencies.runtime must use map form",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := RuntimeDependencyOrder([]byte(tt.data), "homebrew")
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error=%v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestBareDependencyOnlySpec(t *testing.T) {
 	data := `{"dependencies":{"runtime":{"hello":{}}},"image":{"entrypoint":"/home/linuxbrew/.linuxbrew/bin/hello"}}`
 	sel, err := Validate(load(t, data), "", "amd64")
