@@ -16,19 +16,31 @@
 
 ## Build an image
 
-You need Docker Buildx and a digest-pinned `dalec-homebrew` frontend. Use a digest supplied by a trusted release pipeline, or see [Contributing](CONTRIBUTING.md) to build the component tuple yourself.
+The canonical path uses two immutable gateway images:
+
+1. the upstream Dalec frontend, which selects and forwards the target; and
+2. the `dalec-homebrew` frontend, which implements the `image` provider route.
+
+Use the exact digests from trusted release evidence. The repository binding in
+[`release/dalec-frontend.json`](release/dalec-frontend.json) records the upstream
+Dalec index, its Linux platform children, and the fixed `homebrew/image` route.
 
 ### Build from the command line
 
 Build directly from the command line with `jq`:
 
 ```console
-jq -nc '{
+DALEC_FRONTEND=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
+DALEC_HOMEBREW_FRONTEND=ghcr.io/sozercan/dalec-homebrew@sha256:<provider-digest>
+
+jq -nc --arg provider "$DALEC_HOMEBREW_FRONTEND" '{
   dependencies: {runtime: {hello: {}}},
-  image: {entrypoint: "/home/linuxbrew/.linuxbrew/bin/hello"}
+  image: {entrypoint: "/home/linuxbrew/.linuxbrew/bin/hello"},
+  targets: {homebrew: {frontend: {image: $provider}}}
 }' |
   docker buildx build \
-    --build-arg "BUILDKIT_SYNTAX=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>" \
+    --build-arg "BUILDKIT_SYNTAX=$DALEC_FRONTEND" \
+    --target homebrew/image \
     --platform linux/amd64 \
     --tag hello-runtime:inline \
     --load \
@@ -39,10 +51,10 @@ docker run --rm hello-runtime:inline
 
 ### Build from YAML
 
-Save this as `hello.yaml`, replacing `<frontend-digest>` with the same immutable frontend digest:
+Save this as `hello.yaml`, replacing both placeholders with immutable digests:
 
 ```yaml
-# syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
+# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
 
 dependencies:
   runtime:
@@ -50,12 +62,18 @@ dependencies:
 
 image:
   entrypoint: /home/linuxbrew/.linuxbrew/bin/hello
+
+targets:
+  homebrew:
+    frontend:
+      image: ghcr.io/sozercan/dalec-homebrew@sha256:<provider-digest>
 ```
 
 Build and run it:
 
 ```console
 docker buildx build \
+  --target homebrew/image \
   --platform linux/amd64 \
   --file hello.yaml \
   --tag hello-runtime:spec \
@@ -70,6 +88,17 @@ Both forms print:
 ```text
 Hello, world!
 ```
+
+The upstream frontend forwards the effective Dalec spec to the exact
+`target.frontend.image`. Inside the child solve, `source` identifies
+`dalec-homebrew`, so the child can authenticate its own digest but cannot prove
+which parent frontend invoked it. Trusted releases bind the upstream Dalec
+index and children externally through the release pin and signed provenance.
+
+Direct invocation remains available for compatibility: put the digest-pinned
+`dalec-homebrew` image in `# syntax=`, omit `targets.homebrew.frontend`, and omit
+`--target homebrew/image`. The forwarded path above is the canonical release and
+integration path.
 
 See the [usage reference](docs/usage.md) for image settings, tests, dependency rules, and the complete supported contract.
 
@@ -101,7 +130,7 @@ The example identity above is illustrative; use a Formula present in the public 
 
 ## Examples
 
-More examples: [multi-package toolchain](examples/live-toolchain.yaml), [Python](examples/live-python.yaml), [Redis](examples/live-redis.yaml), [Graphviz](examples/live-graphviz.yaml), and [glibc](examples/live-glibc.yaml).
+Start with the [forwarded hello](examples/forwarded-hello.yaml). More examples: [multi-package toolchain](examples/live-toolchain.yaml), [Python](examples/live-python.yaml), [Redis](examples/live-redis.yaml), [Graphviz](examples/live-graphviz.yaml), and [glibc](examples/live-glibc.yaml).
 
 ## Learn more
 

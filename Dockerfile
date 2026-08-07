@@ -412,5 +412,5 @@ FROM scratch AS frontend
 COPY --from=ca-bundle /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=helper-build /out/frontend-rootfs/ /
 COPY --from=frontend-build /out/dalec-homebrew-frontend /dalec-homebrew-frontend
-LABEL moby.buildkit.frontend.caps="moby.buildkit.frontend.inputs"
+LABEL moby.buildkit.frontend.caps="moby.buildkit.frontend.inputs,moby.buildkit.frontend.subrequests"
 ENTRYPOINT ["/dalec-homebrew-frontend"]

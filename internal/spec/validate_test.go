@@ -90,6 +90,96 @@ targets:
 	}
 }
 
+func TestValidateForwardedTargetFrontend(t *testing.T) {
+	frontendRef := "ghcr.io/example/dalec-homebrew@sha256:" + strings.Repeat("a", 64)
+	data := forwardedSpec(frontendRef, "")
+	order, err := RuntimeDependencyOrder([]byte(data), "homebrew")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := ValidateForwarded(load(t, data), "homebrew", "amd64", order, Forwarding{Source: frontendRef})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selection.Roots) != 1 || selection.Roots[0].Name != "hello" {
+		t.Fatalf("roots=%v", selection.Roots)
+	}
+}
+
+func TestValidateForwardedTargetFrontendFailures(t *testing.T) {
+	frontendRef := "ghcr.io/example/dalec-homebrew@sha256:" + strings.Repeat("a", 64)
+	tests := []struct {
+		name       string
+		mutateSpec func(*dalec.Spec)
+		forwarding Forwarding
+		want       string
+	}{
+		{
+			name: "missing selected target",
+			mutateSpec: func(spec *dalec.Spec) {
+				delete(spec.Targets, "homebrew")
+			},
+			forwarding: Forwarding{Source: frontendRef},
+			want:       `forwarded target "homebrew" is not defined`,
+		},
+		{
+			name: "missing frontend metadata",
+			mutateSpec: func(spec *dalec.Spec) {
+				target := spec.Targets["homebrew"]
+				target.Frontend = nil
+				spec.Targets["homebrew"] = target
+			},
+			forwarding: Forwarding{Source: frontendRef},
+			want:       "does not declare frontend routing metadata",
+		},
+		{
+			name:       "missing gateway source",
+			forwarding: Forwarding{},
+			want:       "missing the gateway source",
+		},
+		{
+			name:       "frontend image mismatch",
+			forwarding: Forwarding{Source: "ghcr.io/example/other@sha256:" + strings.Repeat("b", 64)},
+			want:       "does not match invoking gateway source",
+		},
+		{
+			name: "target cmdline",
+			mutateSpec: func(spec *dalec.Spec) {
+				spec.Targets["homebrew"].Frontend.CmdLine = "--unsafe"
+			},
+			forwarding: Forwarding{Source: frontendRef},
+			want:       "frontend cmdline must be empty",
+		},
+		{
+			name:       "invocation cmdline",
+			forwarding: Forwarding{Source: frontendRef, CmdLine: "--unsafe"},
+			want:       "forwarded invocation cmdline must be empty",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			spec := load(t, forwardedSpec(frontendRef, ""))
+			if test.mutateSpec != nil {
+				test.mutateSpec(spec)
+			}
+			_, err := ValidateForwarded(spec, "homebrew", "amd64", []string{"hello"}, test.forwarding)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsTargetFrontendDuringDirectInvocation(t *testing.T) {
+	frontendRef := "ghcr.io/example/dalec-homebrew@sha256:" + strings.Repeat("a", 64)
+	data := forwardedSpec(frontendRef, "")
+	_, err := Validate(load(t, data), "homebrew", "amd64", []string{"hello"})
+	if err == nil || !strings.Contains(err.Error(), "not supported during direct invocation") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestRejectVersionAndForbiddenFields(t *testing.T) {
 	data := strings.Replace(baseSpec, "    - hello\n    - jq", "    hello:\n      version: ['>=2']\n    jq: {}", 1) + "\nsources:\n  x:\n    http:\n      url: https://example.invalid/x\n"
 	_, err := Validate(load(t, data), "", "amd64", nil)
@@ -275,6 +365,19 @@ func runtimeRootsSpec(roots []string) string {
 		fmt.Fprintf(&result, "    %s: {}\n", root)
 	}
 	result.WriteString("image:\n  entrypoint: runtime\n")
+	return result.String()
+}
+
+func forwardedSpec(frontendRef, cmdline string) string {
+	var result strings.Builder
+	result.WriteString("dependencies:\n  runtime:\n    hello: {}\n")
+	result.WriteString("image:\n  entrypoint: hello\n")
+	result.WriteString("targets:\n  homebrew:\n    frontend:\n")
+	fmt.Fprintf(&result, "      image: %s\n", frontendRef)
+	if cmdline != "" {
+		fmt.Fprintf(&result, "      cmdline: %s\n", cmdline)
+	}
+	result.WriteString("    dependencies:\n      runtime:\n        hello: {}\n")
 	return result.String()
 }
 

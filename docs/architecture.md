@@ -2,10 +2,44 @@
 
 `dalec-homebrew` separates networked resolution from offline execution. A build first turns a Dalec dependency declaration into a canonical, digest-bound resolution record, then materializes that record without network access and copies an allowlisted runtime into an independent Ubuntu Chisel base.
 
+## Frontend routing
+
+The canonical invocation is an out-of-tree Dalec provider chain:
+
+```text
+BuildKit
+  -> digest-pinned upstream Dalec frontend
+  -> targets.homebrew.frontend.image
+  -> digest-pinned dalec-homebrew frontend, route image
+  -> resolution and materialization pipeline
+```
+
+The upstream frontend selects the `homebrew` spec target, discovers the child
+frontend's advertised routes, and forwards `homebrew/image` as child target
+`image`. It replaces the child solve's gateway `source` with the exact
+`targets.homebrew.frontend.image` and forwards the effective typed Dalec spec.
+Before any metadata or registry access, `dalec-homebrew` requires the selected
+spec target to be exactly `homebrew`, the child route to be exactly `image`, the
+target's frontend image to equal its gateway `source`, and both target and
+invocation `cmdline` values to be empty. Direct invocation remains a
+compatibility path and retains its previous target semantics without a target
+`frontend` block.
+
+The child can authenticate only its own gateway source. BuildKit does not give
+the child an authenticated identity for the parent that initiated the nested
+solve, and caller-provided parent options would be forgeable. Therefore
+[`../release/dalec-frontend.json`](../release/dalec-frontend.json) binds the
+upstream index, exact Linux children, module identity, and route externally;
+top-level signed release provenance authenticates that parent binding. The
+resolution record's frontend fields continue to identify `dalec-homebrew`, not
+the upstream dispatcher.
+
 ## Build pipeline
 
 ```text
-raw Dalec preflight
+upstream Dalec target selection and forwarding
+  -> dalec-homebrew route and source validation
+  -> raw Dalec preflight
   -> separately verified Formula and migration metadata
   -> per-platform OCI descriptor resolution
   -> canonical resolution.json and independent structural verification
@@ -50,7 +84,9 @@ See [`../SECURITY.md`](../SECURITY.md) for the properties enforced at each bound
 - `internal/runtimefs`: allowlist assembly, ownership and mode normalization, inventory, pruning evidence, runtime manifest, and SPDX output.
 - `internal/runtimecheck`: static ELF, loader, library, shebang, and link checks.
 - `internal/testplan` and `internal/testrunner`: conversion and execution for the supported public Dalec test subset.
-- `internal/frontend`: DockerUI fan-out, shared snapshot orchestration, image configuration, test dependencies, and exporter epoch.
+- `internal/frontend`: direct/forwarded gateway routing, target-list
+  subrequests, DockerUI fan-out, shared snapshot orchestration, image
+  configuration, test dependencies, and exporter epoch.
 - `internal/release`: canonical component-manifest and platform-reference validation; online registry, signing, and promotion checks remain release-workflow responsibilities.
 - `internal/buildfiles`: source-level contract tests for Dockerfile, pin
   inventory, Bake, and release workflow definitions.
@@ -68,6 +104,11 @@ A resolution record binds:
 - deterministic installation order
 - frontend, runtime-base, and materializer component identities
 - runtime, attestation-waiver, and pruning-policy inputs
+
+Here `frontend` means the executing `dalec-homebrew` provider. Upstream Dalec is
+an externally authenticated release input and provenance material; it is not
+projected into the child-generated resolution as if the child had authenticated
+its parent.
 
 Formula and migration documents are fetched and verified separately because upstream does not provide a signed common snapshot identifier. The combined snapshot digest commits to the exact accepted payload pair, but does not prove that Homebrew published the pair atomically. An authenticated `generated_date` takes precedence over HTTP metadata for each document; otherwise freshness uses `Last-Modified`. The record's `generated_at` and `source_date_epoch` use the earlier accepted document timestamp.
 

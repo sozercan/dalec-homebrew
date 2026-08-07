@@ -36,6 +36,15 @@ type Capabilities struct {
 	NonCoreTaps bool
 }
 
+// Forwarding describes the gateway routing metadata that must match the
+// selected target when the spec was forwarded by an upstream Dalec frontend.
+// Source is the executing dalec-homebrew gateway image, not the parent
+// frontend identity.
+type Forwarding struct {
+	Source  string
+	CmdLine string
+}
+
 type Selection struct {
 	Roots []Root
 	Tests []*dalec.TestSpec
@@ -43,6 +52,17 @@ type Selection struct {
 }
 
 func Validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string, capability ...Capabilities) (*Selection, error) {
+	return validate(s, targetKey, arch, declarationOrder, nil, capability...)
+}
+
+// ValidateForwarded validates the supported contract for a spec target routed
+// through an upstream Dalec frontend. The target's frontend block is routing
+// metadata and must identify this exact gateway invocation.
+func ValidateForwarded(s *dalec.Spec, targetKey, arch string, declarationOrder []string, forwarding Forwarding, capability ...Capabilities) (*Selection, error) {
+	return validate(s, targetKey, arch, declarationOrder, &forwarding, capability...)
+}
+
+func validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string, forwarding *Forwarding, capability ...Capabilities) (*Selection, error) {
 	caps := effectiveCapabilities(capability)
 	if s == nil {
 		return nil, errors.New("nil Dalec spec")
@@ -122,10 +142,33 @@ func Validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string, 
 	validateDeps("global", s.Dependencies)
 
 	selectedTarget, hasTarget := s.Targets[targetKey]
+	if forwarding != nil {
+		if targetKey == "" {
+			errs = append(errs, errors.New("forwarded invocation is missing the selected Dalec target"))
+		} else if !hasTarget {
+			errs = append(errs, fmt.Errorf("forwarded target %q is not defined in the Dalec spec", targetKey))
+		}
+	}
 	if hasTarget {
 		validateDeps("target "+targetKey, selectedTarget.Dependencies)
-		if selectedTarget.Frontend != nil {
-			errs = append(errs, fmt.Errorf("target %q frontend forwarding is not supported by this frontend", targetKey))
+		if forwarding == nil {
+			if selectedTarget.Frontend != nil {
+				errs = append(errs, fmt.Errorf("target %q frontend forwarding is not supported during direct invocation", targetKey))
+			}
+		} else if selectedTarget.Frontend == nil {
+			errs = append(errs, fmt.Errorf("forwarded target %q does not declare frontend routing metadata", targetKey))
+		} else {
+			if forwarding.Source == "" {
+				errs = append(errs, errors.New("forwarded invocation is missing the gateway source"))
+			} else if selectedTarget.Frontend.Image != forwarding.Source {
+				errs = append(errs, fmt.Errorf("forwarded target %q frontend image %q does not match invoking gateway source %q", targetKey, selectedTarget.Frontend.Image, forwarding.Source))
+			}
+			if selectedTarget.Frontend.CmdLine != "" {
+				errs = append(errs, fmt.Errorf("forwarded target %q frontend cmdline must be empty", targetKey))
+			}
+			if forwarding.CmdLine != "" {
+				errs = append(errs, fmt.Errorf("forwarded invocation cmdline must be empty, got %q", forwarding.CmdLine))
+			}
 		}
 		if selectedTarget.PackageConfig != nil {
 			errs = append(errs, fmt.Errorf("target %q package configuration is not supported", targetKey))

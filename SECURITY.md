@@ -4,7 +4,7 @@
 
 The V1 implementation is expected to preserve these properties:
 
-1. Unsupported Dalec inputs and malformed Formula names fail before metadata or registry access.
+1. Unsupported Dalec inputs, malformed Formula names, and invalid frontend-routing metadata fail before metadata or registry access.
 2. Formula identity and bottle checksums come from a verified Homebrew JWS payload and a pinned public-key set.
 3. Registry tags are discovery inputs only. Resolution records bind the fetched index descriptor and the selected manifest, config, and layer descriptor identities, sizes, media types, platforms, and selected annotations.
 4. The compressed bottle digest must equal both the selected OCI layer digest and the authenticated Homebrew checksum.
@@ -18,6 +18,23 @@ The V1 implementation is expected to preserve these properties:
 12. The Noble runtime base is cut from a fixed Ubuntu snapshot with a SHA-256-pinned Chisel binary and a checksummed, commit-pinned `chisel-releases` archive. Repository-local slice overrides are bound by source and component digests rather than separate per-file checksums. The build-only proxy accepts only Ubuntu archive hosts, while Chisel remains responsible for signed Release and package-digest verification; neither Chisel nor the proxy reaches the final image.
 13. Generated shared runtime data is accepted only at versioned paths with package and capability checks, bounded structure and size, authenticated runtime ownership, and explicit evidence attribution. Node's global `lib/node_modules/npm` runtime is accepted only as a bounded, exact copy of the verified private npm tree plus one exact prefix-bound `npmrc`, with command and manpage links bound back to that validated tree. Unrelated global `lib` or shared-data mutations continue to fail closed.
 14. Creating a `v*.*.*` release tag is a trusted release-operator action. Repository access must restrict tag creation to those operators, and tag rules should prevent update or deletion. The checked-in tag workflow rejects tag updates and deletions, dispatches only the privileged release workflow on `main`, and binds the initially pushed commit; a new build requires that commit to equal the trusted workflow commit before any registry or signing job runs.
+
+Canonical forwarded builds additionally require the upstream Dalec target to be
+exactly `homebrew`, the child route to be exactly `image`, an empty frontend
+`cmdline`, and exact equality between `targets.homebrew.frontend.image` and the
+child gateway `source`. The source and all release/provider references must be
+SHA-256 digest-pinned. Direct invocation continues to reject target frontend
+metadata instead of interpreting it as nested forwarding.
+
+The forwarded child does **not** receive an authenticated identity for the
+upstream Dalec parent. In the child solve, `source` identifies
+`dalec-homebrew`; `dalec.target` and any custom parent-reference option are
+caller-controlled routing data, not provenance. Releases therefore bind the
+upstream index, exact platform children, module identity, and fixed route in
+[`release/dalec-frontend.json`](release/dalec-frontend.json), validate the
+index-to-child chain externally, and include the upstream index in signed
+top-level provenance. Resolution records must not represent a claimed parent as
+child-authenticated evidence.
 
 V2 public-tap releases additionally preserve these properties:
 
@@ -49,7 +66,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the complete resolution, 
 
 ## Out of scope and external controls
 
-The frontend does not hold signing credentials and cannot itself guarantee registry retention, CI builder identity, vulnerability database freshness, VEX approval, or immutable rollback mirrors. Release automation must sign the frontend, base, and materializer tuple; exact platform images; resolution and evidence artifacts; and provenance, then promote by digest without rebuilding.
+The frontend does not hold signing credentials and cannot itself guarantee registry retention, CI builder identity, parent-frontend identity, vulnerability database freshness, VEX approval, or immutable rollback mirrors. Release automation must authenticate the external upstream Dalec binding, sign the repository-owned frontend, base, and materializer tuple; exact platform images; resolution and evidence artifacts; and provenance, then promote by digest without rebuilding.
 
 Reports that demonstrate a practical violation of the properties above are in scope even when the root cause is an upstream metadata-format limitation.
 

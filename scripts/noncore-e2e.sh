@@ -12,6 +12,7 @@ SPEC=${DALEC_HOMEBREW_E2E_SPEC:-examples/ci-noncore-multi-package.yaml}
 PROGRESS=${DALEC_HOMEBREW_E2E_PROGRESS:-plain}
 PLATFORM=${DALEC_HOMEBREW_E2E_PLATFORM:-linux/amd64}
 KEEP_WORK=${DALEC_HOMEBREW_E2E_KEEP_WORK:-0}
+DALEC_FRONTEND_PIN=${DALEC_HOMEBREW_E2E_DALEC_FRONTEND_PIN:-release/dalec-frontend.json}
 
 fail_usage() {
   echo "$*" >&2
@@ -25,7 +26,17 @@ done
 [[ -n "$REGISTRY_IMAGE" ]] || fail_usage "DALEC_HOMEBREW_E2E_REGISTRY_IMAGE is required"
 [[ "$PLATFORM" == linux/amd64 ]] || fail_usage "only linux/amd64 is supported by the CI non-core E2E"
 [[ "$RUN_ID" =~ ^[0-9A-Za-z][0-9A-Za-z_.-]{0,63}$ ]] || fail_usage "invalid E2E run ID"
-[[ -f "$SPEC" ]] || fail_usage "E2E spec does not exist: $SPEC"
+if ! DALEC_SELECTION=$(GOWORK=off GOFLAGS='' go run ./cmd/live-input-verify \
+  --dalec-frontend-file "$DALEC_FRONTEND_PIN" \
+  --direct-spec-file "$SPEC" \
+  --pinned-ref "DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE=$BUILDKIT_IMAGE" \
+  --pinned-ref "DALEC_HOMEBREW_E2E_REGISTRY_IMAGE=$REGISTRY_IMAGE"); then
+  exit 64
+fi
+DALEC_FRONTEND_REF=$(jq -er '.index | select(type == "string" and length > 0)' <<<"$DALEC_SELECTION") ||
+  fail_usage "validated upstream Dalec frontend pin did not contain an index"
+DALEC_ROUTE=$(jq -er '.route | select(type == "string" and length > 0)' <<<"$DALEC_SELECTION") ||
+  fail_usage "validated upstream Dalec frontend pin did not contain a route"
 
 WORK=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dalec-homebrew-noncore-e2e.XXXXXX")
 NETWORK="dalec-homebrew-e2e-${RUN_ID}"
@@ -157,6 +168,7 @@ DALEC_HOMEBREW_LIVE_SPEC="$SPEC" \
 DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF="$RUNTIME_BASE_REF" \
 DALEC_HOMEBREW_LIVE_MATERIALIZER_REF="$MATERIALIZER_REF" \
 DALEC_HOMEBREW_LIVE_FRONTEND_REF="$FRONTEND_REF" \
+DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN="$DALEC_FRONTEND_PIN" \
 DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
 DALEC_HOMEBREW_LIVE_IMAGE="$FINAL_IMAGE" \
 DALEC_HOMEBREW_LIVE_OUTPUT=load \
@@ -286,5 +298,7 @@ DALEC_HOMEBREW_E2E_BOTTLE_FETCHER_REF=$BOTTLE_FETCHER_REF
 DALEC_HOMEBREW_E2E_CATALOG_EXTRACTOR_REF=$EXTRACTOR_REF
 DALEC_HOMEBREW_E2E_MATERIALIZER_REF=$MATERIALIZER_REF
 DALEC_HOMEBREW_E2E_FRONTEND_REF=$FRONTEND_REF
+DALEC_HOMEBREW_E2E_DALEC_FRONTEND_REF=$DALEC_FRONTEND_REF
+DALEC_HOMEBREW_E2E_DALEC_ROUTE=$DALEC_ROUTE
 DALEC_HOMEBREW_E2E_FINAL_IMAGE=$FINAL_IMAGE
 RESULT

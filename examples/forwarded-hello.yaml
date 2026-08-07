@@ -1,0 +1,20 @@
+# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
+name: homebrew-forwarded-hello
+version: 0.1.0
+revision: 1
+description: Minimal Homebrew runtime built through upstream Dalec forwarding
+website: https://brew.sh/
+license: Apache-2.0
+
+dependencies:
+  runtime:
+    hello: {}
+
+image:
+  entrypoint: /home/linuxbrew/.linuxbrew/bin/hello
+  user: linuxbrew
+
+targets:
+  homebrew:
+    frontend:
+      image: ghcr.io/sozercan/dalec-homebrew@sha256:<provider-digest>

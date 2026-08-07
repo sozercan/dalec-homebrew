@@ -49,7 +49,7 @@ case "$target" in
   runtime-base) digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
   materializer) digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
   frontend) digest=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ;;
-  final) digest=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd ;;
+  homebrew/image|final) digest=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd ;;
   *) echo "unexpected build target: $target" >&2; exit 1 ;;
 esac
 printf '{"containerimage.digest":"sha256:%s"}\n' "$digest" > "$metadata_file"
@@ -67,12 +67,33 @@ DIGEST_A=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 DIGEST_B=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 DIGEST_C=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 DIGEST_D=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+DIGEST_E=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+DIGEST_F=sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+DIGEST_G=sha256:1111111111111111111111111111111111111111111111111111111111111111
 BASE_REF=ghcr.io/example/runtime-base@$DIGEST_A
 MATERIALIZER_REF=ghcr.io/example/materializer@$DIGEST_B
 FRONTEND_REF=ghcr.io/example/frontend@$DIGEST_C
+DALEC_FRONTEND_REF=ghcr.io/project-dalec/dalec/frontend@$DIGEST_E
+DALEC_PIN="$TEST_ROOT/dalec-frontend.json"
+cat > "$DALEC_PIN" <<EOF_PIN
+{
+  "schema_version": "dalec-homebrew-dalec-frontend/v1",
+  "module": {
+    "path": "github.com/project-dalec/dalec",
+    "version": "v0.21.5"
+  },
+  "index": "$DALEC_FRONTEND_REF",
+  "platforms": {
+    "linux/amd64": "ghcr.io/project-dalec/dalec/frontend@$DIGEST_F",
+    "linux/arm64": "ghcr.io/project-dalec/dalec/frontend@$DIGEST_G"
+  },
+  "route": "homebrew/image"
+}
+EOF_PIN
 COMMON_ENV=(
   DALEC_HOMEBREW_LIVE_BUILDER=test-builder
   DALEC_HOMEBREW_LIVE_PLATFORM=linux/amd64
+  "DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN=$DALEC_PIN"
 )
 PUBLISHED_ENV=(
   "${COMMON_ENV[@]}"
@@ -146,10 +167,49 @@ expect_rejected invalid-metadata-not-before "DALEC_HOMEBREW_LIVE_METADATA_NOT_BE
   "${PUBLISHED_ENV[@]}" \
   DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=2026-02-31T00:00:00Z
 
+expect_rejected partial-dalec-override "DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF and DALEC_HOMEBREW_LIVE_TARGET must be set together" \
+  "${PUBLISHED_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF=ghcr.io/project-dalec/dalec/frontend@$DIGEST_F"
+
+expect_rejected mutable-dalec-override "DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF must be a digest-pinned OCI reference" \
+  "${PUBLISHED_ENV[@]}" \
+  DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF=ghcr.io/project-dalec/dalec/frontend:latest \
+  DALEC_HOMEBREW_LIVE_TARGET=homebrew/image
+
+MUTABLE_DALEC_PIN="$TEST_ROOT/mutable-dalec-frontend.json"
+sed 's#@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee#:latest#' \
+  "$DALEC_PIN" > "$MUTABLE_DALEC_PIN"
+expect_rejected mutable-dalec-index "index must be a digest-pinned OCI reference" \
+  "${PUBLISHED_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN=$MUTABLE_DALEC_PIN"
+
+PARTIAL_DALEC_PIN="$TEST_ROOT/partial-dalec-frontend.json"
+jq 'del(.platforms["linux/arm64"])' "$DALEC_PIN" > "$PARTIAL_DALEC_PIN"
+expect_rejected partial-dalec-platforms 'missing platform "linux/arm64"' \
+  "${PUBLISHED_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN=$PARTIAL_DALEC_PIN"
+
+WRONG_ROUTE_PIN="$TEST_ROOT/wrong-route-dalec-frontend.json"
+jq '.route = "homebrew/debug"' "$DALEC_PIN" > "$WRONG_ROUTE_PIN"
+expect_rejected wrong-dalec-route 'route must be exactly "homebrew/image"' \
+  "${PUBLISHED_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN=$WRONG_ROUTE_PIN"
+
 printf 'name: missing-syntax\n' > "$TEST_ROOT/missing-syntax.yaml"
-expect_rejected missing-syntax "DALEC_HOMEBREW_LIVE_SPEC must start with a # syntax= directive" \
+expect_rejected missing-syntax "must start with a # syntax= directive" \
   "${PUBLISHED_ENV[@]}" \
   "DALEC_HOMEBREW_LIVE_SPEC=$TEST_ROOT/missing-syntax.yaml"
+
+cat > "$TEST_ROOT/existing-targets.yaml" <<'EOF_SPEC'
+# syntax=example/frontend@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+dependencies:
+  runtime:
+    hello: {}
+targets: {}
+EOF_SPEC
+expect_rejected existing-targets "live helper reserves targets.homebrew for forwarding" \
+  "${PUBLISHED_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_SPEC=$TEST_ROOT/existing-targets.yaml"
 
 published_output="$TEST_ROOT/published.out"
 CAPTURED_SPEC="$TEST_ROOT/published-spec.yaml"
@@ -158,7 +218,7 @@ run_live_test "$published_output" \
   "${PUBLISHED_ENV[@]}" \
   DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z
 [[ $(grep -c '^buildx build ' "$DOCKER_LOG") -eq 1 ]] || fail "published mode did not build only the final image"
-assert_not_contains "$DOCKER_LOG" "--target "
+assert_contains "$DOCKER_LOG" "--target homebrew/image"
 for argument in \
   "DALEC_HOMEBREW_RUNTIME_BASE=$BASE_REF" \
   "DALEC_HOMEBREW_MATERIALIZER=$MATERIALIZER_REF" \
@@ -166,28 +226,52 @@ for argument in \
   "DALEC_HOMEBREW_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z"; do
   assert_contains "$DOCKER_LOG" "--build-arg $argument"
 done
-[[ $(head -n 1 "$CAPTURED_SPEC") == "# syntax=$FRONTEND_REF" ]] || fail "published frontend reference was not written to the live spec"
-diff -u <(tail -n +2 "$ROOT/examples/live-test.yaml") <(tail -n +2 "$CAPTURED_SPEC")
+[[ $(head -n 1 "$CAPTURED_SPEC") == "# syntax=$DALEC_FRONTEND_REF" ]] || fail "upstream Dalec frontend reference was not written to the live spec"
+EXPECTED_SPEC="$TEST_ROOT/expected-published-spec.yaml"
+{
+  printf '# syntax=%s\n' "$DALEC_FRONTEND_REF"
+  tail -n +2 "$ROOT/examples/live-test.yaml"
+  printf '\ntargets:\n'
+  printf '  homebrew:\n'
+  printf '    frontend:\n'
+  printf '      image: %s\n' "$FRONTEND_REF"
+} > "$EXPECTED_SPEC"
+diff -u "$EXPECTED_SPEC" "$CAPTURED_SPEC"
 for result in \
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
   "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
   "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF" \
+  "DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF=$DALEC_FRONTEND_REF" \
+  "DALEC_HOMEBREW_LIVE_TARGET=homebrew/image" \
+  "DALEC_HOMEBREW_LIVE_DALEC_ROUTE=homebrew/image" \
   "DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z" \
   "DALEC_HOMEBREW_LIVE_FINAL_REF=dalec-homebrew-live@$DIGEST_D"; do
   assert_contains "$published_output" "$result"
 done
+
+explicit_output="$TEST_ROOT/explicit-parent.out"
+explicit_spec="$TEST_ROOT/explicit-parent-spec.yaml"
+run_live_test "$explicit_output" \
+  CAPTURED_SPEC="$explicit_spec" \
+  "${PUBLISHED_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF=ghcr.io/project-dalec/dalec/frontend@$DIGEST_F" \
+  DALEC_HOMEBREW_LIVE_TARGET=homebrew/image
+[[ $(head -n 1 "$explicit_spec") == "# syntax=ghcr.io/project-dalec/dalec/frontend@$DIGEST_F" ]] || fail "release-bound Dalec platform child override was not written to the live spec"
+assert_contains "$explicit_output" "DALEC_HOMEBREW_LIVE_TARGET=homebrew/image"
 
 rebuild_output="$TEST_ROOT/rebuild.out"
 run_live_test "$rebuild_output" \
   DALEC_HOMEBREW_LIVE_BUILDER=test-builder \
   DALEC_HOMEBREW_LIVE_REGISTRY=registry.example \
   DALEC_HOMEBREW_LIVE_PLATFORM=linux/arm64 \
+  "DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN=$DALEC_PIN" \
   DALEC_HOMEBREW_LIVE_RUN_ID=test-run \
   DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH=1700000000
 [[ $(grep -c '^buildx build ' "$DOCKER_LOG") -eq 4 ]] || fail "rebuild mode did not retain all four builds"
 for target in runtime-base materializer frontend; do
   assert_contains "$DOCKER_LOG" "--target $target"
 done
+assert_contains "$DOCKER_LOG" "--target homebrew/image"
 [[ $(grep -Fc -- "--build-arg SOURCE_DATE_EPOCH=1700000000" "$DOCKER_LOG") -eq 3 ]] || fail "rebuild mode did not use one deterministic source date epoch for all components"
 for argument in \
   "DALEC_HOMEBREW_RUNTIME_BASE=registry.example/dalec-homebrew-runtime-base@$DIGEST_A" \
@@ -199,7 +283,10 @@ assert_not_contains "$DOCKER_LOG" "--build-arg DALEC_HOMEBREW_METADATA_NOT_BEFOR
 for result in \
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=registry.example/dalec-homebrew-runtime-base@$DIGEST_A" \
   "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=registry.example/dalec-homebrew-materializer@$DIGEST_B" \
-  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=registry.example/dalec-homebrew@$DIGEST_C"; do
+  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=registry.example/dalec-homebrew@$DIGEST_C" \
+  "DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF=$DALEC_FRONTEND_REF" \
+  "DALEC_HOMEBREW_LIVE_TARGET=homebrew/image" \
+  "DALEC_HOMEBREW_LIVE_DALEC_ROUTE=homebrew/image"; do
   assert_contains "$rebuild_output" "$result"
 done
 

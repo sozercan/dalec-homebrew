@@ -18,7 +18,10 @@ func TestCIExercisesProductionPathNonCoreV2(t *testing.T) {
 	text := string(workflow)
 	for _, want := range []string{
 		"Non-core multi-package container E2E",
-		"Build and test build-local non-core V2",
+		"Validate upstream Dalec forwarding pin",
+		"--dalec-frontend-file release/dalec-frontend.json",
+		"Build and test upstream-forwarded build-local non-core V2",
+		"DALEC_HOMEBREW_E2E_DALEC_FRONTEND_PIN: release/dalec-frontend.json",
 		"DALEC_HOMEBREW_E2E_SPEC: examples/ci-noncore-multi-package.yaml",
 		"run: ./scripts/noncore-e2e.sh",
 	} {
@@ -46,6 +49,12 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 	}
 	text := string(script)
 	for _, want := range []string{
+		`--dalec-frontend-file "$DALEC_FRONTEND_PIN"`,
+		`--direct-spec-file "$SPEC"`,
+		`--pinned-ref "DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE=$BUILDKIT_IMAGE"`,
+		`--pinned-ref "DALEC_HOMEBREW_E2E_REGISTRY_IMAGE=$REGISTRY_IMAGE"`,
+		`DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN="$DALEC_FRONTEND_PIN"`,
+		"DALEC_HOMEBREW_E2E_DALEC_ROUTE=$DALEC_ROUTE",
 		`--catalog-extractor-ref "$EXTRACTOR_REF"`,
 		`--build-arg "CATALOG_EXTRACTOR_REF=$EXTRACTOR_REF"`,
 		"docker run --rm --network none",

@@ -1,0 +1,13 @@
+{
+  "schema_version": "dalec-homebrew-dalec-frontend/v1",
+  "module": {
+    "path": "github.com/project-dalec/dalec",
+    "version": "v0.21.5"
+  },
+  "route": "homebrew/image",
+  "index": "ghcr.io/project-dalec/dalec/frontend@sha256:37f3a2ab5b7e65b3f8c5cb4e79f9f184f8d2b7e7d3f328041d7d22d160805c8c",
+  "platforms": {
+    "linux/amd64": "ghcr.io/project-dalec/dalec/frontend@sha256:4ce1cda772259b27a37a304ed9b30f3f06a3d776e1468afea4b05e8bdfa24d46",
+    "linux/arm64": "ghcr.io/project-dalec/dalec/frontend@sha256:ebb7d748011880b9bd6d430257831d3eb5e8ed1d1814ebeef1fcf182daff171e"
+  }
+}

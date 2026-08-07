@@ -16,7 +16,7 @@ For component and integration work:
   and release automation; these are the release-tested executor pins, while
   `github.com/moby/buildkit v0.31.2` is the Go module version
 - For component rebuild mode, a writable OCI registry reachable from the selected BuildKit daemon
-- For published-tuple mode, pull access from the selected BuildKit daemon to each digest-pinned component reference
+- For published-tuple mode, pull access from the selected BuildKit daemon to each digest-pinned component reference and the release-bound upstream Dalec frontend
 - Builder access to authenticated Homebrew metadata, selected bottle layers, component registries, and the pinned Ubuntu inputs used by the selected mode
 
 Additional reporting and VM validation tools are listed in their sections below.
@@ -69,14 +69,32 @@ checks from [Build component images](#build-component-images) locally.
 
 ## Run the live BuildKit test
 
-The live helper builds and tests one final, single-platform runtime image in either mode:
+The live helper builds and tests one final, single-platform runtime image in
+either component mode, but both modes use the canonical forwarding chain:
+
+```text
+BuildKit -> upstream Dalec -> dalec-homebrew homebrew/image -> runtime image
+```
 
 | Mode | Required variables | Behavior |
 | --- | --- | --- |
-| Component rebuild | `DALEC_HOMEBREW_LIVE_BUILDER`, `DALEC_HOMEBREW_LIVE_REGISTRY`, and `DALEC_HOMEBREW_LIVE_PLATFORM` | Builds and pushes the runtime base, materializer, and frontend with one fixed source-date epoch, then consumes their reported digests. |
-| Published tuple | Builder and platform plus all three `DALEC_HOMEBREW_LIVE_*_REF` variables | Skips component builds and passes the immutable tuple to the release-bound frontend. |
+| Component rebuild | `DALEC_HOMEBREW_LIVE_BUILDER`, `DALEC_HOMEBREW_LIVE_REGISTRY`, and `DALEC_HOMEBREW_LIVE_PLATFORM` | Builds and pushes the runtime base, materializer, and provider frontend with one fixed source-date epoch, then consumes their reported digests. |
+| Published tuple | Builder and platform plus all three `DALEC_HOMEBREW_LIVE_*_REF` component variables | Skips component builds and passes the immutable tuple through upstream Dalec to the release-bound provider. |
 
-Leave all three component-reference variables unset to rebuild, or set all three to replay a published tuple. Partial sets and mutable or malformed references are rejected before the builder is inspected. The input spec must start with a `# syntax=` directive; the helper replaces that first line with the selected frontend digest before the final build.
+The helper validates [`release/dalec-frontend.json`](release/dalec-frontend.json)
+before any Docker command. It uses the pinned upstream index and fixed
+`homebrew/image` route by default. Release automation may additionally set
+`DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF` and
+`DALEC_HOMEBREW_LIVE_TARGET` together; the reference must equal the pinned
+index or the selected platform child, and the target must equal the pinned
+route. Partial, mutable, mismatched, or malformed inputs fail before the builder
+is inspected.
+
+Leave all three provider-component reference variables unset to rebuild, or set
+all three to replay a published tuple. The input fixture must start with a
+`# syntax=` directive and must not already define a top-level `targets` mapping.
+The helper replaces the directive with upstream Dalec, injects the exact
+`targets.homebrew.frontend.image`, and builds `--target homebrew/image`.
 
 Example component rebuild:
 
@@ -88,28 +106,46 @@ DALEC_HOMEBREW_LIVE_IMAGE=dalec-homebrew-live:arm64 \
 ./scripts/live-test.sh
 ```
 
-The repository does not provision the builder or registry. Rebuild mode needs a writable staging registry reachable from the builder; an HTTP registry is acceptable only when that daemon is explicitly configured for it. Published mode needs pull access to the supplied component references. `DALEC_HOMEBREW_LIVE_OUTPUT=push` additionally requires write access for the final image.
+The repository does not provision the builder or registry. Rebuild mode needs
+a writable staging registry reachable from the builder; an HTTP registry is
+acceptable only when that daemon is explicitly configured for it. Published
+mode needs pull access to all supplied component references and the pinned
+upstream Dalec frontend. `DALEC_HOMEBREW_LIVE_OUTPUT=push` additionally requires
+write access for the final image.
 
-All helper builds disable provenance. The helper does not verify release signatures or attestations, sign, scan, promote, or clean up registry artifacts; use the release workflow for those guarantees.
+All helper builds disable provenance. The helper is integration validation, not
+a substitute for release provenance or signed evidence. The child frontend can
+validate its own gateway `source`, but BuildKit does not give it an authenticated
+identity for the parent dispatcher; the checked-in pin and top-level release
+provenance bind upstream Dalec externally.
 
-Common options:
+Common optional variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DALEC_HOMEBREW_LIVE_SPEC` | `examples/live-test.yaml` | Dalec spec used for the final image |
+| `DALEC_HOMEBREW_LIVE_SPEC` | `examples/live-test.yaml` | Direct-form Dalec fixture adapted for the forwarded final image |
 | `DALEC_HOMEBREW_LIVE_IMAGE` | `dalec-homebrew-live:dev` | Final local or registry tag |
 | `DALEC_HOMEBREW_LIVE_OUTPUT` | `load` | `load` the final image or `push` it |
 | `DALEC_HOMEBREW_LIVE_PROGRESS` | `plain` | Buildx progress output |
 | `DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE` | unset | RFC3339 lower bound for authenticated Homebrew metadata |
+| `DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN` | `release/dalec-frontend.json` | External upstream Dalec index/children/route binding |
 
-Rebuild-only options are `DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH` (default `1781049600`), `DALEC_HOMEBREW_LIVE_RUN_ID` (timestamp and architecture), and `DALEC_HOMEBREW_LIVE_UBUNTU_BASE` (the pinned platform child by default).
+Rebuild-only options are `DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH` (default
+`1781049600`), `DALEC_HOMEBREW_LIVE_RUN_ID` (timestamp and architecture), and
+`DALEC_HOMEBREW_LIVE_UBUNTU_BASE` (the pinned platform child by default).
 
-Published mode requires digest-pinned `DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF`, `DALEC_HOMEBREW_LIVE_MATERIALIZER_REF`, and `DALEC_HOMEBREW_LIVE_FRONTEND_REF`. Runtime-base and materializer inputs identify release indexes; the frontend input identifies the selected platform child. References printed after a rebuild identify that run's single-platform staging outputs, not release indexes.
+Published mode requires digest-pinned
+`DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF`,
+`DALEC_HOMEBREW_LIVE_MATERIALIZER_REF`, and
+`DALEC_HOMEBREW_LIVE_FRONTEND_REF`. Runtime-base and materializer inputs
+identify release indexes; the provider frontend input identifies the selected
+platform child. References printed after a rebuild identify that run's
+single-platform staging outputs, not release indexes.
 
-The helper prints the selected component references, metadata floor, final
-image name, final digest, and immutable `DALEC_HOMEBREW_LIVE_FINAL_REF` as shell
-assignments. After `push`, the final reference is pullable from the final image
-repository.
+The helper prints the selected provider components, upstream Dalec reference
+and route, metadata floor, final image name, final digest, and immutable
+`DALEC_HOMEBREW_LIVE_FINAL_REF` as shell assignments. After `push`, the final
+reference is pullable from the final image repository.
 
 ## Exercise focused runtime closures
 
@@ -124,7 +160,7 @@ Use `DALEC_HOMEBREW_LIVE_SPEC` to run the same helper with a focused example:
 ## Run the non-core production-path E2E
 
 Pull requests run [`scripts/noncore-e2e.sh`](scripts/noncore-e2e.sh) on
-`linux/amd64`. Unlike the core-only live helper, this test assembles the full V2
+`linux/amd64`. Unlike the core-only fixture set, this test exercises actual upstream-Dalec forwarding and assembles the full V2
 path: a local registry, one component BuildKit worker, the release-bound
 catalog extractor and bottle fetcher, and V2 materializer/frontend images. Tap
 metadata and policy-derived bottles remain content-addressed BuildKit states;
@@ -134,12 +170,14 @@ from public-tap Formulae plus a core Formula and reruns runtime checks with
 networking disabled. Build-local ingestion resolves each tap's default branch
 and records the exact observed commit in extraction evidence.
 
-The script is CI-oriented and requires explicit digest-pinned BuildKit,
-registry, and HTTPS-tunnel image inputs:
+The script is CI-oriented and requires explicit digest-pinned BuildKit and
+registry image inputs. It validates the upstream Dalec binding from
+`release/dalec-frontend.json` before starting Docker:
 
 ```console
 DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE=docker.io/moby/buildkit@sha256:<digest> \
 DALEC_HOMEBREW_E2E_REGISTRY_IMAGE=docker.io/library/registry@sha256:<digest> \
+DALEC_HOMEBREW_E2E_DALEC_FRONTEND_PIN=release/dalec-frontend.json \
 DALEC_HOMEBREW_E2E_RUN_ID=local-1 \
 ./scripts/noncore-e2e.sh
 ```

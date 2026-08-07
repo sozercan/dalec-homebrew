@@ -16,6 +16,9 @@ METADATA_NOT_BEFORE=${DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE:-}
 BASE_REF=${DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF:-}
 MATERIALIZER_REF=${DALEC_HOMEBREW_LIVE_MATERIALIZER_REF:-}
 FRONTEND_REF=${DALEC_HOMEBREW_LIVE_FRONTEND_REF:-}
+DALEC_FRONTEND_PIN=${DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN:-release/dalec-frontend.json}
+DALEC_FRONTEND_OVERRIDE=${DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF:-}
+DALEC_TARGET_OVERRIDE=${DALEC_HOMEBREW_LIVE_TARGET:-}
 
 fail_usage() {
   echo "$*" >&2
@@ -26,17 +29,26 @@ USE_PUBLISHED_COMPONENTS=0
 if [[ -n "$BASE_REF" || -n "$MATERIALIZER_REF" || -n "$FRONTEND_REF" ]]; then
   USE_PUBLISHED_COMPONENTS=1
 fi
-if (( USE_PUBLISHED_COMPONENTS == 1 )) || [[ -n "$METADATA_NOT_BEFORE" ]]; then
-  command -v go >/dev/null 2>&1 ||
-    fail_usage "go is required to validate published component references and metadata timestamps"
-  if ! GOWORK=off GOFLAGS='' go run ./cmd/live-input-verify \
-    --runtime-base-ref "$BASE_REF" \
-    --materializer-ref "$MATERIALIZER_REF" \
-    --frontend-ref "$FRONTEND_REF" \
-    --metadata-not-before "$METADATA_NOT_BEFORE"; then
-    exit 64
-  fi
+for tool in go jq; do
+  command -v "$tool" >/dev/null 2>&1 ||
+    fail_usage "$tool is required to validate live-test inputs"
+done
+if ! DALEC_SELECTION=$(GOWORK=off GOFLAGS='' go run ./cmd/live-input-verify \
+  --runtime-base-ref "$BASE_REF" \
+  --materializer-ref "$MATERIALIZER_REF" \
+  --frontend-ref "$FRONTEND_REF" \
+  --metadata-not-before "$METADATA_NOT_BEFORE" \
+  --dalec-frontend-file "$DALEC_FRONTEND_PIN" \
+  --dalec-frontend-ref "$DALEC_FRONTEND_OVERRIDE" \
+  --dalec-route "$DALEC_TARGET_OVERRIDE" \
+  --platform "$PLATFORM" \
+  --direct-spec-file "$SPEC"); then
+  exit 64
 fi
+DALEC_FRONTEND_REF=$(jq -er '.index | select(type == "string" and length > 0)' <<<"$DALEC_SELECTION") ||
+  fail_usage "validated upstream Dalec frontend pin did not contain an index"
+DALEC_ROUTE=$(jq -er '.route | select(type == "string" and length > 0)' <<<"$DALEC_SELECTION") ||
+  fail_usage "validated upstream Dalec frontend pin did not contain a route"
 
 if [[ -z "$BUILDER" || -z "$PLATFORM" || ( "$USE_PUBLISHED_COMPONENTS" -eq 0 && -z "$REGISTRY" ) ]]; then
   cat >&2 <<'USAGE'
@@ -59,11 +71,17 @@ Optional settings for either mode:
        DALEC_HOMEBREW_LIVE_IMAGE=dalec-homebrew-live:dev
        DALEC_HOMEBREW_LIVE_OUTPUT=load|push
        DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=<RFC3339 timestamp>
+       DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN=release/dalec-frontend.json
+       DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF=<index-or-platform-child@sha256:digest>
+       DALEC_HOMEBREW_LIVE_TARGET=homebrew/image
 
 The registry must be reachable from the selected builder and configured as an
 insecure HTTP registry when appropriate when rebuilding components. Component
 and frontend references are always consumed by digest even though temporary
-tags are used for publication.
+tags are used for publication. The upstream Dalec index and the fixed
+homebrew/image route come from the validated external pin file. The optional
+upstream reference and target overrides must be supplied together and match
+that pin.
 USAGE
   exit 64
 fi
@@ -93,11 +111,6 @@ case "$PLATFORM" in
     ;;
   *) fail_usage "unsupported DALEC_HOMEBREW_LIVE_PLATFORM: $PLATFORM" ;;
 esac
-
-SPEC_HEADER=
-if ! IFS= read -r SPEC_HEADER < "$SPEC" || [[ "$SPEC_HEADER" != '# syntax='* ]]; then
-  fail_usage "DALEC_HOMEBREW_LIVE_SPEC must start with a # syntax= directive"
-fi
 
 TMPDIR_ROOT=${TMPDIR:-/tmp}
 WORK=$(mktemp -d "$TMPDIR_ROOT/dalec-homebrew-live.XXXXXX")
@@ -158,8 +171,12 @@ else
 fi
 
 {
-  printf '# syntax=%s\n' "$FRONTEND_REF"
+  printf '# syntax=%s\n' "$DALEC_FRONTEND_REF"
   tail -n +2 "$SPEC"
+  printf '\ntargets:\n'
+  printf '  homebrew:\n'
+  printf '    frontend:\n'
+  printf '      image: %s\n' "$FRONTEND_REF"
 } > "$WORK/spec.yaml"
 
 FINAL_BUILD_ARGS=(
@@ -174,6 +191,7 @@ fi
 echo "==> Building final runtime image $FINAL_IMAGE"
 docker buildx build \
   "${BUILDX_ARGS[@]}" \
+  --target "$DALEC_ROUTE" \
   --file "$WORK/spec.yaml" \
   --tag "$FINAL_IMAGE" \
   --metadata-file "$WORK/final.json" \
@@ -187,6 +205,9 @@ cat <<RESULT
 DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF
 DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF
 DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF
+DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF=$DALEC_FRONTEND_REF
+DALEC_HOMEBREW_LIVE_TARGET=$DALEC_ROUTE
+DALEC_HOMEBREW_LIVE_DALEC_ROUTE=$DALEC_ROUTE
 DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=$METADATA_NOT_BEFORE
 DALEC_HOMEBREW_LIVE_FINAL_IMAGE=$FINAL_IMAGE
 DALEC_HOMEBREW_LIVE_FINAL_DIGEST=$FINAL_DIGEST

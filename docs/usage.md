@@ -6,17 +6,25 @@
 
 - A Linux `amd64` or `arm64` target
 - Docker Buildx or `buildctl` backed by BuildKit 0.31.2 or newer
-- A `dalec-homebrew` frontend reference pinned by digest
-- Network access from the BuildKit daemon to the frontend and its bound components, `formulae.brew.sh`, `ghcr.io`, public default-GitHub taps, and selected public bottle or prebuilt-archive hosts
+- An upstream Dalec frontend reference pinned by digest
+- A `dalec-homebrew` provider reference pinned by digest
+- Network access from the BuildKit daemon to both frontends and the provider's bound components, `formulae.brew.sh`, `ghcr.io`, public default-GitHub taps, and selected public bottle or prebuilt-archive hosts
 
-The frontend, runtime base, materializer, and—when V2 non-core support is compiled—bottle fetcher, catalog extractor, tap policy, and executable runtime policy are treated as one release component tuple. Mutable image tags are not accepted as trusted inputs.
+The repository's [`../release/dalec-frontend.json`](../release/dalec-frontend.json)
+binding records the release-approved upstream Dalec index, exact Linux platform
+children, module identity, and fixed `homebrew/image` route. The
+`dalec-homebrew` frontend, runtime base, materializer, and—when V2 non-core
+support is compiled—bottle fetcher, catalog extractor, tap policy, and executable
+runtime policy remain one separate release component tuple. Mutable image tags
+are not accepted as trusted inputs.
 
 ## Build an image
 
-A minimal Dalec spec looks like this:
+The canonical forwarded spec uses upstream Dalec as its syntax frontend and
+selects `dalec-homebrew` through the `homebrew` target:
 
 ```yaml
-# syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
+# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
 
 dependencies:
   runtime:
@@ -24,20 +32,43 @@ dependencies:
 
 image:
   entrypoint: /home/linuxbrew/.linuxbrew/bin/hello
+
+targets:
+  homebrew:
+    frontend:
+      image: ghcr.io/sozercan/dalec-homebrew@sha256:<provider-digest>
 ```
 
-Replace `<frontend-digest>` with the immutable digest supplied by a trusted release or local component build, then build it:
+Replace both placeholders with immutable references supplied by trusted release
+evidence, then build the provider-owned `image` route:
 
 ```console
 docker buildx build \
+  --target homebrew/image \
   --platform linux/amd64 \
-  --file examples/hello.yaml \
+  --file examples/forwarded-hello.yaml \
   --tag hello-runtime:local \
   --load \
   .
 ```
 
-The complete example is available at [`../examples/hello.yaml`](../examples/hello.yaml). Use `linux/arm64` for an Arm target. BuildKit-normalized default-variant spellings such as `linux/amd64/v1` and `linux/arm64/v8` are equivalent; non-default variants and other operating systems or architectures are unsupported.
+The complete example is available at
+[`../examples/forwarded-hello.yaml`](../examples/forwarded-hello.yaml). Use
+`linux/arm64` for an Arm target. BuildKit-normalized default-variant spellings
+such as `linux/amd64/v1` and `linux/arm64/v8` are equivalent; non-default
+variants and other operating systems or architectures are unsupported.
+
+`homebrew` is the selected Dalec spec target and `image` is the only route
+advertised by the provider. `targets.homebrew.frontend.image` must exactly match
+the digest-pinned gateway source used for the child solve, and `cmdline` must be
+omitted or empty. Bare `--target homebrew`, unknown child routes, nested routes,
+and mutable or mismatched provider references fail closed before Homebrew
+metadata access.
+
+Direct invocation remains supported for compatibility. In that mode, put the
+digest-pinned `dalec-homebrew` image directly in `# syntax=`, omit the target's
+`frontend` block, and use the previous direct target semantics. Official live
+and release integration uses upstream forwarding.
 
 ## Declare runtime dependencies
 
@@ -60,6 +91,12 @@ dependencies:
   runtime: [hello, jq]
 ```
 
+Direct compatibility mode accepts this shorthand. The currently pinned upstream
+Dalec `v0.21.5` dispatcher does not preserve list-form runtime dependencies when
+it reserializes a forwarded spec, so release-forwarded builds must use the map
+form. The child still fails closed with no applicable roots if a list reaches that
+path.
+
 Dependency rules:
 
 - An omitted or empty `version` list selects the current stable Formula in the authenticated metadata. Any non-empty version constraint is rejected; historical versions and version ranges are not supported.
@@ -76,25 +113,34 @@ Dependency rules:
 - Root declaration order is preserved for resolution records and the default generated `PATH`. Requested Formulae that expose the same executable basename fail instead of silently shadowing one another.
 - A multi-platform build fails if the same canonical requested root resolves to different package versions on different platforms. Architecture-filtered roots that appear on only one platform are independent.
 
-A target-specific declaration is selected with Buildx `--target`:
+In the canonical forwarded mode, target-specific dependencies, image settings,
+and tests belong to the fixed `homebrew` target alongside its routing metadata:
 
 ```yaml
 targets:
-  production:
+  homebrew:
+    frontend:
+      image: ghcr.io/sozercan/dalec-homebrew@sha256:<provider-digest>
     dependencies:
       runtime:
         hello: {}
 ```
 
+Select it through the full provider route:
+
 ```console
 docker buildx build \
-  --target production \
+  --target homebrew/image \
   --platform linux/amd64 \
   --file spec.yaml \
   --tag hello-runtime:production \
   --load \
   .
 ```
+
+Direct compatibility mode may still select an arbitrary spec target such as
+`production` with `--target production`, but that target must not contain a
+`frontend` block.
 
 ## Configure the image
 
@@ -180,12 +226,12 @@ V1 behavior is limited to core-only global and selected-target `dependencies.run
 - build steps, build environment, build mounts, caches, or build network configuration
 - package artifacts or package configuration
 - `provides`, `replaces`, or `conflicts`
-- target frontend forwarding
+- frontend forwarding outside the exact digest-pinned `homebrew/image` route, including non-empty `cmdline`, nested forwarding, and unknown provider routes
 - image base overrides or post-install image steps
 - casks, private or authenticated taps, arbitrary Git remotes, general source builds, user-defined archive recipes, historical versions, version ranges, and bottles whose embedded Formula requires unstaged tap-local Ruby helper files
 - test mounts or networked tests
 
-Unsupported or malformed Dalec document fields are rejected before Homebrew metadata or bottle registry access.
+Unsupported or malformed Dalec document fields and invalid forwarding metadata are rejected before Homebrew metadata or bottle registry access. The child authenticates the `dalec-homebrew` gateway source, not the identity of the upstream dispatcher; trusted releases bind the parent externally through the checked-in pin and signed provenance.
 
 ## Runtime contents and evidence
 

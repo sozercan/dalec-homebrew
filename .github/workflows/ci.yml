@@ -93,8 +93,19 @@ jobs:
         run: |
           set -euo pipefail
           ./scripts/release-inputs.sh > "$RUNNER_TEMP/release-inputs.json"
-          jq -e '.schema_version == "dalec-homebrew-release-inputs/v1"' \
+          jq -e '.schema_version == "dalec-homebrew-release-inputs/v2"' \
             "$RUNNER_TEMP/release-inputs.json"
+
+      - name: Validate upstream Dalec forwarding pin
+        run: |
+          set -euo pipefail
+          go run ./cmd/live-input-verify \
+            --dalec-frontend-file release/dalec-frontend.json \
+            > "$RUNNER_TEMP/dalec-frontend-selection.json"
+          jq -e '
+            .route == "homebrew/image" and
+            (.index | test("@sha256:[0-9a-f]{64}$"))
+          ' "$RUNNER_TEMP/dalec-frontend-selection.json"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
@@ -219,10 +230,11 @@ jobs:
           install -m 0755 "$binary" "$plugin_dir/docker-buildx"
           docker buildx version | grep -F " $BUILDX_VERSION "
 
-      - name: Build and test build-local non-core V2
+      - name: Build and test upstream-forwarded build-local non-core V2
         env:
           DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE: ${{ env.BUILDKIT_IMAGE }}
           DALEC_HOMEBREW_E2E_REGISTRY_IMAGE: ${{ env.REGISTRY_IMAGE }}
+          DALEC_HOMEBREW_E2E_DALEC_FRONTEND_PIN: release/dalec-frontend.json
           DALEC_HOMEBREW_E2E_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
           DALEC_HOMEBREW_E2E_IMAGE: dalec-homebrew-noncore-e2e:${{ github.sha }}
           DALEC_HOMEBREW_E2E_SPEC: examples/ci-noncore-multi-package.yaml

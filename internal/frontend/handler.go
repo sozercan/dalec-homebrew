@@ -62,7 +62,8 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		return nil, fmt.Errorf("invoking gateway frontend: %w", err)
 	}
 	targetKey := dalecfrontend.GetTargetKey(dc)
-	if targetKey == "" {
+	forwarded := targetKey != ""
+	if !forwarded {
 		targetKey = dc.Target
 	}
 
@@ -98,13 +99,21 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		if err != nil {
 			return nil, err
 		}
-		selection, err := speccontract.Validate(dalecSpec, targetKey, p.Architecture, declarationOrder, nonCoreCapability)
+		var selection *speccontract.Selection
+		if forwarded {
+			selection, err = speccontract.ValidateForwarded(dalecSpec, targetKey, p.Architecture, declarationOrder, speccontract.Forwarding{
+				Source:  opts["source"],
+				CmdLine: opts["cmdline"],
+			}, nonCoreCapability)
+		} else {
+			selection, err = speccontract.Validate(dalecSpec, targetKey, p.Architecture, declarationOrder, nonCoreCapability)
+		}
 		if err != nil {
 			return nil, err
 		}
-		effective, err := json.Marshal(dalecSpec)
+		effective, err := marshalEffectiveSpec(dalecSpec)
 		if err != nil {
-			return nil, fmt.Errorf("marshal effective Dalec spec: %w", err)
+			return nil, err
 		}
 		preflight[i] = preflightPlatform{platform: p, selection: selection, effectiveSpec: effective}
 	}
@@ -234,6 +243,14 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		return nil, err
 	}
 	return rb.Finalize()
+}
+
+func marshalEffectiveSpec(spec *dalec.Spec) ([]byte, error) {
+	effective, err := json.Marshal(spec)
+	if err != nil {
+		return nil, fmt.Errorf("marshal effective Dalec spec: %w", err)
+	}
+	return effective, nil
 }
 
 func resolveImageConfig(ctx context.Context, client gwclient.Client, ref string, p ocispec.Platform, mode, name string) (string, *dalec.DockerImageSpec, error) {
