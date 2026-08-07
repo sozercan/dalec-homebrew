@@ -224,6 +224,9 @@ func validateBaseSpec(path string) ([]string, error) {
 	if len(spec.Targets) != 0 {
 		return nil, errors.New("must not define top-level targets; the live helper reserves targets.homebrew for forwarding")
 	}
+	if err := speccontract.PreflightFormulaNames(data, "", speccontract.Capabilities{NonCoreTaps: true}); err != nil {
+		return nil, fmt.Errorf("validate runtime roots: %w", err)
+	}
 	order, err := speccontract.RuntimeDependencyOrder(data, "")
 	if err != nil {
 		return nil, err

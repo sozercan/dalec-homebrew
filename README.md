@@ -135,7 +135,7 @@ The example identity above is illustrative; use a Formula present in the public 
 
 ## Examples
 
-Start with the [forwarded hello](examples/forwarded-hello.yaml). More examples: [multi-package toolchain](examples/live-toolchain.yaml), [Python](examples/live-python.yaml), [Redis](examples/live-redis.yaml), [Graphviz](examples/live-graphviz.yaml), and [glibc](examples/live-glibc.yaml).
+Start with the standalone [forwarded hello](examples/forwarded-hello.yaml). The [multi-package toolchain](examples/live-toolchain.yaml), [Python](examples/live-python.yaml), [Redis](examples/live-redis.yaml), [Graphviz](examples/live-graphviz.yaml), and [glibc](examples/live-glibc.yaml) files are base fixtures for `scripts/live-test.sh`; the helper validates them and injects the release-bound forwarding extension and target before building.
 
 ## Learn more
 

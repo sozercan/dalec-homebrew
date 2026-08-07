@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -288,6 +289,11 @@ func TestBaseSpecValidation(t *testing.T) {
 			want: "dependencies.runtime must use map form",
 		},
 		{
+			name: "unsafe dependency key",
+			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime:\n    \"bad:key\": {}\n",
+			want: "runtime roots",
+		},
+		{
 			name: "empty targets",
 			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime:\n    hello: {}\ntargets: {}\n",
 			want: "must not define top-level targets",
@@ -313,5 +319,21 @@ func TestBaseSpecValidation(t *testing.T) {
 				t.Fatalf("err = %v, want substring %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestBaseSpecValidationRejectsRootLimit(t *testing.T) {
+	var data strings.Builder
+	data.WriteString("# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime:\n")
+	for i := 0; i <= 256; i++ {
+		fmt.Fprintf(&data, "    formula%d: {}\n", i)
+	}
+	path := filepath.Join(t.TempDir(), "spec.yaml")
+	if err := os.WriteFile(path, []byte(data.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := run([]string{"--base-spec-file", path}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "exceed maximum 256") {
+		t.Fatalf("error=%v, want root-limit rejection", err)
 	}
 }
