@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/sozercan/dalec-homebrew/internal/config"
 	"github.com/sozercan/dalec-homebrew/internal/policy"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
+	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
 func TestEnsureWritablePrefixDirectoriesV2CreatesAndRejectsUnsafePaths(t *testing.T) {
@@ -37,6 +39,51 @@ func TestEnsureWritablePrefixDirectoriesV2CreatesAndRejectsUnsafePaths(t *testin
 	}
 	if err := ensureWritablePrefixDirectoriesV2(unsafe, os.Geteuid(), os.Getegid()); err == nil || !strings.Contains(err.Error(), "not a real directory") {
 		t.Fatalf("unsafe prefix error=%v", err)
+	}
+}
+
+func TestV2InstallerIdentityIsIndependentFromRuntimeUser(t *testing.T) {
+	uid, gid, err := v2InstallerIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uid != 1000 || gid != 1000 {
+		t.Fatalf("installer identity=%d:%d, want 1000:1000", uid, gid)
+	}
+	record := materializerRuntimePolicyRecordV2(t)
+	record.Runtime.UID = 1234
+	record.Runtime.GID = 1235
+	if uid == record.Runtime.UID || gid == record.Runtime.GID {
+		t.Fatalf("installer identity unexpectedly follows runtime identity %d:%d", record.Runtime.UID, record.Runtime.GID)
+	}
+}
+
+func TestCopyPreparedBottleV2ModeIgnoresRestrictiveUmask(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source.bottle.tar.gz")
+	destination := filepath.Join(root, "prepared.bottle.tar.gz")
+	contents := []byte("verified bottle bytes")
+	if err := os.WriteFile(source, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldUmask := syscall.Umask(0o077)
+	t.Cleanup(func() { syscall.Umask(oldUmask) })
+	if err := copyPreparedBottleV2(source, destination, int64(len(contents))); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o444 {
+		t.Fatalf("prepared bottle mode=%#o, want 0444", got)
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, contents) {
+		t.Fatalf("prepared bottle=%q, want %q", got, contents)
 	}
 }
 
@@ -313,4 +360,135 @@ func TestVerifyPrebuiltDerivedBottleV2BindsPayload(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVerifyPrebuiltDerivationPolicyV2EnforcesExactAuthorization(t *testing.T) {
+	record, node, tapPolicy := prebuiltReplayPolicyFixtureV2(t)
+	if err := verifyPrebuiltDerivationPolicyV2(record, node, tapPolicy); err != nil {
+		t.Fatalf("valid authorized replay rejected: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*resolution.RecordV2, *resolution.NodeV2)
+	}{
+		{name: "unauthorized Formula", mutate: func(record *resolution.RecordV2, node *resolution.NodeV2) {
+			node.ID = "acme/tools/widget"
+			node.Tap = "acme/tools"
+			record.Requested[0].ID = node.ID
+		}},
+		{name: "version", mutate: func(_ *resolution.RecordV2, node *resolution.NodeV2) {
+			node.FormulaVersion = "0.3.4"
+			node.PkgVersion = "0.3.4"
+		}},
+		{name: "source URL", mutate: func(_ *resolution.RecordV2, node *resolution.NodeV2) {
+			node.Bottle.PrebuiltDerivation.Source.Transport.HTTPS.URL = "https://example.com/a365.tar.gz"
+		}},
+		{name: "source digest", mutate: func(_ *resolution.RecordV2, node *resolution.NodeV2) {
+			digest := "sha256:" + strings.Repeat("f", 64)
+			node.Bottle.PrebuiltDerivation.Source.SHA256 = digest
+			node.Bottle.PrebuiltDerivation.Source.Transport.HTTPS.SHA256 = digest
+		}},
+		{name: "Formula source", mutate: func(_ *resolution.RecordV2, node *resolution.NodeV2) {
+			digest := "sha256:" + strings.Repeat("f", 64)
+			node.Bottle.CurrentFormulaSourceDigest = digest
+			node.Bottle.BottleFormulaSourceDigest = digest
+			node.Bottle.PrebuiltDerivation.FormulaSource.SHA256 = digest
+		}},
+		{name: "dependency", mutate: func(_ *resolution.RecordV2, node *resolution.NodeV2) {
+			node.Dependencies = []resolution.RequirementV2{{ID: "homebrew/core/hello", Direct: true}}
+		}},
+		{name: "not requested root", mutate: func(record *resolution.RecordV2, _ *resolution.NodeV2) {
+			record.Requested = nil
+		}},
+		{name: "install destination", mutate: func(_ *resolution.RecordV2, node *resolution.NodeV2) {
+			node.Bottle.PrebuiltDerivation.Payload.DestinationPath = "bin/other"
+		}},
+		{name: "recipe digest", mutate: func(_ *resolution.RecordV2, node *resolution.NodeV2) {
+			node.Bottle.PrebuiltDerivation.RecipeDigest = "sha256:" + strings.Repeat("f", 64)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			record, node, tapPolicy := prebuiltReplayPolicyFixtureV2(t)
+			test.mutate(record, &node)
+			if err := verifyPrebuiltDerivationPolicyV2(record, node, tapPolicy); err == nil {
+				t.Fatal("tampered prebuilt replay accepted")
+			}
+		})
+	}
+}
+
+func prebuiltReplayPolicyFixtureV2(t *testing.T) (*resolution.RecordV2, resolution.NodeV2, *policyv2.TapPolicy) {
+	t.Helper()
+	tapPolicy, err := policyv2.LoadTapPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization, ok := tapPolicy.PrebuiltArchiveForFormula("sozercan/repo/a365")
+	if !ok {
+		t.Fatal("embedded a365 prebuilt authorization is missing")
+	}
+	tapDigest, err := policyv2.TapPolicyDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	platform := authorization.Platforms[0]
+	if platform.Platform != "linux/amd64" {
+		t.Fatalf("first prebuilt platform=%q, want linux/amd64", platform.Platform)
+	}
+	archiveMode, err := authorizedArchiveModeV2(authorization, authorization.Install.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installMode, err := parsePrebuiltPolicyModeV2(authorization.Install.Mode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generatedAt := time.Unix(1_800_000_000, 0).UTC()
+	sourceSize := int64(1024)
+	derivation := &resolution.PrebuiltDerivationV2{
+		PolicyVersion: authorization.PolicyVersion,
+		PolicyDigest:  tapDigest,
+		Source: resolution.PrebuiltSourceArtifactV2{
+			Filename: "a365_0.3.3_linux_amd64.tar.gz",
+			Size:     sourceSize,
+			SHA256:   platform.SHA256,
+			Format:   authorization.Archive.Format,
+			Transport: resolution.BottleTransport{HTTPS: &resolution.HTTPSTransport{
+				URL: platform.URL, ExpectedSize: sourceSize, SHA256: platform.SHA256, Filename: "a365_0.3.3_linux_amd64.tar.gz",
+			}},
+		},
+		SourceInventory: resolution.PrebuiltSourceInventoryV2{InventoryDigest: "sha256:" + strings.Repeat("a", 64), EntryCount: len(authorization.Archive.Members), ExpandedSize: 2048},
+		Payload: resolution.PrebuiltPayloadEvidenceV2{
+			SourcePath: authorization.Install.Source, DestinationPath: authorization.Install.Destination,
+			SHA256: "sha256:" + strings.Repeat("b", 64), Size: 512, ArchiveMode: archiveMode, DerivedMode: installMode,
+		},
+		ELF: resolution.PrebuiltELFEvidenceV2{
+			Format: authorization.Binary.Format, Machine: "x86_64", StaticallyLinked: true,
+			NeededLibraries: []string{}, RPaths: []string{},
+		},
+		FormulaSource: resolution.PrebuiltFormulaSourceEvidenceV2{SHA256: authorization.FormulaSourceDigest, Size: 128},
+	}
+	node := resolution.NodeV2{
+		ID: "sozercan/repo/a365", Tap: "sozercan/repo", Name: "a365", HomebrewFullName: "sozercan/repo/a365",
+		FormulaVersion: authorization.Version, PkgVersion: authorization.Version, License: authorization.License,
+		Bottle: resolution.BottleV2{
+			CurrentFormulaSourceDigest: authorization.FormulaSourceDigest,
+			BottleFormulaSourceDigest:  authorization.FormulaSourceDigest,
+			Tab:                        resolution.BottleTabV2{Receiptless: true},
+			PrebuiltDerivation:         derivation,
+		},
+	}
+	record := &resolution.RecordV2{
+		Input:           resolution.Input{Platform: resolution.Platform{OS: "linux", Architecture: "amd64"}},
+		Requested:       []resolution.RequestedRootV2{{Requested: node.ID.String(), ID: node.ID}},
+		MetadataSources: []resolution.MetadataSource{{Tap: node.Tap, GeneratedAt: generatedAt}},
+		Components:      resolution.ComponentsV2{TapPolicyDigest: tapDigest},
+	}
+	recipeDigest, err := expectedPrebuiltRecipeDigestV2(record, node, authorization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	derivation.RecipeDigest = recipeDigest
+	return record, node, tapPolicy
 }

@@ -123,11 +123,15 @@ func StageFormulaeV2(prefix string, record *resolution.RecordV2, verified map[re
 			return nil, err
 		}
 		target := filepath.Join(prefix, filepath.FromSlash(relative))
-		if err := mkdirAllNoSymlink(prefix, filepath.Dir(target), 0o555); err != nil {
+		parent := filepath.Dir(target)
+		if err := mkdirAllNoSymlink(prefix, parent, 0o755); err != nil {
 			return nil, err
 		}
 		if err := writeExclusiveSealed(target, result.FormulaSource); err != nil {
 			return nil, fmt.Errorf("stage Formula %q: %w", node.ID, err)
+		}
+		if err := mkdirAllNoSymlink(prefix, parent, 0o555); err != nil {
+			return nil, fmt.Errorf("seal staged Formula tree for %q: %w", node.ID, err)
 		}
 		evidence = append(evidence, StagedFormulaEvidenceV2{ID: node.ID, Tap: node.Tap, Name: node.Name, Path: relative, SHA256: actual, Size: int64(len(result.FormulaSource))})
 	}
@@ -152,6 +156,7 @@ func mkdirAllNoSymlink(root, target string, mode os.FileMode) error {
 		return errors.New("staging path escapes prefix")
 	}
 	current := root
+	directories := make([]string, 0, strings.Count(relative, string(filepath.Separator))+1)
 	for _, component := range strings.Split(relative, string(filepath.Separator)) {
 		if component == "" || component == "." {
 			continue
@@ -159,9 +164,14 @@ func mkdirAllNoSymlink(root, target string, mode os.FileMode) error {
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) {
-			if err := os.Mkdir(current, mode); err != nil {
+			// Keep newly-created parents writable until the complete hierarchy
+			// exists, then seal every ancestor below. os.Mkdir applies the process
+			// umask, so the final explicit chmod is required for non-root Homebrew
+			// to traverse the staged tap tree.
+			if err := os.Mkdir(current, mode.Perm()|0o200); err != nil {
 				return err
 			}
+			directories = append(directories, current)
 			continue
 		}
 		if err != nil {
@@ -172,6 +182,12 @@ func mkdirAllNoSymlink(root, target string, mode os.FileMode) error {
 		}
 		if info.Mode().Perm()&0o022 != 0 {
 			return fmt.Errorf("staging ancestor %s is group/world writable", current)
+		}
+		directories = append(directories, current)
+	}
+	for i := len(directories) - 1; i >= 0; i-- {
+		if err := os.Chmod(directories[i], mode.Perm()); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -190,6 +206,11 @@ func writeExclusiveSealed(filename string, data []byte) error {
 		}
 	}()
 	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	// OpenFile creation modes are filtered through umask. Reassert the exact
+	// sealed mode before publishing the file to the non-root pour phase.
+	if err := file.Chmod(0o444); err != nil {
 		return err
 	}
 	if err := file.Sync(); err != nil {

@@ -53,12 +53,18 @@ func inspectPayload(payload []byte, profile Profile) (ELFEvidence, GoBuildEviden
 	if !executableLoad || !entryInExecutableLoad {
 		return ELFEvidence{}, GoBuildEvidence{}, verificationError(CodeInvalidELF, profile.PayloadPath, "ELF entry point is not contained in an executable PT_LOAD segment")
 	}
-	hasNeeded, err := dynamicSegmentHasNeeded(payload, file)
+	dynamicTags, err := forbiddenDynamicTags(payload, file)
 	if err != nil {
 		return ELFEvidence{}, GoBuildEvidence{}, verificationError(CodeInvalidELF, profile.PayloadPath, "inspect PT_DYNAMIC: %v", err)
 	}
-	if hasNeeded {
+	if dynamicTags.needed {
 		return ELFEvidence{}, GoBuildEvidence{}, verificationError(CodeInvalidELF, profile.PayloadPath, "DT_NEEDED entries are forbidden")
+	}
+	if dynamicTags.rpath {
+		return ELFEvidence{}, GoBuildEvidence{}, verificationError(CodeInvalidELF, profile.PayloadPath, "DT_RPATH entries are forbidden")
+	}
+	if dynamicTags.runpath {
+		return ELFEvidence{}, GoBuildEvidence{}, verificationError(CodeInvalidELF, profile.PayloadPath, "DT_RUNPATH entries are forbidden")
 	}
 	libraries, err := file.ImportedLibraries()
 	if err != nil {
@@ -128,16 +134,23 @@ func inspectPayload(payload []byte, profile Profile) (ELFEvidence, GoBuildEviden
 		}, nil
 }
 
-func dynamicSegmentHasNeeded(payload []byte, file *elf.File) (bool, error) {
+type dynamicTagSet struct {
+	needed  bool
+	rpath   bool
+	runpath bool
+}
+
+func forbiddenDynamicTags(payload []byte, file *elf.File) (dynamicTagSet, error) {
+	var found dynamicTagSet
 	for _, program := range file.Progs {
 		if program.Type != elf.PT_DYNAMIC {
 			continue
 		}
 		if program.Off > uint64(len(payload)) || program.Filesz > uint64(len(payload))-program.Off {
-			return false, fmt.Errorf("PT_DYNAMIC extends beyond the payload")
+			return dynamicTagSet{}, fmt.Errorf("PT_DYNAMIC extends beyond the payload")
 		}
 		if program.Filesz == 0 || program.Filesz%16 != 0 {
-			return false, fmt.Errorf("PT_DYNAMIC size %d is not a positive multiple of 16", program.Filesz)
+			return dynamicTagSet{}, fmt.Errorf("PT_DYNAMIC size %d is not a positive multiple of 16", program.Filesz)
 		}
 		dynamic := payload[int(program.Off):int(program.Off+program.Filesz)]
 		terminated := false
@@ -149,14 +162,34 @@ func dynamicSegmentHasNeeded(payload []byte, file *elf.File) (bool, error) {
 				terminated = true
 				dynamic = nil
 			case elf.DT_NEEDED:
-				return true, nil
+				found.needed = true
+			case elf.DT_RPATH:
+				found.rpath = true
+			case elf.DT_RUNPATH:
+				found.runpath = true
 			}
 		}
 		if !terminated {
-			return false, fmt.Errorf("PT_DYNAMIC is not terminated by DT_NULL")
+			return dynamicTagSet{}, fmt.Errorf("PT_DYNAMIC is not terminated by DT_NULL")
 		}
 	}
-	return false, nil
+	for _, dynamic := range []struct {
+		tag     elf.DynTag
+		present *bool
+	}{
+		{tag: elf.DT_NEEDED, present: &found.needed},
+		{tag: elf.DT_RPATH, present: &found.rpath},
+		{tag: elf.DT_RUNPATH, present: &found.runpath},
+	} {
+		values, err := file.DynString(dynamic.tag)
+		if err != nil {
+			return dynamicTagSet{}, err
+		}
+		if len(values) != 0 {
+			*dynamic.present = true
+		}
+	}
+	return found, nil
 }
 
 func parseCGOValue(value string) (bool, error) {

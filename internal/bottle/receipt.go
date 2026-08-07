@@ -331,7 +331,7 @@ func normalizeDiscoveredReceiptDependencies(deps []ReceiptDependency) ([]Receipt
 			return nil, fmt.Errorf("runtime dependency %d has invalid full_name %q: %w", index, dependency.FullName, err)
 		}
 		if dependency.Version == "" || strings.TrimSpace(dependency.Version) != dependency.Version ||
-			strings.ContainsAny(dependency.Version, `/\ \t\r\n`) || containsControl(dependency.Version) {
+			strings.ContainsAny(dependency.Version, "/\\ \t\r\n") || containsControl(dependency.Version) {
 			return nil, fmt.Errorf("runtime dependency %q has invalid version %q", dependency.FullName, dependency.Version)
 		}
 		if dependency.Revision < 0 {

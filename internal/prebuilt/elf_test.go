@@ -51,6 +51,10 @@ func TestELFRejectsInterpreterImportedLibrariesAndWritableExecutableSegments(t *
 		{name: "writable executable segment", payload: withWritableExecutable},
 		{name: "DT_NEEDED section", payload: withDynamicSection},
 		{name: "sectionless PT_DYNAMIC DT_NEEDED", payload: withDynamicProgram},
+		{name: "DT_RPATH section", payload: setFirstDynamicTag(withDynamicSection, elf.DT_RPATH)},
+		{name: "sectionless PT_DYNAMIC DT_RPATH", payload: setFirstDynamicTag(withDynamicProgram, elf.DT_RPATH)},
+		{name: "DT_RUNPATH section", payload: setFirstDynamicTag(withDynamicSection, elf.DT_RUNPATH)},
+		{name: "sectionless PT_DYNAMIC DT_RUNPATH", payload: setFirstDynamicTag(withDynamicProgram, elf.DT_RUNPATH)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -59,6 +63,12 @@ func TestELFRejectsInterpreterImportedLibrariesAndWritableExecutableSegments(t *
 			requireErrorCode(t, err, CodeInvalidELF)
 		})
 	}
+}
+
+func setFirstDynamicTag(payload []byte, tag elf.DynTag) []byte {
+	out := append([]byte(nil), payload...)
+	binary.LittleEndian.PutUint64(out[0x200:0x208], uint64(tag))
+	return out
 }
 
 func TestELFRequiresGoBuildInfoAndExactSettings(t *testing.T) {
