@@ -1259,20 +1259,26 @@ jobs:
             for platform in linux/amd64 linux/arm64; do
               platform_slug=${platform//\//-}
               archive="$runtime_evidence_dir/runtime-evidence-${platform_slug}-${spec}.tar.gz"
-              test -s "$archive"
+              if [[ ! -s "$archive" ]]; then
+                echo "missing or empty runtime evidence archive: $archive" >&2
+                exit 1
+              fi
               frontend_ref=$(jq -er --arg platform "$platform" '.components.frontend.repository + "@" + .components.frontend.platforms[$platform]' dist/release/digests.json)
-              runtime_base_ref=$(jq -er --arg platform "$platform" '.components["runtime-base"].repository + "@" + .components["runtime-base"].platforms[$platform]' dist/release/digests.json)
-              materializer_ref=$(jq -er --arg platform "$platform" '.components.materializer.repository + "@" + .components.materializer.platforms[$platform]' dist/release/digests.json)
+              runtime_base_ref=$(jq -er '.components["runtime-base"].repository + "@" + .components["runtime-base"].index' dist/release/digests.json)
+              materializer_ref=$(jq -er '.components.materializer.repository + "@" + .components.materializer.index' dist/release/digests.json)
               resolution="$RUNNER_TEMP/${spec}-${platform_slug}-resolution.json"
               extract_resolution "$archive" "$resolution"
-              jq -e \
+              if ! jq -e \
                 --arg platform "$platform" \
                 --arg frontend "$frontend_ref" \
                 --arg runtime_base "$runtime_base_ref" \
                 --arg materializer "$materializer_ref" \
                 --slurpfile manifest dist/release/components.json \
                 --slurpfile inputs dist/release/inputs.json \
-                "$resolution_binding_filter" "$resolution" >/dev/null
+                "$resolution_binding_filter" "$resolution" >/dev/null; then
+                echo "runtime evidence binding mismatch for $spec on $platform: expected the frontend child and runtime-base/materializer indexes" >&2
+                exit 1
+              fi
               verify_resolution_epoch "$resolution"
               jq -S -e "$metadata_filter" "$resolution" \
                 > "$RUNNER_TEMP/${spec}-${platform_slug#linux-}-metadata.json"
