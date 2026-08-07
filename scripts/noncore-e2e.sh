@@ -162,6 +162,36 @@ FRONTEND_REF=$(build_component "V2 frontend" frontend dalec-homebrew \
   --build-arg "MATERIALIZER_REF=$MATERIALIZER_REF" \
   "${V2_BUILD_ARGS[@]}")
 
+cat > "$WORK/list-form-spec.yaml" <<EOF_LIST_SPEC
+# syntax=$DALEC_FRONTEND_REF
+x-dalec-homebrew:
+  schema_version: dalec-homebrew-forwarding/v1
+  target: homebrew
+  runtime_dependency_order: [hello]
+dependencies:
+  runtime: [hello]
+targets:
+  homebrew:
+    frontend:
+      image: $FRONTEND_REF
+EOF_LIST_SPEC
+if docker buildx build \
+  --builder "$BUILDER" \
+  --platform "$PLATFORM" \
+  --progress="$PROGRESS" \
+  --target "$DALEC_ROUTE" \
+  --file "$WORK/list-form-spec.yaml" \
+  . >"$WORK/list-form.log" 2>&1; then
+  echo "upstream Dalec accepted unsupported list-form runtime dependencies" >&2
+  exit 1
+fi
+grep -F 'extension runtime_dependency_order has 1 entries; selected runtime dependencies have 0' \
+  "$WORK/list-form.log" >/dev/null || {
+    cat "$WORK/list-form.log" >&2
+    echo "list-form rejection did not fail at the expected forwarding-order boundary" >&2
+    exit 1
+  }
+
 DALEC_HOMEBREW_LIVE_BUILDER="$BUILDER" \
 DALEC_HOMEBREW_LIVE_PLATFORM="$PLATFORM" \
 DALEC_HOMEBREW_LIVE_SPEC="$SPEC" \

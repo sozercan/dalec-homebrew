@@ -55,6 +55,8 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 		`--pinned-ref "DALEC_HOMEBREW_E2E_REGISTRY_IMAGE=$REGISTRY_IMAGE"`,
 		`DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN="$DALEC_FRONTEND_PIN"`,
 		"DALEC_HOMEBREW_E2E_DALEC_ROUTE=$DALEC_ROUTE",
+		"upstream Dalec accepted unsupported list-form runtime dependencies",
+		"extension runtime_dependency_order has 1 entries; selected runtime dependencies have 0",
 		`--catalog-extractor-ref "$EXTRACTOR_REF"`,
 		`--build-arg "CATALOG_EXTRACTOR_REF=$EXTRACTOR_REF"`,
 		"docker run --rm --network none",

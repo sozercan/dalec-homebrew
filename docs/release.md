@@ -62,7 +62,10 @@ complete external binding.
 Release integration also derives the required `x-dalec-homebrew` root-order
 sequence from each reviewed base fixture before forwarding. The child validates
 that sequence against the selected dependency map and commits it to the
-versioned effective-input digest used by the resolution record.
+versioned effective-input digest used by the resolution record. The non-core
+integration test also sends a list-form dependency through the exact pinned
+upstream image and requires the child to reject it at this order boundary; a pin
+update cannot silently broaden the map-only contract.
 
 The `dalec-homebrew` child can authenticate its own gateway `source`, but the
 BuildKit forwarding protocol does not give it an authenticated identity for the
