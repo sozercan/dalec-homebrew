@@ -12,9 +12,12 @@ const (
 	DefaultInstallPrefix = "/home/linuxbrew/.linuxbrew"
 
 	InventorySchemaVersion              = "dalec-homebrew-runtime-inventory/v1"
+	InventorySchemaVersionV2            = "dalec-homebrew-runtime-inventory/v2"
 	PruneSchemaVersion                  = "dalec-homebrew-prune-manifest/v2"
+	PruneSchemaVersionV2                = "dalec-homebrew-prune-manifest/v3"
 	PruneSubtreeCommitmentSchemaVersion = "dalec-homebrew-prune-subtree-commitment/v1"
 	ManifestSchemaVersion               = "dalec-homebrew-runtime-manifest/v1"
+	ManifestSchemaVersionV2             = "dalec-homebrew-runtime-manifest/v2"
 
 	InventoryFileName = "runtime-inventory.json"
 	PruneFileName     = "prune-manifest.json"
@@ -94,6 +97,7 @@ type InventoryEntry struct {
 	LinkTarget string    `json:"link_target,omitempty"`
 	HardlinkTo string    `json:"hardlink_to,omitempty"`
 	Package    string    `json:"package,omitempty"`
+	FormulaID  string    `json:"formula_id,omitempty"`
 	Writable   bool      `json:"writable,omitempty"`
 }
 
@@ -139,6 +143,7 @@ type PruneEntry struct {
 	LinkTarget     string      `json:"link_target,omitempty"`
 	Reason         PruneReason `json:"reason"`
 	Package        string      `json:"package,omitempty"`
+	FormulaID      string      `json:"formula_id,omitempty"`
 	MetadataExport string      `json:"metadata_export,omitempty"`
 	ExportedTo     []string    `json:"exported_to,omitempty"`
 }
@@ -178,6 +183,7 @@ type PruneManifest struct {
 // identity and source digest were exported.
 type MetadataExport struct {
 	Package    string `json:"package"`
+	FormulaID  string `json:"formula_id,omitempty"`
 	Kind       string `json:"kind"`
 	SourcePath string `json:"source_path"`
 	SHA256     string `json:"sha256"`
@@ -187,19 +193,21 @@ type MetadataExport struct {
 // RuntimePackage is the compact non-secret package identity embedded in the
 // final image.
 type RuntimePackage struct {
-	Name             string           `json:"name"`
-	FullName         string           `json:"full_name"`
-	FormulaVersion   string           `json:"formula_version"`
-	FormulaRevision  int              `json:"formula_revision"`
-	PkgVersion       string           `json:"pkg_version"`
-	VersionScheme    int              `json:"version_scheme"`
-	BottleRebuild    int              `json:"bottle_rebuild"`
-	BottleTag        string           `json:"bottle_tag"`
-	BottleLayer      string           `json:"bottle_layer_digest"`
-	BottleLayerSize  int64            `json:"bottle_layer_size"`
-	License          string           `json:"license,omitempty"`
-	KegPath          string           `json:"keg_path"`
-	ExportedMetadata []MetadataExport `json:"exported_metadata,omitempty"`
+	FormulaID         string           `json:"formula_id,omitempty"`
+	UpstreamFormulaID string           `json:"upstream_formula_id,omitempty"`
+	Name              string           `json:"name"`
+	FullName          string           `json:"full_name"`
+	FormulaVersion    string           `json:"formula_version"`
+	FormulaRevision   int              `json:"formula_revision"`
+	PkgVersion        string           `json:"pkg_version"`
+	VersionScheme     int              `json:"version_scheme"`
+	BottleRebuild     int              `json:"bottle_rebuild"`
+	BottleTag         string           `json:"bottle_tag"`
+	BottleLayer       string           `json:"bottle_layer_digest"`
+	BottleLayerSize   int64            `json:"bottle_layer_size"`
+	License           string           `json:"license,omitempty"`
+	KegPath           string           `json:"keg_path"`
+	ExportedMetadata  []MetadataExport `json:"exported_metadata,omitempty"`
 }
 
 // RuntimeManifest is suitable for embedding at

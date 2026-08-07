@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sozercan/dalec-homebrew/internal/homebrew/formulaid"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -41,8 +42,62 @@ type Result struct {
 	Layer               ocispec.Descriptor
 	Tab                 resolution.BottleTab
 	SelectedAnnotations map[string]string
+	ManifestAnnotations map[string]string
 	ExecutablePaths     []string
 }
+
+// AuthenticatedResult is the V2 counterpart of Result. It preserves the exact
+// verified descriptor chain while retaining the catalog-authenticated tap,
+// source, commit, Formula path, and full-name identity used to validate OCI
+// annotations.
+type AuthenticatedResult struct {
+	Formula             AuthenticatedFormula
+	Reference           FormulaReference
+	Target              ocispec.Platform
+	SelectedBottleTag   string
+	SelectedChildTag    string
+	Filename            string
+	Cellar              string
+	HomebrewSHA256      string
+	Index               ocispec.Descriptor
+	Manifest            ocispec.Descriptor
+	Config              ocispec.Descriptor
+	Layer               ocispec.Descriptor
+	Tab                 resolution.BottleTab
+	SelectedAnnotations map[string]string
+	ManifestAnnotations map[string]string
+	ExecutablePaths     []string
+}
+
+// ReplayReference returns the immutable repository@layer-digest reference used
+// to materialize the already-verified bottle without replaying a mutable tag.
+func (result *AuthenticatedResult) ReplayReference() string {
+	if result == nil || result.Reference.CanonicalRepository == "" || result.Layer.Digest == "" {
+		return ""
+	}
+	return result.Reference.CanonicalRepository + "@" + result.Layer.Digest.String()
+}
+
+type resolvedBottle struct {
+	reference           FormulaReference
+	target              ocispec.Platform
+	selectedBottleTag   string
+	selectedChildTag    string
+	filename            string
+	cellar              string
+	homebrewSHA256      string
+	index               ocispec.Descriptor
+	manifest            ocispec.Descriptor
+	config              ocispec.Descriptor
+	layer               ocispec.Descriptor
+	tab                 resolution.BottleTab
+	selectedAnnotations map[string]string
+	manifestAnnotations map[string]string
+	executablePaths     []string
+}
+
+type commonAnnotationValidator func(map[string]string, string, string, string) error
+type bottleTabParser func(string, ocispec.Platform, bool) (resolution.BottleTab, error)
 
 // Resolve selects and verifies a current stable Homebrew bottle for target.
 func Resolve(ctx context.Context, client *Client, formula Formula, target ocispec.Platform) (*Result, error) {
@@ -61,78 +116,211 @@ func (client *Client) Resolve(ctx context.Context, formula Formula, target ocisp
 	if err != nil {
 		return nil, err
 	}
-	selectedBottleTag, bottleFile, err := selectBottleFile(formula, target)
+	commonAnnotations := func(annotations map[string]string, pkgVersion, refName, title string) error {
+		return validateCommonAnnotations(annotations, formula.Name, pkgVersion, refName, title)
+	}
+	resolved, err := client.resolveDescriptorChain(
+		ctx,
+		formula.Name,
+		formula.Name,
+		formula.License,
+		formula.BottleRebuild,
+		formula.BottleFiles,
+		reference,
+		target,
+		formula.Name,
+		formula.Name,
+		commonAnnotations,
+		parseBottleTab,
+	)
 	if err != nil {
 		return nil, err
 	}
-	childTag, err := ChildTag(reference.PkgVersion, selectedBottleTag, formula.BottleRebuild)
+	return &Result{
+		Formula:             cloneFormula(formula),
+		Reference:           resolved.reference,
+		Target:              resolved.target,
+		SelectedBottleTag:   resolved.selectedBottleTag,
+		SelectedChildTag:    resolved.selectedChildTag,
+		Filename:            resolved.filename,
+		Cellar:              resolved.cellar,
+		HomebrewSHA256:      resolved.homebrewSHA256,
+		Index:               resolved.index,
+		Manifest:            resolved.manifest,
+		Config:              resolved.config,
+		Layer:               resolved.layer,
+		Tab:                 resolved.tab,
+		SelectedAnnotations: resolved.selectedAnnotations,
+		ManifestAnnotations: resolved.manifestAnnotations,
+		ExecutablePaths:     resolved.executablePaths,
+	}, nil
+}
+
+// ResolveAuthenticated selects and verifies a catalog-authenticated V2
+// Formula bottle for target.
+func ResolveAuthenticated(ctx context.Context, client *Client, formula AuthenticatedFormula, target ocispec.Platform) (*AuthenticatedResult, error) {
+	if client == nil {
+		return nil, errors.New("nil OCI client")
+	}
+	return client.ResolveAuthenticated(ctx, formula, target)
+}
+
+// ResolveAuthenticated selects and verifies a catalog-authenticated V2
+// Formula bottle for target while binding all OCI identity annotations to the
+// authenticated tap source.
+func (client *Client) ResolveAuthenticated(ctx context.Context, formula AuthenticatedFormula, target ocispec.Platform) (*AuthenticatedResult, error) {
+	if err := validateTarget(target); err != nil {
+		return nil, err
+	}
+	reference, err := ResolveAuthenticatedFormulaReference(formula)
 	if err != nil {
 		return nil, err
 	}
-	filename, err := BottleFilename(formula.Name, reference.PkgVersion, selectedBottleTag, formula.BottleRebuild)
+	commonAnnotations := func(annotations map[string]string, pkgVersion, refName, title string) error {
+		return validateAuthenticatedCommonAnnotations(annotations, formula.Identity, pkgVersion, refName, title)
+	}
+	resolved, err := client.resolveDescriptorChain(
+		ctx,
+		formula.Identity.ID().String(),
+		formula.Identity.Name(),
+		formula.License,
+		formula.BottleRebuild,
+		formula.BottleFiles,
+		reference,
+		target,
+		formula.Identity.HomebrewFullName(),
+		formula.Identity.HomebrewFullName(),
+		commonAnnotations,
+		parseAuthenticatedBottleTab,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &AuthenticatedResult{
+		Formula:             cloneAuthenticatedFormula(formula),
+		Reference:           resolved.reference,
+		Target:              resolved.target,
+		SelectedBottleTag:   resolved.selectedBottleTag,
+		SelectedChildTag:    resolved.selectedChildTag,
+		Filename:            resolved.filename,
+		Cellar:              resolved.cellar,
+		HomebrewSHA256:      resolved.homebrewSHA256,
+		Index:               resolved.index,
+		Manifest:            resolved.manifest,
+		Config:              resolved.config,
+		Layer:               resolved.layer,
+		Tab:                 resolved.tab,
+		SelectedAnnotations: resolved.selectedAnnotations,
+		ManifestAnnotations: resolved.manifestAnnotations,
+		ExecutablePaths:     resolved.executablePaths,
+	}, nil
+}
+
+func (client *Client) resolveDescriptorChain(
+	ctx context.Context,
+	formulaLabel string,
+	formulaName string,
+	license string,
+	bottleRebuild int,
+	bottleFiles map[string]BottleFile,
+	reference FormulaReference,
+	target ocispec.Platform,
+	indexTitle string,
+	manifestTitlePrefix string,
+	validateAnnotations commonAnnotationValidator,
+	parseTab bottleTabParser,
+) (*resolvedBottle, error) {
+	selectedBottleTag, bottleFile, err := selectBottleFileFromMap(formulaLabel, bottleFiles, target)
+	if err != nil {
+		return nil, err
+	}
+	childTag, err := ChildTag(reference.PkgVersion, selectedBottleTag, bottleRebuild)
+	if err != nil {
+		return nil, err
+	}
+	filename, err := BottleFilename(formulaName, reference.PkgVersion, selectedBottleTag, bottleRebuild)
 	if err != nil {
 		return nil, err
 	}
 
 	indexContent, err := client.FetchIndex(ctx, reference.Repository, reference.IndexTag)
 	if err != nil {
-		return nil, fmt.Errorf("fetch Formula %q OCI index: %w", formula.Name, err)
+		return nil, fmt.Errorf("fetch Formula %q OCI index: %w", formulaLabel, err)
 	}
 	var index ocispec.Index
 	if err := decodeJSON(indexContent.Bytes, &index); err != nil {
-		return nil, fmt.Errorf("decode Formula %q OCI index: %w", formula.Name, err)
+		return nil, fmt.Errorf("decode Formula %q OCI index: %w", formulaLabel, err)
 	}
-	selected, tab, executablePaths, err := validateAndSelectIndex(client.limits, index, formula, reference, target, selectedBottleTag, childTag, bottleFile)
+	selected, tab, executablePaths, err := validateAndSelectIndexWith(
+		client.limits,
+		index,
+		formulaLabel,
+		license,
+		reference,
+		target,
+		selectedBottleTag,
+		childTag,
+		bottleFile,
+		indexTitle,
+		validateAnnotations,
+		parseTab,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("validate Formula %q OCI index: %w", formula.Name, err)
+		return nil, fmt.Errorf("validate Formula %q OCI index: %w", formulaLabel, err)
 	}
 
 	manifestContent, err := client.FetchManifest(ctx, reference.Repository, selected)
 	if err != nil {
-		return nil, fmt.Errorf("fetch Formula %q child manifest: %w", formula.Name, err)
+		return nil, fmt.Errorf("fetch Formula %q child manifest: %w", formulaLabel, err)
 	}
 	var manifest ocispec.Manifest
 	if err := decodeJSON(manifestContent.Bytes, &manifest); err != nil {
-		return nil, fmt.Errorf("decode Formula %q child manifest: %w", formula.Name, err)
+		return nil, fmt.Errorf("decode Formula %q child manifest: %w", formulaLabel, err)
 	}
-	if err := validateManifest(client.limits, manifest, formula, reference, selected, childTag, filename, bottleFile); err != nil {
-		return nil, fmt.Errorf("validate Formula %q child manifest: %w", formula.Name, err)
+	if err := validateManifestWith(
+		client.limits,
+		manifest,
+		reference,
+		selected,
+		childTag,
+		filename,
+		bottleFile,
+		manifestTitlePrefix+" "+childTag,
+		validateAnnotations,
+	); err != nil {
+		return nil, fmt.Errorf("validate Formula %q child manifest: %w", formulaLabel, err)
 	}
 
 	configContent, err := client.FetchConfig(ctx, reference.Repository, manifest.Config)
 	if err != nil {
-		return nil, fmt.Errorf("fetch Formula %q image config: %w", formula.Name, err)
+		return nil, fmt.Errorf("fetch Formula %q image config: %w", formulaLabel, err)
 	}
 	var config ocispec.Image
 	if err := decodeJSON(configContent.Bytes, &config); err != nil {
-		return nil, fmt.Errorf("decode Formula %q image config: %w", formula.Name, err)
+		return nil, fmt.Errorf("decode Formula %q image config: %w", formulaLabel, err)
 	}
 	if err := validateConfig(config, target, selectedBottleTag == BottleTagAll); err != nil {
-		return nil, fmt.Errorf("validate Formula %q image config: %w", formula.Name, err)
+		return nil, fmt.Errorf("validate Formula %q image config: %w", formulaLabel, err)
 	}
 
 	indexDescriptor := cloneDescriptor(indexContent.Descriptor)
 	indexDescriptor.Annotations = cloneAnnotations(index.Annotations)
-	manifestDescriptor := cloneDescriptor(selected)
-	configDescriptor := cloneDescriptor(manifest.Config)
-	layerDescriptor := cloneDescriptor(manifest.Layers[0])
-
-	return &Result{
-		Formula:             cloneFormula(formula),
-		Reference:           reference,
-		Target:              target,
-		SelectedBottleTag:   selectedBottleTag,
-		SelectedChildTag:    childTag,
-		Filename:            filename,
-		Cellar:              bottleFile.Cellar,
-		HomebrewSHA256:      bottleFile.SHA256,
-		Index:               indexDescriptor,
-		Manifest:            manifestDescriptor,
-		Config:              configDescriptor,
-		Layer:               layerDescriptor,
-		Tab:                 tab,
-		SelectedAnnotations: cloneAnnotations(selected.Annotations),
-		ExecutablePaths:     append([]string(nil), executablePaths...),
+	return &resolvedBottle{
+		reference:           reference,
+		target:              target,
+		selectedBottleTag:   selectedBottleTag,
+		selectedChildTag:    childTag,
+		filename:            filename,
+		cellar:              bottleFile.Cellar,
+		homebrewSHA256:      bottleFile.SHA256,
+		index:               indexDescriptor,
+		manifest:            cloneDescriptor(selected),
+		config:              cloneDescriptor(manifest.Config),
+		layer:               cloneDescriptor(manifest.Layers[0]),
+		tab:                 tab,
+		selectedAnnotations: cloneAnnotations(selected.Annotations),
+		manifestAnnotations: cloneAnnotations(manifest.Annotations),
+		executablePaths:     append([]string(nil), executablePaths...),
 	}, nil
 }
 
@@ -203,26 +391,63 @@ func (result *Result) ResolutionNode() resolution.Node {
 }
 
 func selectBottleFile(formula Formula, target ocispec.Platform) (string, BottleFile, error) {
+	return selectBottleFileFromMap(formula.Name, formula.BottleFiles, target)
+}
+
+func selectBottleFileFromMap(formulaLabel string, bottleFiles map[string]BottleFile, target ocispec.Platform) (string, BottleFile, error) {
 	targetTag, err := targetBottleTag(target)
 	if err != nil {
 		return "", BottleFile{}, err
 	}
-	if file, ok := formula.BottleFiles[targetTag]; ok {
-		if err := validateBottleFile(formula.Name, targetTag, file); err != nil {
+	if file, ok := bottleFiles[targetTag]; ok {
+		if err := validateBottleFile(formulaLabel, targetTag, file); err != nil {
 			return "", BottleFile{}, err
 		}
 		return targetTag, file, nil
 	}
-	if file, ok := formula.BottleFiles[BottleTagAll]; ok {
-		if err := validateBottleFile(formula.Name, BottleTagAll, file); err != nil {
+	if file, ok := bottleFiles[BottleTagAll]; ok {
+		if err := validateBottleFile(formulaLabel, BottleTagAll, file); err != nil {
 			return "", BottleFile{}, err
 		}
 		return BottleTagAll, file, nil
 	}
-	return "", BottleFile{}, fmt.Errorf("formula %q has no %s or all bottle in authenticated metadata", formula.Name, targetTag)
+	return "", BottleFile{}, fmt.Errorf("formula %q has no %s or all bottle in authenticated metadata", formulaLabel, targetTag)
 }
 
 func validateAndSelectIndex(limits Limits, index ocispec.Index, formula Formula, reference FormulaReference, target ocispec.Platform, selectedBottleTag, childTag string, bottleFile BottleFile) (ocispec.Descriptor, resolution.BottleTab, []string, error) {
+	commonAnnotations := func(annotations map[string]string, pkgVersion, refName, title string) error {
+		return validateCommonAnnotations(annotations, formula.Name, pkgVersion, refName, title)
+	}
+	return validateAndSelectIndexWith(
+		limits,
+		index,
+		formula.Name,
+		formula.License,
+		reference,
+		target,
+		selectedBottleTag,
+		childTag,
+		bottleFile,
+		formula.Name,
+		commonAnnotations,
+		parseBottleTab,
+	)
+}
+
+func validateAndSelectIndexWith(
+	limits Limits,
+	index ocispec.Index,
+	_ string,
+	license string,
+	reference FormulaReference,
+	target ocispec.Platform,
+	selectedBottleTag string,
+	childTag string,
+	bottleFile BottleFile,
+	indexTitle string,
+	validateAnnotations commonAnnotationValidator,
+	parseTab bottleTabParser,
+) (ocispec.Descriptor, resolution.BottleTab, []string, error) {
 	if index.SchemaVersion != 2 {
 		return ocispec.Descriptor{}, resolution.BottleTab{}, nil, fmt.Errorf("unsupported schemaVersion %d", index.SchemaVersion)
 	}
@@ -235,7 +460,13 @@ func validateAndSelectIndex(limits Limits, index ocispec.Index, formula Formula,
 	if len(index.Manifests) == 0 {
 		return ocispec.Descriptor{}, resolution.BottleTab{}, nil, errors.New("index has no child manifests")
 	}
-	if err := validateCommonAnnotations(index.Annotations, formula.Name, reference.PkgVersion, reference.IndexTag, formula.Name); err != nil {
+	if validateAnnotations == nil {
+		return ocispec.Descriptor{}, resolution.BottleTab{}, nil, errors.New("nil common-annotation validator")
+	}
+	if parseTab == nil {
+		return ocispec.Descriptor{}, resolution.BottleTab{}, nil, errors.New("nil bottle-tab parser")
+	}
+	if err := validateAnnotations(index.Annotations, reference.PkgVersion, reference.IndexTag, indexTitle); err != nil {
 		return ocispec.Descriptor{}, resolution.BottleTab{}, nil, fmt.Errorf("index annotations: %w", err)
 	}
 
@@ -265,10 +496,10 @@ func validateAndSelectIndex(limits Limits, index ocispec.Index, formula Formula,
 	if err := validateSelectedPlatform(selected.Platform, target, selectedBottleTag == BottleTagAll); err != nil {
 		return ocispec.Descriptor{}, resolution.BottleTab{}, nil, err
 	}
-	if err := validateSelectedAnnotations(selected.Annotations, formula.License, bottleFile, limits.BlobBytes, childTag); err != nil {
+	if err := validateSelectedAnnotations(selected.Annotations, license, bottleFile, limits.BlobBytes, childTag); err != nil {
 		return ocispec.Descriptor{}, resolution.BottleTab{}, nil, err
 	}
-	tab, err := parseBottleTab(selected.Annotations[annotationBottleTab], target, selectedBottleTag == BottleTagAll)
+	tab, err := parseTab(selected.Annotations[annotationBottleTab], target, selectedBottleTag == BottleTagAll)
 	if err != nil {
 		return ocispec.Descriptor{}, resolution.BottleTab{}, nil, err
 	}
@@ -280,6 +511,33 @@ func validateAndSelectIndex(limits Limits, index ocispec.Index, formula Formula,
 }
 
 func validateManifest(limits Limits, manifest ocispec.Manifest, formula Formula, reference FormulaReference, selected ocispec.Descriptor, childTag, filename string, bottleFile BottleFile) error {
+	commonAnnotations := func(annotations map[string]string, pkgVersion, refName, title string) error {
+		return validateCommonAnnotations(annotations, formula.Name, pkgVersion, refName, title)
+	}
+	return validateManifestWith(
+		limits,
+		manifest,
+		reference,
+		selected,
+		childTag,
+		filename,
+		bottleFile,
+		formula.Name+" "+childTag,
+		commonAnnotations,
+	)
+}
+
+func validateManifestWith(
+	limits Limits,
+	manifest ocispec.Manifest,
+	reference FormulaReference,
+	selected ocispec.Descriptor,
+	childTag string,
+	filename string,
+	bottleFile BottleFile,
+	manifestTitle string,
+	validateAnnotations commonAnnotationValidator,
+) error {
 	if manifest.SchemaVersion != 2 {
 		return fmt.Errorf("unsupported schemaVersion %d", manifest.SchemaVersion)
 	}
@@ -305,7 +563,10 @@ func validateManifest(limits Limits, manifest ocispec.Manifest, formula Formula,
 	if layer.Platform != nil {
 		return errors.New("bottle layer descriptor unexpectedly has a platform")
 	}
-	if err := validateCommonAnnotations(manifest.Annotations, formula.Name, reference.PkgVersion, childTag, formula.Name+" "+childTag); err != nil {
+	if validateAnnotations == nil {
+		return errors.New("nil common-annotation validator")
+	}
+	if err := validateAnnotations(manifest.Annotations, reference.PkgVersion, childTag, manifestTitle); err != nil {
 		return fmt.Errorf("manifest annotations: %w", err)
 	}
 	for key, expected := range selected.Annotations {
@@ -384,6 +645,29 @@ func validateCommonAnnotations(annotations map[string]string, formulaName, pkgVe
 	return nil
 }
 
+func validateAuthenticatedCommonAnnotations(annotations map[string]string, identity AuthenticatedFormulaIdentity, pkgVersion, refName, title string) error {
+	if err := identity.validate(); err != nil {
+		return fmt.Errorf("authenticated Formula identity: %w", err)
+	}
+	for _, expected := range []struct {
+		key   string
+		value string
+	}{
+		{annotationPackageType, homebrewBottlePackageType},
+		{ocispec.AnnotationVendor, identity.Publisher()},
+		{ocispec.AnnotationTitle, title},
+		{ocispec.AnnotationVersion, pkgVersion},
+		{ocispec.AnnotationRefName, refName},
+		{ocispec.AnnotationRevision, identity.SourceCommit()},
+		{ocispec.AnnotationSource, identity.SourceURL()},
+	} {
+		if actual := annotations[expected.key]; actual != expected.value {
+			return fmt.Errorf("annotation %q is %q, expected %q", expected.key, actual, expected.value)
+		}
+	}
+	return nil
+}
+
 func validateSelectedAnnotations(annotations map[string]string, _ string, bottleFile BottleFile, maxLayerBytes int64, childTag string) error {
 	if annotations[ocispec.AnnotationRefName] != childTag {
 		return fmt.Errorf("selected child ref-name %q, expected %q", annotations[ocispec.AnnotationRefName], childTag)
@@ -456,6 +740,17 @@ type runtimeDependencyWire struct {
 }
 
 func parseBottleTab(value string, target ocispec.Platform, allBottle bool) (resolution.BottleTab, error) {
+	return parseBottleTabWith(value, target, allBottle, canonicalDependencyName)
+}
+
+func parseAuthenticatedBottleTab(value string, target ocispec.Platform, allBottle bool) (resolution.BottleTab, error) {
+	return parseBottleTabWith(value, target, allBottle, canonicalAuthenticatedDependencyName)
+}
+
+func parseBottleTabWith(value string, target ocispec.Platform, allBottle bool, canonicalizeDependency func(string) (string, error)) (resolution.BottleTab, error) {
+	if canonicalizeDependency == nil {
+		return resolution.BottleTab{}, errors.New("nil runtime-dependency canonicalizer")
+	}
 	data := []byte(value)
 	var rawFields map[string]json.RawMessage
 	if err := decodeJSON(data, &rawFields); err != nil {
@@ -498,7 +793,7 @@ func parseBottleTab(value string, target ocispec.Platform, allBottle bool) (reso
 	dependencies := make([]resolution.RuntimeDependency, 0, len(wire.Dependencies))
 	seen := make(map[string]struct{}, len(wire.Dependencies))
 	for index, dependency := range wire.Dependencies {
-		name, err := canonicalDependencyName(dependency.FullName)
+		name, err := canonicalizeDependency(dependency.FullName)
 		if err != nil {
 			return resolution.BottleTab{}, fmt.Errorf("runtime dependency %d: %w", index, err)
 		}
@@ -612,6 +907,14 @@ func canonicalDependencyName(fullName string) (string, error) {
 	return name, nil
 }
 
+func canonicalAuthenticatedDependencyName(fullName string) (string, error) {
+	id, err := formulaid.Parse(fullName)
+	if err != nil {
+		return "", err
+	}
+	return id.String(), nil
+}
+
 func parseCanonicalPositiveInt(value, annotation string) (int64, error) {
 	if value == "" {
 		return 0, fmt.Errorf("missing %s annotation", annotation)
@@ -674,6 +977,17 @@ func cloneAnnotations(annotations map[string]string) map[string]string {
 }
 
 func cloneFormula(formula Formula) Formula {
+	clone := formula
+	if formula.BottleFiles != nil {
+		clone.BottleFiles = make(map[string]BottleFile, len(formula.BottleFiles))
+		for tag, file := range formula.BottleFiles {
+			clone.BottleFiles[tag] = file
+		}
+	}
+	return clone
+}
+
+func cloneAuthenticatedFormula(formula AuthenticatedFormula) AuthenticatedFormula {
 	clone := formula
 	if formula.BottleFiles != nil {
 		clone.BottleFiles = make(map[string]BottleFile, len(formula.BottleFiles))

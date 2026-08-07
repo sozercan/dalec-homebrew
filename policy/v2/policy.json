@@ -1,0 +1,134 @@
+{
+  "schema_version": "dalec-homebrew-policy/v2",
+  "resolver_policy_version": "homebrew-runtime-v2",
+  "platforms": {
+    "linux/amd64": {
+      "bottle_tag": "x86_64_linux",
+      "cpu_baseline": "core2"
+    },
+    "linux/arm64": {
+      "bottle_tag": "arm64_linux",
+      "cpu_baseline": "armv8"
+    }
+  },
+  "linuxbrew": {
+    "uid": 1000,
+    "gid": 1000,
+    "prefix": "/home/linuxbrew/.linuxbrew"
+  },
+  "catalog_limits": {
+    "non_core_taps": 16,
+    "closure_nodes": 256,
+    "catalog_bytes": 67108864,
+    "aggregate_non_core_bytes": 268435456
+  },
+  "fetch_policy": {
+    "version": "homebrew-bottle-fetch-v1",
+    "max_bytes": 1073741824,
+    "max_redirects": 5,
+    "overall_timeout_seconds": 900
+  },
+  "provenance_policy": {
+    "version": "homebrew-bottle-provenance-v1",
+    "waiver": "tap-catalog-buildkit-and-verified-checksum-v1"
+  },
+  "writable_path_template": "/home/linuxbrew/.linuxbrew/var/<rack-name>",
+  "package_capabilities": {
+    "homebrew/core/fontconfig": {
+      "shared_etc": [
+        "fonts"
+      ],
+      "rules": [
+        "shared-etc-fonts"
+      ]
+    },
+    "homebrew/core/gdk-pixbuf": {
+      "generated_global_paths": [
+        "lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+      ],
+      "rules": [
+        "gdk-pixbuf-loader-cache"
+      ]
+    },
+    "homebrew/core/glibc": {
+      "generated_keg_paths": [
+        "lib/locale"
+      ],
+      "rules": [
+        "brewed-loader",
+        "generated-glibc-locale"
+      ]
+    },
+    "homebrew/core/node": {
+      "generated_global_paths": [
+        "lib/node_modules/npm"
+      ],
+      "rules": [
+        "generated-node-npm"
+      ]
+    },
+    "homebrew/core/shared-mime-info": {
+      "generated_global_paths": [
+        "share/mime"
+      ],
+      "rules": [
+        "generated-shared-mime"
+      ]
+    },
+    "homebrew/core/go": {
+      "rules": [
+        "runtime-aux-go"
+      ]
+    },
+    "homebrew/core/ncurses": {
+      "rules": [
+        "runtime-aux-ncurses"
+      ]
+    },
+    "homebrew/core/dbus": {
+      "rules": [
+        "runtime-aux-dbus"
+      ]
+    },
+    "homebrew/core/python@3.13": {
+      "rules": [
+        "python-venv-template",
+        "runtime-aux-python"
+      ]
+    },
+    "homebrew/core/python@3.14": {
+      "rules": [
+        "python-venv-template",
+        "runtime-aux-python"
+      ]
+    },
+    "homebrew/core/llvm": {
+      "rules": [
+        "optional-llvm-tooling",
+        "runtime-aux-llvm"
+      ]
+    },
+    "homebrew/core/llvm@20": {
+      "rules": [
+        "optional-llvm-tooling",
+        "runtime-aux-llvm"
+      ]
+    },
+    "homebrew/core/llvm@21": {
+      "rules": [
+        "optional-llvm-tooling",
+        "runtime-aux-llvm"
+      ]
+    },
+    "homebrew/core/librsvg": {
+      "rules": [
+        "gdk-pixbuf-loader-cache"
+      ]
+    },
+    "homebrew/core/webp-pixbuf-loader": {
+      "rules": [
+        "gdk-pixbuf-loader-cache"
+      ]
+    }
+  }
+}

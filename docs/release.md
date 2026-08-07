@@ -247,3 +247,17 @@ The repository workflow has no rollback trigger or rollback job. Rollback is an
 operator or downstream release-system action that selects an earlier signed
 component, index, and resolution tuple together with its mirrored blobs. It
 must not reconstruct an old release from current Homebrew metadata.
+
+## V2 component tuple
+
+V2 manifests use `dalec-homebrew-components/v2` and add:
+
+- multi-platform `bottle_fetcher` and `catalog_extractor` components;
+- `tap_policy_digest` and `executable_runtime_policy_digest`;
+- exact supported catalog, fetch, provenance, receiptless HTTPS source-waiver, build-local artifact, and prebuilt-derived-bottle policy-version sets.
+
+The illustrative V1 manifest remains [`../release/components.example.json`](../release/components.example.json). The service-free V2 shape is [`../release/components-v2.example.json`](../release/components-v2.example.json).
+
+Build V2 components in this order: runtime-base children/index, bottle-fetcher children/index, catalog-extractor children/index, materializer children/index, then the frontend. The materializer and frontend compile the exact fetcher/extractor references plus policy digests and supported-version sets. `cmd/v2-bindings --catalog-extractor-ref` emits the canonical service-free policy bindings. No RSA catalog key, key rotation, catalog-service deployment, persistent writer, or public HTTPS origin is required.
+
+Build-local tap ingestion records the exact Git commit, tree/archive digests, canonical catalog digest, extractor reference, and explicit `build-local-exact-commit-no-cross-build-rollback-v1` evidence. It does not provide centralized cross-build rollback floors: a later build can observe a force-pushed default branch. Promotion and rollback therefore retain catalog documents, source archives, derived or upstream bottle bytes, V2 resolutions, and final image digests; they never reconstruct an old release from a mutable tap.

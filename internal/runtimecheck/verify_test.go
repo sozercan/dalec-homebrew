@@ -1057,3 +1057,15 @@ func TestLoaderConfigAbsoluteSymlinkUsesRuntimeRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRuntimeCoreCapabilityHelpersRejectNonCoreRackSpoofs(t *testing.T) {
+	for _, node := range []resolution.Node{
+		{Name: "go", FullName: "acme/tools/go"},
+		{Name: "python@3.14", FullName: "acme/tools/python@3.14"},
+		{Name: "llvm@21", FullName: "acme/tools/llvm@21"},
+	} {
+		if runtimeRule(node, "runtime-aux-go", func() bool { return false }) || runtimeRule(node, "runtime-aux-python", func() bool { return false }) || runtimeRule(node, "runtime-aux-llvm", func() bool { return false }) {
+			t.Fatalf("non-core Formula received core runtime capability: %+v", node)
+		}
+	}
+}

@@ -172,3 +172,14 @@ func TestResolveEscapedFormulaNameThroughRegistryFixture(t *testing.T) {
 		t.Fatalf("filename = %q", result.Filename)
 	}
 }
+
+func TestDiscoverCoreFormulaIdentityFromVerifiedIndex(t *testing.T) {
+	fixture := newRegistryFixture(t, registryFixtureOptions{})
+	identity, err := fixture.client.DiscoverCoreFormulaIdentity(t.Context(), fixture.formula)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.ID().String() != "homebrew/core/fixture" || identity.SourceCommit() != strings.Repeat("a", 40) || identity.FormulaPath() != "Formula/f/fixture.rb" {
+		t.Fatalf("identity=%+v", identity)
+	}
+}

@@ -9,10 +9,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/sozercan/dalec-homebrew/internal/homebrew/formulaid"
 )
 
 const (
-	// GHCRRegistry is the canonical registry used by homebrew/core bottles.
+	// GHCRRegistry is the canonical registry used by Homebrew GitHub Packages bottles.
 	GHCRRegistry = "ghcr.io"
 	// HomebrewCoreRepository is the repository prefix used by homebrew/core.
 	HomebrewCoreRepository = "homebrew/core"
@@ -51,7 +53,9 @@ type BottleFile struct {
 }
 
 // FormulaReference is the canonical GHCR location and immutable-by-policy
-// version/revision/rebuild tag for a Formula's OCI index.
+// version/revision/rebuild tag for a Formula's OCI index. V1 callers continue
+// to receive homebrew/core references; V2 callers use the additive
+// ResolveAuthenticatedFormulaReference API.
 type FormulaReference struct {
 	Name                string
 	FullName            string
@@ -93,6 +97,39 @@ func ResolveFormulaReference(formula Formula) (FormulaReference, error) {
 	}, nil
 }
 
+// ResolveAuthenticatedFormulaReference derives the canonical GHCR repository
+// and immutable index tag for a catalog-authenticated V2 Formula. The bottle
+// root must be the exact Homebrew GHCR root for the Formula's authenticated
+// tap; arbitrary HTTPS roots are intentionally routed elsewhere.
+func ResolveAuthenticatedFormulaReference(formula AuthenticatedFormula) (FormulaReference, error) {
+	if err := validateAuthenticatedFormula(formula); err != nil {
+		return FormulaReference{}, err
+	}
+
+	repository, err := RepositoryPathForFormulaID(formula.Identity.ID())
+	if err != nil {
+		return FormulaReference{}, err
+	}
+	pkgVersion, err := PkgVersion(formula.StableVersion, formula.Revision)
+	if err != nil {
+		return FormulaReference{}, fmt.Errorf("formula %q package version: %w", formula.Identity.ID(), err)
+	}
+	indexTag, err := IndexTag(pkgVersion, formula.BottleRebuild)
+	if err != nil {
+		return FormulaReference{}, fmt.Errorf("formula %q index tag: %w", formula.Identity.ID(), err)
+	}
+
+	return FormulaReference{
+		Name:                formula.Identity.Name(),
+		FullName:            formula.Identity.HomebrewFullName(),
+		PkgVersion:          pkgVersion,
+		Registry:            GHCRRegistry,
+		Repository:          repository,
+		CanonicalRepository: GHCRRegistry + "/" + repository,
+		IndexTag:            indexTag,
+	}, nil
+}
+
 // EscapeFormulaName applies Homebrew's OCI repository escaping: versioned
 // Formulae replace '@' with a path separator and '+' is represented as 'x'.
 func EscapeFormulaName(name string) (string, error) {
@@ -122,6 +159,38 @@ func RepositoryPath(name string) (string, error) {
 // CanonicalRepository returns the fully qualified canonical GHCR repository.
 func CanonicalRepository(name string) (string, error) {
 	repository, err := RepositoryPath(name)
+	if err != nil {
+		return "", err
+	}
+	return GHCRRegistry + "/" + repository, nil
+}
+
+// RepositoryPathForFormulaID returns the registry-relative Homebrew GHCR
+// repository for an authenticated owner/tap/formula identity. Homebrew strips
+// the homebrew- prefix from the source repository when publishing to GHCR.
+func RepositoryPathForFormulaID(id formulaid.FormulaID) (string, error) {
+	if err := validateFormulaID(id); err != nil {
+		return "", err
+	}
+	escaped, err := EscapeFormulaName(id.Name())
+	if err != nil {
+		return "", err
+	}
+	prefix := id.Tap().Owner() + "/" + id.Tap().Name()
+	repository := prefix + "/" + escaped
+	if err := validateRepository(repository); err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(repository, prefix+"/") || repository == prefix {
+		return "", fmt.Errorf("derived repository %q escapes authenticated tap prefix %q", repository, prefix)
+	}
+	return repository, nil
+}
+
+// CanonicalRepositoryForFormulaID returns the fully qualified canonical GHCR
+// repository for an authenticated Formula ID.
+func CanonicalRepositoryForFormulaID(id formulaid.FormulaID) (string, error) {
+	repository, err := RepositoryPathForFormulaID(id)
 	if err != nil {
 		return "", err
 	}
@@ -200,6 +269,29 @@ func BottleFilename(name, pkgVersion, bottleTag string, rebuild int) (string, er
 		filename += "." + strconv.Itoa(rebuild)
 	}
 	return filename + ".tar.gz", nil
+}
+
+func validateAuthenticatedFormula(formula AuthenticatedFormula) error {
+	if err := formula.Identity.validate(); err != nil {
+		return fmt.Errorf("authenticated Formula identity: %w", err)
+	}
+	matches, err := MatchHomebrewGHCRRoot(formula.BottleRootURL, formula.Identity.Tap())
+	if err != nil {
+		return fmt.Errorf("formula %q bottle root: %w", formula.Identity.ID(), err)
+	}
+	if !matches {
+		return fmt.Errorf("formula %q bottle root %q is not a Homebrew GHCR root", formula.Identity.ID(), formula.BottleRootURL)
+	}
+	if formula.VersionScheme < 0 {
+		return fmt.Errorf("formula %q has negative version scheme %d", formula.Identity.ID(), formula.VersionScheme)
+	}
+	if _, err := PkgVersion(formula.StableVersion, formula.Revision); err != nil {
+		return err
+	}
+	if formula.BottleRebuild < 0 {
+		return fmt.Errorf("formula %q has negative bottle rebuild %d", formula.Identity.ID(), formula.BottleRebuild)
+	}
+	return nil
 }
 
 func validateFormulaIdentity(formula Formula) error {

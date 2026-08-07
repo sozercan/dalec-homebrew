@@ -18,6 +18,7 @@ import (
 
 	"github.com/sozercan/dalec-homebrew/internal/bottle"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
+	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
 type sourceEntry struct {
@@ -189,7 +190,8 @@ func classifyRetention(entry *sourceEntry, policy *normalizedPolicy) error {
 			entry.pruneReason = PruneRuntimeBase
 			return nil
 		}
-		if _, ok := policy.nodes["glibc"]; !ok || actual != path.Join(policy.installPrefix, "opt/glibc/bin/ld.so") {
+		glibc, ok := policy.nodes["glibc"]
+		if !ok || !runtimeFSRule(glibc, "brewed-loader", func() bool { return glibc.Name == "glibc" && glibc.FullName == "homebrew/core/glibc" }) || actual != path.Join(policy.installPrefix, "opt/glibc/bin/ld.so") {
 			return runtimeError(CodeUnsafeLink, rel, "runtime loader target %q does not match base target %q", entry.linkSource, expected)
 		}
 		entry.retain = policy.allowlist.Lib
@@ -615,6 +617,13 @@ var optionalLLVMGlobalExecutables = map[string]struct{}{
 	"bin/scan-view":        {},
 }
 
+func runtimeFSRule(node resolution.Node, rule string, legacy func() bool) bool {
+	if node.PolicyFormulaID != "" {
+		return policyv2.HasEmbeddedRule(node.PolicyFormulaID, rule)
+	}
+	return legacy()
+}
+
 func pruneOptionalDependencyTooling(scan *sourceScan, policy *normalizedPolicy) {
 	for _, entry := range scan.entries {
 		if !entry.retain || entry.typeName != TypeSymlink {
@@ -623,7 +632,10 @@ func pruneOptionalDependencyTooling(scan *sourceScan, policy *normalizedPolicy) 
 		if _, optional := optionalLLVMGlobalExecutables[entry.rel]; !optional {
 			continue
 		}
-		if entry.packageName != "llvm" && !strings.HasPrefix(entry.packageName, "llvm@") {
+		node, ok := policy.nodes[entry.packageName]
+		if !ok || !runtimeFSRule(node, "optional-llvm-tooling", func() bool {
+			return (node.Name == "llvm" || strings.HasPrefix(node.Name, "llvm@")) && node.FullName == "homebrew/core/"+node.Name
+		}) {
 			continue
 		}
 		if _, requested := policy.requested[entry.packageName]; requested {

@@ -19,6 +19,12 @@ The V1 implementation is expected to preserve these properties:
 13. Generated shared runtime data is accepted only at versioned paths with package and capability checks, bounded structure and size, authenticated runtime ownership, and explicit evidence attribution. Node's global `lib/node_modules/npm` runtime is accepted only as a bounded, exact copy of the verified private npm tree plus one exact prefix-bound `npmrc`, with command and manpage links bound back to that validated tree. Unrelated global `lib` or shared-data mutations continue to fail closed.
 14. Creating a `v*.*.*` release tag is a trusted release-operator action. Repository access must restrict tag creation to those operators, and tag rules should prevent update or deletion. The checked-in tag workflow rejects tag updates and deletions, dispatches only the privileged release workflow on `main`, and binds the initially pushed commit; a new build requires that commit to equal the trusted workflow commit before any registry or signing job runs.
 
+V2 public-tap releases additionally preserve these properties:
+
+15. Prebuilt executable archives are accepted only for exact Formula IDs in the embedded tap policy. The policy binds the Formula source digest, version, platform URLs and checksums, complete archive inventory, payload mapping, archive limits, static ELF properties, Go module identity, and CGO setting; Dalec input cannot provide or override any of those values.
+16. Build-local ingestion never runs a prebuilt Formula's `install` or `post_install` method. It verifies the upstream archive, derives a canonical receiptless bottle containing only the selected executable and authenticated Formula source, and binds the upstream and derived identities separately. Native bottles take precedence.
+17. Derived bottles pass the same hostile-bottle verification, offline per-package installation, receipt normalization, prefix-delta containment, runtime allowlisting, pruning, and SBOM attribution as upstream bottles. The explicit prebuilt derivation evidence prevents the build-locally generated artifact from being represented as an upstream-published bottle.
+
 ## Upstream trust limitations
 
 Homebrew's Formula and migration JWS documents are fetched and authenticated separately; upstream does not sign a common snapshot identifier for the pair. The combined snapshot digest commits to the exact accepted payload pair, but does not prove atomic upstream publication.
@@ -50,3 +56,20 @@ Reports that demonstrate a practical violation of the properties above are in sc
 ## Reporting
 
 Please report vulnerabilities privately to the repository maintainers. Include a minimal Dalec spec or resolution record, the affected platform and component digests, and a reproduction where possible. Do not include credentials or private registry tokens.
+
+## V2 non-core tap properties
+
+A release may accept `owner/tap/formula` only when its frontend binary contains the complete V2 capability tuple: bottle-fetcher and catalog-extractor references, tap-policy digest, executable runtime-policy digest, and the exact supported catalog/fetch/provenance policy versions. Invocation build arguments cannot upgrade a core-only frontend.
+
+V2 additionally enforces:
+
+1. Formula graph identity is always `owner/tap/formula`; Cellar rack names are separate and collisions fail closed.
+2. BuildKit fetches only the derived public default-GitHub repository. Formula evaluation runs in a release-pinned extractor exec with networking disabled, read-only source mounts, no secrets or SSH, and disposable writable state.
+3. Extraction evidence binds the extractor reference, repository, exact commit, tree/archive digests, and canonical catalog digest. Catalog documents remain bounded to 64 MiB each and 256 MiB aggregate with duplicate-member rejection.
+4. Build-local ingestion has no centralized monotonic rollback database. Records explicitly use `build-local-exact-commit-no-cross-build-rollback-v1`; retained releases must reuse exact catalog and bottle bytes rather than re-resolve mutable branches.
+5. Non-core GHCR bottles repeat the full descriptor and annotation validation. Other bottles pass through the release-bound HTTPS fetcher; private, authenticated, IP-literal, non-public, downgraded, oversized, or unapproved-redirect sources are rejected.
+6. Policy-authorized prebuilt archives are verified and transformed into deterministic receiptless bottles during the gateway build. Their bytes use `build-local-artifact-v1` transport and are passed directly to materialization; replay requires retained bytes matching the recorded size and digest.
+7. Preparation re-verifies every bottle before Homebrew executes. Bottle-embedded Formula source is staged under its exact synthetic Tap identity; current catalog source and embedded bottle source remain distinct evidence.
+8. One network-disabled exec installs each bottle. Protected tap trees and the exact Formula trust store cannot be replaced or modified by the runtime user.
+9. Core-only generated-runtime and post-install capabilities are keyed by full Formula ID. A non-core Formula that reuses a core rack name receives no core-specific exception.
+10. V1 records remain immutable and V1-only materializers continue to reject V2. Verification tooling decodes both schemas explicitly.

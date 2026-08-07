@@ -7,25 +7,66 @@
 # disabled by the enclosing BuildKit exec, dependencies were resolved by the
 # frontend, and the Go materializer independently verifies the bottle before
 # this script is called.
+require "digest"
 require "formulary"
 require "formula_installer"
 
-abort "usage: dalec-homebrew-pour.rb <bottle>" unless ARGV.length == 1
+unless [1, 3, 4].include?(ARGV.length)
+  abort "usage: dalec-homebrew-pour.rb <bottle> OR <formula-id> <staged-formula> <bottle> [derived-prebuilt-v1]"
+end
 
-bottle_path = Pathname(ARGV.fetch(0)).realpath
-abort "bottle path is not a regular file" unless bottle_path.file?
+derived_prebuilt = ARGV.length == 4
+abort "unsupported derived-bottle mode" if derived_prebuilt && ARGV.fetch(3) != "derived-prebuilt-v1"
 
-# brew.sh intentionally clears this internal variable at process startup, so
-# set it inside the isolated adapter immediately before loading the verified
-# local bottle. Unlike HOMEBREW_DEVELOPER, this does not alter installer error
-# handling for missing conflict Formulae in the intentionally empty core tap.
-ENV["HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS"] = "1"
-formula = Formulary.factory(bottle_path, force_bottle: true)
+if ARGV.length == 1
+  bottle_path = Pathname(ARGV.fetch(0)).realpath
+  abort "bottle path is not a regular file" unless bottle_path.file?
+
+  # V1 compatibility: the legacy adapter loads the verified local bottle path
+  # directly. V2 never enables this broad path-loader switch.
+  ENV["HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS"] = "1"
+  formula = Formulary.factory(bottle_path, force_bottle: true)
+else
+  formula_id = ARGV.fetch(0)
+  formula_path = Pathname(ARGV.fetch(1)).realpath
+  bottle_path = Pathname(ARGV.fetch(2)).realpath
+  abort "staged Formula path is not a regular file" unless formula_path.file?
+  abort "bottle path is not a regular file" unless bottle_path.file?
+
+  # The staged file contains the independently verified bottle-embedded
+  # Formula source, but lives under its explicit synthetic Tap path. Loading
+  # this path preserves Homebrew's tap-trust check and exact Tap identity.
+  formula = Formulary.factory(formula_path, force_bottle: true)
+  actual_id = if formula.tap&.core_tap?
+    "homebrew/core/#{formula.name}"
+  else
+    formula.full_name
+  end
+  abort "staged Formula identity mismatch" unless actual_id == formula_id
+
+  # FormulaInstaller treats this exact local path as the only bottle source.
+  # Network and dependency/source fallback remain disabled by the enclosing
+  # materializer execution and installer options.
+  formula.local_bottle_path = bottle_path
+
+  if derived_prebuilt
+    # The authenticated Formula intentionally has no upstream bottle block.
+    # Attach only the local derived bottle's relocation policy so Homebrew can
+    # pour it without changing or evaluating the Formula install method.
+    checksum = Digest::SHA256.file(bottle_path).hexdigest
+    formula.bottle_specification.sha256(
+      cellar: :any_skip_relocation,
+      Utils::Bottles.tag.to_sym => checksum,
+    )
+  end
+end
+
 installer = FormulaInstaller.new(
   formula,
   installed_on_request: true,
   force_bottle: true,
   ignore_deps: true,
+  skip_post_install: derived_prebuilt,
 )
 installer.install
 

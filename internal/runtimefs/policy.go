@@ -49,6 +49,10 @@ func normalizeOptions(record *resolution.Record, opts Options) (*normalizedPolic
 	if err := resolution.ValidateForMaterialization(record); err != nil {
 		return nil, runtimeError(CodeInvalidRecord, "", "%v", err)
 	}
+	return normalizeOptionsUnchecked(record, opts)
+}
+
+func normalizeOptionsUnchecked(record *resolution.Record, opts Options) (*normalizedPolicy, error) {
 	installPrefix, err := normalizeInstallPrefix(opts.InstallPrefix)
 	if err != nil {
 		return nil, runtimeError(CodeInvalidOptions, "", "%v", err)

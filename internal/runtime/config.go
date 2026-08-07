@@ -197,3 +197,13 @@ func appendUnique(dst []string, values ...string) []string {
 	}
 	return dst
 }
+
+// BuildImageConfigV2 preserves Formula-ID graph identity while translating the
+// already collision-checked rack names into runtime PATH entries.
+func BuildImageConfigV2(base *dalec.DockerImageSpec, img *dalec.ImageConfig, record *resolution.RecordV2) (*dalec.DockerImageSpec, Identity, []string, error) {
+	projected, _, err := resolution.ProjectV2ForRuntime(record)
+	if err != nil {
+		return nil, Identity{}, nil, err
+	}
+	return BuildImageConfig(base, img, projected.Requested, projected.Nodes)
+}

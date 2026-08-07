@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/sozercan/dalec-homebrew/internal/homebrew/formulaid"
 	hbversion "github.com/sozercan/dalec-homebrew/internal/homebrew/version"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 )
@@ -78,68 +79,95 @@ func validateReceipt(data []byte, expected Expectation) (ReceiptEvidence, error)
 }
 
 func validateReceiptWithPolicy(data []byte, expected Expectation, requirePoured bool) (ReceiptEvidence, error) {
+	receipt, evidence, err := decodeAndValidateReceipt(data, expected, requirePoured)
+	if err != nil {
+		return ReceiptEvidence{}, err
+	}
+	if requirePoured {
+		err = compareInstalledReceiptDependencies(receipt.RuntimeDeps, expected.Dependencies)
+	} else {
+		err = compareReceiptDependencies(receipt.RuntimeDeps, expected.Dependencies)
+	}
+	if err != nil {
+		return ReceiptEvidence{}, err
+	}
+	return evidence, nil
+}
+
+func discoverReceiptDependencies(data []byte, expected Expectation) (ReceiptEvidence, []ReceiptDependency, error) {
+	receipt, evidence, err := decodeAndValidateReceipt(data, expected, false)
+	if err != nil {
+		return ReceiptEvidence{}, nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return ReceiptEvidence{}, nil, fmt.Errorf("decode receipt fields: %w", err)
+	}
+	rawDependencies, ok := fields["runtime_dependencies"]
+	if !ok || !rawJSONArray(rawDependencies) {
+		return ReceiptEvidence{}, nil, fmt.Errorf("runtime_dependencies must be a JSON array")
+	}
+	dependencies, err := normalizeDiscoveredReceiptDependencies(receipt.RuntimeDeps)
+	if err != nil {
+		return ReceiptEvidence{}, nil, err
+	}
+	return evidence, dependencies, nil
+}
+
+func decodeAndValidateReceipt(data []byte, expected Expectation, requirePoured bool) (installReceipt, ReceiptEvidence, error) {
 	if err := validateUniqueJSON(data); err != nil {
-		return ReceiptEvidence{}, fmt.Errorf("invalid receipt JSON: %w", err)
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("invalid receipt JSON: %w", err)
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	var receipt installReceipt
 	if err := dec.Decode(&receipt); err != nil {
-		return ReceiptEvidence{}, fmt.Errorf("decode receipt: %w", err)
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("decode receipt: %w", err)
 	}
 	receipt.RuntimeDeps = normalizeOmittedReceiptDependencyPkgVersions(receipt.RuntimeDeps)
 	if receipt.BuiltAsBottle == nil || !*receipt.BuiltAsBottle {
-		return ReceiptEvidence{}, fmt.Errorf("built_as_bottle must be true")
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("built_as_bottle must be true")
 	}
 	if requirePoured && (receipt.PouredFromBottle == nil || !*receipt.PouredFromBottle) {
-		return ReceiptEvidence{}, fmt.Errorf("poured_from_bottle must be true")
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("poured_from_bottle must be true")
 	}
 	if receipt.Source.Spec != "stable" {
-		return ReceiptEvidence{}, fmt.Errorf("source.spec %q is not stable", receipt.Source.Spec)
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("source.spec %q is not stable", receipt.Source.Spec)
 	}
 	if receipt.Source.Versions.Stable == "" || receipt.Source.Versions.Stable != expected.FormulaVersion {
-		return ReceiptEvidence{}, fmt.Errorf("source stable version %q does not match %q", receipt.Source.Versions.Stable, expected.FormulaVersion)
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("source stable version %q does not match %q", receipt.Source.Versions.Stable, expected.FormulaVersion)
 	}
 	if receipt.Source.Versions.VersionScheme == nil || *receipt.Source.Versions.VersionScheme != expected.VersionScheme {
-		return ReceiptEvidence{}, fmt.Errorf("version_scheme does not match %d", expected.VersionScheme)
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("version_scheme does not match %d", expected.VersionScheme)
 	}
 	if expected.ExpectedTap != "" && receipt.Source.Tap != expected.ExpectedTap {
-		return ReceiptEvidence{}, fmt.Errorf("source tap %q does not match %q", receipt.Source.Tap, expected.ExpectedTap)
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("source tap %q does not match %q", receipt.Source.Tap, expected.ExpectedTap)
 	}
 	if receipt.Name != "" && receipt.Name != expected.Name {
-		return ReceiptEvidence{}, fmt.Errorf("name %q does not match %q", receipt.Name, expected.Name)
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("name %q does not match %q", receipt.Name, expected.Name)
 	}
 	if receipt.FullName != "" && expected.FullName != "" && receipt.FullName != expected.FullName {
-		return ReceiptEvidence{}, fmt.Errorf("full_name %q does not match %q", receipt.FullName, expected.FullName)
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("full_name %q does not match %q", receipt.FullName, expected.FullName)
 	}
 	if receipt.PkgVersion != "" && receipt.PkgVersion != expected.PkgVersion {
-		return ReceiptEvidence{}, fmt.Errorf("pkg_version %q does not match %q", receipt.PkgVersion, expected.PkgVersion)
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("pkg_version %q does not match %q", receipt.PkgVersion, expected.PkgVersion)
 	}
 	if receipt.Revision != nil && *receipt.Revision != expected.FormulaRevision {
-		return ReceiptEvidence{}, fmt.Errorf("revision %d does not match %d", *receipt.Revision, expected.FormulaRevision)
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("revision %d does not match %d", *receipt.Revision, expected.FormulaRevision)
 	}
 	if receipt.BottleRebuild != nil && *receipt.BottleRebuild != expected.BottleRebuild {
-		return ReceiptEvidence{}, fmt.Errorf("bottle_rebuild %d does not match %d", *receipt.BottleRebuild, expected.BottleRebuild)
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("bottle_rebuild %d does not match %d", *receipt.BottleRebuild, expected.BottleRebuild)
 	}
 	if expected.HomebrewVersion != "" && receipt.HomebrewVersion != expected.HomebrewVersion {
-		return ReceiptEvidence{}, fmt.Errorf("homebrew_version %q does not match %q", receipt.HomebrewVersion, expected.HomebrewVersion)
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("homebrew_version %q does not match %q", receipt.HomebrewVersion, expected.HomebrewVersion)
 	}
 	if expected.Arch != "" && receipt.Arch != expected.Arch {
-		return ReceiptEvidence{}, fmt.Errorf("arch %q does not match %q", receipt.Arch, expected.Arch)
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("arch %q does not match %q", receipt.Arch, expected.Arch)
 	}
 	if expected.Compiler != "" && receipt.Compiler != expected.Compiler && (!requirePoured || !installedCompilerMatches(receipt.Compiler, expected.Compiler, expected.BottleTag)) {
-		return ReceiptEvidence{}, fmt.Errorf("compiler %q does not match %q", receipt.Compiler, expected.Compiler)
-	}
-	var dependencyErr error
-	if requirePoured {
-		dependencyErr = compareInstalledReceiptDependencies(receipt.RuntimeDeps, expected.Dependencies)
-	} else {
-		dependencyErr = compareReceiptDependencies(receipt.RuntimeDeps, expected.Dependencies)
-	}
-	if dependencyErr != nil {
-		return ReceiptEvidence{}, dependencyErr
+		return installReceipt{}, ReceiptEvidence{}, fmt.Errorf("compiler %q does not match %q", receipt.Compiler, expected.Compiler)
 	}
 
-	return ReceiptEvidence{
+	return receipt, ReceiptEvidence{
 		FormulaVersion:   receipt.Source.Versions.Stable,
 		VersionScheme:    *receipt.Source.Versions.VersionScheme,
 		BuiltAsBottle:    true,
@@ -286,6 +314,46 @@ func normalizeOmittedReceiptDependencyPkgVersions(deps []ReceiptDependency) []Re
 		normalized[i].pkgVersionOmitted = false
 	}
 	return normalized
+}
+
+const maxDiscoveredRuntimeDependencies = 256
+
+func normalizeDiscoveredReceiptDependencies(deps []ReceiptDependency) ([]ReceiptDependency, error) {
+	if len(deps) > maxDiscoveredRuntimeDependencies {
+		return nil, fmt.Errorf("runtime dependency count %d exceeds %d", len(deps), maxDiscoveredRuntimeDependencies)
+	}
+	result := slices.Clone(deps)
+	seen := make(map[formulaid.FormulaID]string, len(result))
+	for index := range result {
+		dependency := &result[index]
+		id, err := formulaid.Parse(dependency.FullName)
+		if err != nil {
+			return nil, fmt.Errorf("runtime dependency %d has invalid full_name %q: %w", index, dependency.FullName, err)
+		}
+		if dependency.Version == "" || strings.TrimSpace(dependency.Version) != dependency.Version ||
+			strings.ContainsAny(dependency.Version, "/\\ \t\r\n") || containsControl(dependency.Version) {
+			return nil, fmt.Errorf("runtime dependency %q has invalid version %q", dependency.FullName, dependency.Version)
+		}
+		if dependency.Revision < 0 {
+			return nil, fmt.Errorf("runtime dependency %q has negative revision %d", dependency.FullName, dependency.Revision)
+		}
+		if dependency.BottleRebuild < 0 {
+			return nil, fmt.Errorf("runtime dependency %q has negative bottle_rebuild %d", dependency.FullName, dependency.BottleRebuild)
+		}
+		wantPkgVersion := hbversion.PkgVersion(dependency.Version, dependency.Revision)
+		if dependency.PkgVersion != wantPkgVersion {
+			return nil, fmt.Errorf("runtime dependency %q pkg_version %q does not match %q", dependency.FullName, dependency.PkgVersion, wantPkgVersion)
+		}
+		if previous, duplicate := seen[id]; duplicate {
+			return nil, fmt.Errorf("duplicate runtime dependency %q (also spelled %q)", id.String(), previous)
+		}
+		seen[id] = dependency.FullName
+		dependency.FullName = id.String()
+	}
+	slices.SortFunc(result, func(a, b ReceiptDependency) int {
+		return strings.Compare(a.FullName, b.FullName)
+	})
+	return result, nil
 }
 
 func validateReceiptDependencies(deps []ReceiptDependency) error {
@@ -507,14 +575,20 @@ func resolvedInstalledDependencies(root resolution.Node, closure []resolution.No
 		return nil, nil
 	}
 	nodes := make(map[string]resolution.Node, len(closure))
+	nodesByFullName := make(map[string]resolution.Node, len(closure))
 	for _, node := range closure {
-		if node.Name == "" || node.FullName != "homebrew/core/"+node.Name || node.FormulaVersion == "" || node.PkgVersion == "" || node.FormulaRevision < 0 || node.BottleRebuild < 0 {
+		identity, identityErr := formulaid.Parse(node.FullName)
+		if identityErr != nil || identity.String() != node.FullName || identity.Name() != node.Name || node.FormulaVersion == "" || node.PkgVersion == "" || node.FormulaRevision < 0 || node.BottleRebuild < 0 {
 			return nil, fmt.Errorf("invalid verified closure node %q", node.Name)
 		}
 		if _, exists := nodes[node.Name]; exists {
 			return nil, fmt.Errorf("duplicate verified closure node %q", node.Name)
 		}
 		nodes[node.Name] = node
+		if _, duplicate := nodesByFullName[node.FullName]; duplicate {
+			return nil, fmt.Errorf("duplicate verified closure full name %q", node.FullName)
+		}
+		nodesByFullName[node.FullName] = node
 	}
 	rootNode, ok := nodes[root.Name]
 	if !ok {
@@ -536,10 +610,10 @@ func resolvedInstalledDependencies(root resolution.Node, closure []resolution.No
 	if err != nil {
 		return nil, fmt.Errorf("node %q historical bottle tab: %w", root.Name, err)
 	}
-	for name, dependency := range rootHistorical {
+	for fullName, dependency := range rootHistorical {
 		if dependency.DeclaredDirectly {
-			if _, selected := nodes[name]; selected {
-				rootDirect[name] = struct{}{}
+			if selected, ok := nodesByFullName[fullName]; ok {
+				rootDirect[selected.Name] = struct{}{}
 			}
 		}
 	}
@@ -585,7 +659,7 @@ func resolvedInstalledDependencies(root resolution.Node, closure []resolution.No
 				return fmt.Errorf("node %q current dependency %q is missing or cross-root", name, requirement.Name)
 			}
 			effective := requirement
-			if old, remains := historical[requirement.Name]; remains {
+			if old, remains := historical[child.FullName]; remains {
 				if effective.Minimum == "" {
 					if effective.Revision != 0 && effective.Revision != old.Revision || effective.BottleRebuild != 0 && effective.BottleRebuild != old.BottleRebuild {
 						return fmt.Errorf("node %q dependency %q has partial minimum inconsistent with authenticated bottle tab", name, requirement.Name)
@@ -602,11 +676,12 @@ func resolvedInstalledDependencies(root resolution.Node, closure []resolution.No
 			}
 			edges[requirement.Name] = false
 		}
-		for historicalName, dependency := range historical {
+		for historicalFullName, dependency := range historical {
 			if !dependency.DeclaredDirectly {
 				continue
 			}
-			child, selected := nodes[historicalName]
+			child, selected := nodesByFullName[historicalFullName]
+			historicalName := child.Name
 			if !selected {
 				// Historical embedded Formulae can name support Formulae that the
 				// current signed graph no longer selects. They remain authenticated
@@ -661,7 +736,7 @@ func resolvedInstalledDependencies(root resolution.Node, closure []resolution.No
 		if name != root.Name {
 			_, direct := rootDirect[name]
 			resolved = append(resolved, ReceiptDependency{
-				FullName:         node.Name,
+				FullName:         receiptDependencyFullName(node),
 				Version:          node.FormulaVersion,
 				Revision:         node.FormulaRevision,
 				BottleRebuild:    node.BottleRebuild,
@@ -676,6 +751,13 @@ func resolvedInstalledDependencies(root resolution.Node, closure []resolution.No
 	}
 	slices.SortFunc(resolved, func(a, b ReceiptDependency) int { return strings.Compare(a.FullName, b.FullName) })
 	return resolved, nil
+}
+
+func receiptDependencyFullName(node resolution.Node) string {
+	if strings.HasPrefix(node.FullName, "homebrew/core/") {
+		return strings.TrimPrefix(node.FullName, "homebrew/core/")
+	}
+	return node.FullName
 }
 
 func validateCurrentDependencyGraph(nodes map[string]resolution.Node) error {
@@ -728,12 +810,11 @@ func validateCurrentDependencyGraph(nodes map[string]resolution.Node) error {
 func historicalDependencyMinimums(dependencies []resolution.RuntimeDependency) (map[string]resolution.RuntimeDependency, error) {
 	result := make(map[string]resolution.RuntimeDependency, len(dependencies))
 	for _, dependency := range dependencies {
-		name := dependency.FullName
-		if strings.HasPrefix(name, "homebrew/core/") {
-			name = strings.TrimPrefix(name, "homebrew/core/")
-		} else if strings.Contains(name, "/") {
-			return nil, fmt.Errorf("non-homebrew/core dependency %q", dependency.FullName)
+		identity, err := formulaid.Parse(dependency.FullName)
+		if err != nil {
+			return nil, fmt.Errorf("invalid dependency identity %q: %w", dependency.FullName, err)
 		}
+		name := identity.String()
 		if name == "" || dependency.PkgVersion == "" || dependency.Revision < 0 || dependency.BottleRebuild < 0 {
 			return nil, fmt.Errorf("invalid dependency %#v", dependency)
 		}

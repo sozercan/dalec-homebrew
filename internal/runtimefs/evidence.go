@@ -36,6 +36,7 @@ func buildInventory(scan *sourceScan, record *resolution.Record, policy *normali
 			LinkTarget: entry.linkOutput,
 			HardlinkTo: entry.hardlinkTo,
 			Package:    entry.packageName,
+			FormulaID:  formulaIDForRack(record, entry.packageName),
 			Writable:   entry.writable,
 		}
 		if item.Type == TypeDirectory {
@@ -49,7 +50,7 @@ func buildInventory(scan *sourceScan, record *resolution.Record, policy *normali
 	}
 	slices.SortFunc(entries, func(a, b InventoryEntry) int { return strings.Compare(a.Path, b.Path) })
 	return Inventory{
-		SchemaVersion:       InventorySchemaVersion,
+		SchemaVersion:       inventorySchemaVersion(record),
 		PolicyVersion:       record.PolicyVersion,
 		ResolutionDigest:    resolutionDigest,
 		PruningPolicyDigest: policy.digest,
@@ -57,6 +58,50 @@ func buildInventory(scan *sourceScan, record *resolution.Record, policy *normali
 		Prefix:              policy.installPrefix,
 		Entries:             entries,
 	}
+}
+
+func isV2RuntimeRecord(record *resolution.Record) bool {
+	return record != nil && record.PolicyVersion == resolution.PolicyVersionV2
+}
+
+func inventorySchemaVersion(record *resolution.Record) string {
+	if isV2RuntimeRecord(record) {
+		return InventorySchemaVersionV2
+	}
+	return InventorySchemaVersion
+}
+
+func pruneSchemaVersion(record *resolution.Record) string {
+	if isV2RuntimeRecord(record) {
+		return PruneSchemaVersionV2
+	}
+	return PruneSchemaVersion
+}
+
+func manifestSchemaVersion(record *resolution.Record) string {
+	if isV2RuntimeRecord(record) {
+		return ManifestSchemaVersionV2
+	}
+	return ManifestSchemaVersion
+}
+
+func formulaIDForNode(record *resolution.Record, node resolution.Node) string {
+	if !isV2RuntimeRecord(record) {
+		return ""
+	}
+	return node.FullName
+}
+
+func formulaIDForRack(record *resolution.Record, rack string) string {
+	if !isV2RuntimeRecord(record) || rack == "" {
+		return ""
+	}
+	for _, node := range record.Nodes {
+		if node.Name == rack {
+			return formulaIDForNode(record, node)
+		}
+	}
+	return ""
 }
 
 const homebrewRepositoryRoot = "Homebrew"
@@ -91,7 +136,7 @@ func buildPruneManifest(scan *sourceScan, record *resolution.Record, policy *nor
 		if _, ok := compacted[entry.rel]; ok {
 			continue
 		}
-		entries = append(entries, buildPruneEntry(entry))
+		entries = append(entries, buildPruneEntry(entry, record))
 	}
 	slices.SortFunc(entries, func(a, b PruneEntry) int { return strings.Compare(a.Path, b.Path) })
 	var subtrees []PruneSubtree
@@ -100,7 +145,7 @@ func buildPruneManifest(scan *sourceScan, record *resolution.Record, policy *nor
 	}
 	slices.SortFunc(subtrees, func(a, b PruneSubtree) int { return strings.Compare(a.Path, b.Path) })
 	return PruneManifest{
-		SchemaVersion:       PruneSchemaVersion,
+		SchemaVersion:       pruneSchemaVersion(record),
 		PolicyVersion:       record.PolicyVersion,
 		ResolutionDigest:    resolutionDigest,
 		PruningPolicyDigest: policy.digest,
@@ -111,7 +156,7 @@ func buildPruneManifest(scan *sourceScan, record *resolution.Record, policy *nor
 	}, nil
 }
 
-func buildPruneEntry(entry *sourceEntry) PruneEntry {
+func buildPruneEntry(entry *sourceEntry, record *resolution.Record) PruneEntry {
 	item := PruneEntry{
 		Path:       entry.rel,
 		Type:       entry.typeName,
@@ -121,6 +166,7 @@ func buildPruneEntry(entry *sourceEntry) PruneEntry {
 		LinkTarget: entry.linkSource,
 		Reason:     entry.pruneReason,
 		Package:    entry.packageName,
+		FormulaID:  formulaIDForRack(record, entry.packageName),
 	}
 	if entry.typeName == TypeRegular {
 		item.MetadataExport = entry.metadataExport
@@ -318,6 +364,7 @@ func buildResult(outputRoot string, record *resolution.Record, inventory Invento
 func buildRuntimeManifest(record *resolution.Record, policy *normalizedPolicy, resolutionDigest, inventoryDigest, pruneDigest, sbomDigest string, metadata []MetadataExport) RuntimeManifest {
 	byPackage := make(map[string][]MetadataExport)
 	for _, item := range metadata {
+		item.FormulaID = formulaIDForRack(record, item.Package)
 		byPackage[item.Package] = append(byPackage[item.Package], item)
 	}
 	packages := make([]RuntimePackage, 0, len(record.Nodes))
@@ -330,24 +377,26 @@ func buildRuntimeManifest(record *resolution.Record, policy *normalizedPolicy, r
 			return strings.Compare(a.SourcePath, b.SourcePath)
 		})
 		packages = append(packages, RuntimePackage{
-			Name:             node.Name,
-			FullName:         node.FullName,
-			FormulaVersion:   node.FormulaVersion,
-			FormulaRevision:  node.FormulaRevision,
-			PkgVersion:       node.PkgVersion,
-			VersionScheme:    node.VersionScheme,
-			BottleRebuild:    node.BottleRebuild,
-			BottleTag:        node.Bottle.Tag,
-			BottleLayer:      node.Bottle.Layer.Digest,
-			BottleLayerSize:  node.Bottle.Layer.Size,
-			License:          node.License,
-			KegPath:          path.Join(policy.installPrefix, "Cellar", node.Name, node.PkgVersion),
-			ExportedMetadata: exported,
+			FormulaID:         formulaIDForNode(record, node),
+			UpstreamFormulaID: node.UpstreamFormulaID,
+			Name:              node.Name,
+			FullName:          node.FullName,
+			FormulaVersion:    node.FormulaVersion,
+			FormulaRevision:   node.FormulaRevision,
+			PkgVersion:        node.PkgVersion,
+			VersionScheme:     node.VersionScheme,
+			BottleRebuild:     node.BottleRebuild,
+			BottleTag:         node.Bottle.Tag,
+			BottleLayer:       node.Bottle.Layer.Digest,
+			BottleLayerSize:   node.Bottle.Layer.Size,
+			License:           node.License,
+			KegPath:           path.Join(policy.installPrefix, "Cellar", node.Name, node.PkgVersion),
+			ExportedMetadata:  exported,
 		})
 	}
 	slices.SortFunc(packages, func(a, b RuntimePackage) int { return strings.Compare(a.Name, b.Name) })
 	return RuntimeManifest{
-		SchemaVersion:       ManifestSchemaVersion,
+		SchemaVersion:       manifestSchemaVersion(record),
 		PolicyVersion:       record.PolicyVersion,
 		ResolutionDigest:    resolutionDigest,
 		PruningPolicyDigest: policy.digest,
@@ -367,7 +416,11 @@ func buildSPDX(record *resolution.Record, inventory Inventory) (SPDXDocument, er
 	packageIDs := make(map[string]string, len(record.Nodes))
 	packages := make([]SPDXPackage, 0, len(record.Nodes))
 	for _, node := range record.Nodes {
-		id := spdxPackageID(node.Name)
+		packageIdentity := node.Name
+		if formulaID := formulaIDForNode(record, node); formulaID != "" {
+			packageIdentity = formulaID
+		}
+		id := spdxPackageID(packageIdentity)
 		packageIDs[node.Name] = id
 		license := node.License
 		if strings.TrimSpace(license) == "" {
@@ -375,7 +428,7 @@ func buildSPDX(record *resolution.Record, inventory Inventory) (SPDXDocument, er
 		}
 		layerChecksum := strings.TrimPrefix(node.Bottle.Layer.Digest, "sha256:")
 		packages = append(packages, SPDXPackage{
-			Name:             node.Name,
+			Name:             packageIdentity,
 			SPDXID:           id,
 			VersionInfo:      node.PkgVersion,
 			PackageFileName:  node.Bottle.Filename,
@@ -391,7 +444,7 @@ func buildSPDX(record *resolution.Record, inventory Inventory) (SPDXDocument, er
 			ExternalRefs: []SPDXExternalRef{{
 				ReferenceCategory: "PACKAGE-MANAGER",
 				ReferenceType:     "purl",
-				ReferenceLocator:  "pkg:brew/" + purlEscape(node.Name) + "@" + purlEscape(node.PkgVersion),
+				ReferenceLocator:  "pkg:brew/" + purlEscape(packageIdentity) + "@" + purlEscape(node.PkgVersion),
 			}},
 		})
 	}

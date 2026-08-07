@@ -148,7 +148,13 @@ func (r *countingTailReader) tailAllZero() bool {
 // structure, and returns a sorted inventory. The reader is spooled to a private
 // temporary file so no archive parsing occurs until both authenticated hashes
 // and the exact compressed size have passed.
-func Verify(r io.Reader, expected Expectation, opts Options) (result *Result, retErr error) {
+func Verify(r io.Reader, expected Expectation, opts Options) (*Result, error) {
+	return verifyWithReceiptValidator(r, expected, opts, validateReceipt)
+}
+
+type receiptValidator func([]byte, Expectation) (ReceiptEvidence, error)
+
+func verifyWithReceiptValidator(r io.Reader, expected Expectation, opts Options, validate receiptValidator) (result *Result, retErr error) {
 	if r == nil {
 		return nil, verificationError(CodeInvalidExpectation, "", "nil bottle reader")
 	}
@@ -227,7 +233,7 @@ func Verify(r io.Reader, expected Expectation, opts Options) (result *Result, re
 
 	var receiptEvidence *ReceiptEvidence
 	if receipt != nil {
-		ev, err := validateReceipt(receipt.receipt, expected)
+		ev, err := validate(receipt.receipt, expected)
 		if err != nil {
 			return nil, verificationError(CodeInvalidReceipt, receipt.inventory.Path, "%v", err)
 		}

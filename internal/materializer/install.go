@@ -25,6 +25,7 @@ import (
 	"github.com/sozercan/dalec-homebrew/internal/bottle"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 	"github.com/sozercan/dalec-homebrew/internal/runtimefs"
+	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
 const DefaultPrefix = "/home/linuxbrew/.linuxbrew"
@@ -356,7 +357,7 @@ func installEnv(prefix string) []string {
 	return []string{
 		"HOME=/home/linuxbrew", "USER=linuxbrew", "LOGNAME=linuxbrew", "PATH=" + prefix + "/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"HOMEBREW_PREFIX=" + prefix, "HOMEBREW_REPOSITORY=" + prefix + "/Homebrew", "HOMEBREW_CELLAR=" + prefix + "/Cellar", "HOMEBREW_CACHE=/home/linuxbrew/.cache/Homebrew",
-		"HOMEBREW_NO_AUTO_UPDATE=1", "HOMEBREW_NO_ANALYTICS=1", "HOMEBREW_SYSTEM_ENV_TAKES_PRIORITY=1", "HOMEBREW_NO_INSTALL_FROM_API=1", "HOMEBREW_NO_INSTALL_CLEANUP=1", "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1",
+		"HOMEBREW_NO_AUTO_UPDATE=1", "HOMEBREW_NO_ANALYTICS=1", "HOMEBREW_REQUIRE_TAP_TRUST=1", "HOMEBREW_SYSTEM_ENV_TAKES_PRIORITY=1", "HOMEBREW_NO_INSTALL_FROM_API=1", "HOMEBREW_NO_INSTALL_CLEANUP=1", "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1",
 	}
 }
 
@@ -756,17 +757,17 @@ func classify(prefix string, node resolution.Node, before, after map[string]file
 		return err
 	}
 	sharedMimeGenerated := map[string]struct{}{}
-	if node.Name != sharedMimeInfoFormula && changesContainPathRoot(changes, sharedMimeDatabaseRoot) {
+	if !formulaAllowsRule(node, "generated-shared-mime", sharedMimeInfoFormula) && changesContainPathRoot(changes, sharedMimeDatabaseRoot) {
 		return fmt.Errorf("formula %q changed the generated shared MIME database without a controlled refresh", node.Name)
 	}
-	if node.Name == sharedMimeInfoFormula && changesContainPathRoot(changes, sharedMimeDatabaseRoot) {
+	if formulaAllowsRule(node, "generated-shared-mime", sharedMimeInfoFormula) && changesContainPathRoot(changes, sharedMimeDatabaseRoot) {
 		sharedMimeGenerated, err = validateSharedMimeInfoDatabase(prefix, node, before, after, options)
 		if err != nil {
 			return fmt.Errorf("validate shared MIME database: %w", err)
 		}
 	}
 	nodeNPMGenerated := map[string]struct{}{}
-	if node.Name == nodeFormula {
+	if formulaAllowsRule(node, "generated-node-npm", nodeFormula) {
 		nodeNPMGenerated, err = validateNodeNPMRuntime(prefix, node, before, after, options)
 		if err != nil {
 			return fmt.Errorf("validate Node npm runtime: %w", err)
@@ -988,7 +989,7 @@ var sharedMimeGeneratedTypes = map[string]struct{}{
 }
 
 func validateNodeNPMRuntime(prefix string, node resolution.Node, before, after map[string]fileState, options classifyOptions) (map[string]struct{}, error) {
-	if node.Name != nodeFormula || !verifiedBottleMatchesNode(node, options.verified) {
+	if !formulaAllowsRule(node, "generated-node-npm", nodeFormula) || !verifiedBottleMatchesNode(node, options.verified) {
 		return nil, fmt.Errorf("verified Node bottle identity is absent")
 	}
 	if options.runtimeUID == 0 || options.runtimeGID == 0 {
@@ -1115,7 +1116,7 @@ func validateNodeNPMCopiedEntry(prefix string, snapshot map[string]fileState, so
 }
 
 func isNodeNPMGlobalLink(prefix string, node resolution.Node, keg, rel, resolved string, snapshot map[string]fileState, generated map[string]struct{}) bool {
-	if node.Name != nodeFormula || len(generated) == 0 {
+	if !formulaAllowsRule(node, "generated-node-npm", nodeFormula) || len(generated) == 0 {
 		return false
 	}
 	commands := map[string]string{
@@ -1180,7 +1181,7 @@ func changeKind(changes []Change, target string) (string, bool) {
 }
 
 func validateSharedMimeInfoDatabase(prefix string, node resolution.Node, before, after map[string]fileState, options classifyOptions) (map[string]struct{}, error) {
-	if node.Name != sharedMimeInfoFormula || !verifiedBottleMatchesNode(node, options.verified) {
+	if !formulaAllowsRule(node, "generated-shared-mime", sharedMimeInfoFormula) || !verifiedBottleMatchesNode(node, options.verified) {
 		return nil, fmt.Errorf("verified shared-mime-info bottle identity is absent")
 	}
 	if options.runtimeUID == 0 || options.runtimeGID == 0 {
@@ -1465,10 +1466,20 @@ func isControlledGdkPixbufLoadersCacheMutation(node resolution.Node, rel, kind s
 	if rel != gdkPixbufLoadersCachePath || !verifiedBottleMatchesNode(node, verified) {
 		return false
 	}
-	if node.Name == gdkPixbufFormula {
+	if formulaAllowsRule(node, "gdk-pixbuf-loader-cache", gdkPixbufFormula) {
 		return kind == "created"
 	}
-	return kind == "modified" && nodeDependsOn(node, gdkPixbufFormula) && len(verifiedGdkPixbufLoaders(node, verified)) > 0
+	return kind == "modified" && formulaAllowsRule(node, "gdk-pixbuf-loader-cache", "") && nodeDependsOn(node, gdkPixbufFormula) && len(verifiedGdkPixbufLoaders(node, verified)) > 0
+}
+
+func formulaAllowsRule(node resolution.Node, rule, legacyName string) bool {
+	if node.PolicyFormulaID != "" {
+		return policyv2.HasEmbeddedRule(node.PolicyFormulaID, rule)
+	}
+	if legacyName == "" {
+		return strings.HasPrefix(node.FullName, "homebrew/core/")
+	}
+	return node.Name == legacyName && node.FullName == "homebrew/core/"+legacyName
 }
 
 func verifiedBottleMatchesNode(node resolution.Node, verified bottle.Result) bool {
@@ -2020,7 +2031,7 @@ func isPackageManagerState(p string) bool {
 }
 
 func isBrewedLoaderMutation(prefix string, node resolution.Node, rel string, snapshot map[string]fileState) bool {
-	if rel != "lib/ld.so" || node.Name != "glibc" {
+	if rel != "lib/ld.so" || !formulaAllowsRule(node, "brewed-loader", "glibc") {
 		return false
 	}
 	state, ok := snapshot[rel]
@@ -2182,7 +2193,7 @@ func snapshotPathWithin(candidate, root string) bool {
 }
 
 func isValidatedNodeNPMKegLink(prefix string, node resolution.Node, verified bottle.Result, snapshot map[string]fileState, rel string) bool {
-	if node.Name != nodeFormula || !verifiedBottleMatchesNode(node, verified) {
+	if !formulaAllowsRule(node, "generated-node-npm", nodeFormula) || !verifiedBottleMatchesNode(node, verified) {
 		return false
 	}
 	base := path.Join("Cellar", node.Name, node.PkgVersion)
@@ -2453,8 +2464,10 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 			if actual.Mode&os.ModeSticky != 0 {
 				actualMode |= os.ModeSticky
 			}
-			if actualMode != expectedMode && !allowsPostInstallOwnerWrite(node, verified, entry, declaredChanged, expectedMode, actualMode) {
-				return fmt.Errorf("verified bottle path %s permissions changed", rel)
+			if actualMode != expectedMode &&
+				!allowsInstallerUmaskTightening(expectedMode, actualMode) &&
+				!allowsPostInstallOwnerWrite(node, verified, entry, declaredChanged, expectedMode, actualMode) {
+				return fmt.Errorf("verified bottle path %s permissions changed from %#o to %#o", rel, expectedMode, actualMode)
 			}
 		}
 	}
@@ -2544,7 +2557,7 @@ const (
 // inventory remains authoritative for every other path.
 func allowedPostInstallKegPaths(node resolution.Node, base string, after map[string]fileState) (map[string]struct{}, error) {
 	allowed := map[string]struct{}{}
-	if node.Name != "glibc" {
+	if !formulaAllowsRule(node, "generated-glibc-locale", "glibc") {
 		return allowed, nil
 	}
 
@@ -2600,6 +2613,15 @@ func allowedPostInstallKegPaths(node resolution.Node, base string, after map[str
 	return allowed, nil
 }
 
+func allowsInstallerUmaskTightening(expectedMode, actualMode fs.FileMode) bool {
+	// Homebrew extracts bottles with tar --no-same-owner and without
+	// --same-permissions. The release-bound installer runs with umask 022, so
+	// group/other write bits present in the authenticated archive are removed.
+	// Accept only that exact permission tightening; no read, execute, sticky,
+	// setid, or owner permission may change here.
+	return actualMode != expectedMode && actualMode == expectedMode&^0o022
+}
+
 func allowsPostInstallOwnerWrite(node resolution.Node, verified bottle.Result, entry bottle.InventoryEntry, declaredChanged bool, expectedMode, actualMode fs.FileMode) bool {
 	if entry.Type != bottle.EntryRegular && entry.Type != bottle.EntryHardlink {
 		return false
@@ -2618,6 +2640,9 @@ func allowsPostInstallOwnerWrite(node resolution.Node, verified bottle.Result, e
 }
 
 func isPythonVenvTemplate(node resolution.Node, verified bottle.Result, kegPath string) bool {
+	if !formulaAllowsRule(node, "python-venv-template", "") {
+		return false
+	}
 	minor, ok := strings.CutPrefix(node.Name, "python@")
 	if !ok || !validPythonMinor(minor) {
 		return false
@@ -2681,27 +2706,62 @@ func optNamesForNode(record *resolution.Record, name string) map[string]struct{}
 }
 
 func verifyInstalledSubset(prefix string, record *resolution.Record, through string) error {
-	allowed := map[string]struct{}{}
-	for _, name := range record.InstallOrder {
-		allowed[name] = struct{}{}
+	count := -1
+	for i, name := range record.InstallOrder {
 		if name == through {
+			count = i + 1
 			break
 		}
+	}
+	if count < 0 {
+		return fmt.Errorf("install-order entry %q is absent", through)
+	}
+	return verifyInstalledPrefixCount(prefix, record, count)
+}
+
+func verifyInstalledPrefixCount(prefix string, record *resolution.Record, count int) error {
+	if record == nil || count < 0 || count > len(record.InstallOrder) {
+		return errors.New("invalid installed-prefix verification scope")
+	}
+	expected := make(map[string]resolution.Node, count)
+	for _, name := range record.InstallOrder[:count] {
+		node, ok := nodeByName(record, name)
+		if !ok {
+			return fmt.Errorf("install node %q is absent", name)
+		}
+		expected[name] = node
 	}
 	entries, err := os.ReadDir(filepath.Join(prefix, "Cellar"))
 	if err != nil {
 		return err
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			return fmt.Errorf("non-directory Cellar rack %s", e.Name())
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			return fmt.Errorf("non-directory Cellar rack %s", entry.Name())
 		}
-		if _, ok := allowed[e.Name()]; !ok {
-			return fmt.Errorf("Homebrew added or substituted unexpected keg %q", e.Name())
+		node, ok := expected[entry.Name()]
+		if !ok {
+			return fmt.Errorf("Homebrew added or substituted unexpected keg %q", entry.Name())
 		}
+		versions, err := os.ReadDir(filepath.Join(prefix, "Cellar", entry.Name()))
+		if err != nil {
+			return err
+		}
+		if len(versions) != 1 || !versions[0].IsDir() || versions[0].Name() != node.PkgVersion {
+			return fmt.Errorf("keg %q does not contain only expected version %q", entry.Name(), node.PkgVersion)
+		}
+		if err := verifyReceipt(filepath.Join(prefix, "Cellar", entry.Name(), node.PkgVersion, "INSTALL_RECEIPT.json"), node, record.Nodes); err != nil {
+			return err
+		}
+		seen[entry.Name()] = struct{}{}
+	}
+	if len(seen) != len(expected) {
+		return fmt.Errorf("installed prefix has %d kegs, expected %d", len(seen), len(expected))
 	}
 	return nil
 }
+
 func verifyClosure(prefix string, record *resolution.Record) error {
 	entries, err := os.ReadDir(filepath.Join(prefix, "Cellar"))
 	if err != nil {

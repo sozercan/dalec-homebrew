@@ -31,6 +31,16 @@ import (
 	speccontract "github.com/sozercan/dalec-homebrew/internal/spec"
 )
 
+func dalecLoadOptions() []dalecfrontend.LoadOpt {
+	return []dalecfrontend.LoadOpt{dalecfrontend.WithAllowArgs(config.BuildArgNames()...)}
+}
+
+type preflightPlatform struct {
+	platform      ocispec.Platform
+	selection     *speccontract.Selection
+	effectiveSpec []byte
+}
+
 func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, error) {
 	dc, err := dockerui.NewClient(client)
 	if err != nil {
@@ -63,7 +73,8 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		return nil, fmt.Errorf("read Dalec spec for preflight: %w", err)
 	}
 	rawSpec := strings.TrimSpace(string(source.Data))
-	if err := speccontract.PreflightFormulaNames([]byte(rawSpec), targetKey); err != nil {
+	nonCoreCapability := speccontract.Capabilities{NonCoreTaps: cfg.SupportsNonCoreTaps()}
+	if err := speccontract.PreflightFormulaNames([]byte(rawSpec), targetKey, nonCoreCapability); err != nil {
 		return nil, err
 	}
 	declarationOrder, err := speccontract.RuntimeDependencyOrder([]byte(rawSpec), targetKey)
@@ -74,11 +85,6 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 	if len(targets) == 0 {
 		targets = []ocispec.Platform{platforms.DefaultSpec()}
 	}
-	type preflightPlatform struct {
-		platform      ocispec.Platform
-		selection     *speccontract.Selection
-		effectiveSpec []byte
-	}
 	preflight := make([]preflightPlatform, len(targets))
 	for i, target := range targets {
 		p := platforms.Normalize(target)
@@ -88,11 +94,11 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		if p.OS != "linux" || (p.Architecture != "amd64" && p.Architecture != "arm64") {
 			return nil, fmt.Errorf("unsupported target platform %s", platforms.Format(p))
 		}
-		dalecSpec, err := dalecfrontend.LoadSpec(ctx, dc, &p, dalecfrontend.WithAllowArgs(config.BuildArgNames()...))
+		dalecSpec, err := dalecfrontend.LoadSpec(ctx, dc, &p, dalecLoadOptions()...)
 		if err != nil {
 			return nil, err
 		}
-		selection, err := speccontract.Validate(dalecSpec, targetKey, p.Architecture, declarationOrder)
+		selection, err := speccontract.Validate(dalecSpec, targetKey, p.Architecture, declarationOrder, nonCoreCapability)
 		if err != nil {
 			return nil, err
 		}
@@ -114,6 +120,14 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 	registry, err := hboci.NewClient("https://ghcr.io")
 	if err != nil {
 		return nil, err
+	}
+
+	nonCore, err := resolveInvocationNonCore(ctx, client, cfg, snapshot, preflight)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.SupportsNonCoreTaps() {
+		return buildV2(ctx, client, dc, cfg, invokingFrontend, targetKey, preflight, snapshot, registry, nonCore)
 	}
 
 	records := make([]*resolution.Record, len(preflight))

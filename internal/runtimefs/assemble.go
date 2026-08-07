@@ -27,7 +27,7 @@ func Assemble(sourcePrefix, outputPrefix string, record *resolution.Record, opts
 // generated inventory, and returns canonical evidence. The output must not
 // exist or must be an empty real directory. On failure, no partial assembled
 // tree is left at outputPrefix.
-func AssembleContext(ctx context.Context, sourcePrefix, outputPrefix string, record *resolution.Record, opts Options) (_ *Result, retErr error) {
+func AssembleContext(ctx context.Context, sourcePrefix, outputPrefix string, record *resolution.Record, opts Options) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -35,6 +35,43 @@ func AssembleContext(ctx context.Context, sourcePrefix, outputPrefix string, rec
 	if err != nil {
 		return nil, err
 	}
+	resolutionDigest, err := resolution.Digest(record)
+	if err != nil {
+		return nil, runtimeError(CodeInvalidRecord, "", "canonical resolution digest: %v", err)
+	}
+	return assembleContextWithPolicy(ctx, sourcePrefix, outputPrefix, record, opts, policy, resolutionDigest.String())
+}
+
+// AssembleV2 constructs and verifies a runtime filesystem from a validated V2
+// record while preserving its canonical digest and full Formula identities in
+// evidence. Rack names are used only for filesystem translation.
+func AssembleV2(sourcePrefix, outputPrefix string, record *resolution.RecordV2, opts Options) (*Result, error) {
+	return AssembleContextV2(context.Background(), sourcePrefix, outputPrefix, record, opts)
+}
+
+func AssembleContextV2(ctx context.Context, sourcePrefix, outputPrefix string, record *resolution.RecordV2, opts Options) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := resolution.ValidateV2(record); err != nil {
+		return nil, runtimeError(CodeInvalidRecord, "", "%v", err)
+	}
+	projected, _, err := resolution.ProjectV2ForRuntime(record)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := normalizeOptionsUnchecked(projected, opts)
+	if err != nil {
+		return nil, err
+	}
+	resolutionDigest, err := resolution.DigestV2(record)
+	if err != nil {
+		return nil, runtimeError(CodeInvalidRecord, "", "canonical V2 resolution digest: %v", err)
+	}
+	return assembleContextWithPolicy(ctx, sourcePrefix, outputPrefix, projected, opts, policy, resolutionDigest.String())
+}
+
+func assembleContextWithPolicy(ctx context.Context, sourcePrefix, outputPrefix string, record *resolution.Record, opts Options, policy *normalizedPolicy, resolutionDigest string) (_ *Result, retErr error) {
 	sourceRoot, outputRoot, err := normalizeHostRoots(sourcePrefix, outputPrefix)
 	if err != nil {
 		return nil, err
@@ -48,12 +85,8 @@ func AssembleContext(ctx context.Context, sourcePrefix, outputPrefix string, rec
 	if err != nil {
 		return nil, err
 	}
-	resolutionDigest, err := resolution.Digest(record)
-	if err != nil {
-		return nil, runtimeError(CodeInvalidRecord, "", "canonical resolution digest: %v", err)
-	}
-	inventory := buildInventory(scan, record, policy, resolutionDigest.String())
-	prune, err := buildPruneManifest(scan, record, policy, resolutionDigest.String())
+	inventory := buildInventory(scan, record, policy, resolutionDigest)
+	prune, err := buildPruneManifest(scan, record, policy, resolutionDigest)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +109,7 @@ func AssembleContext(ctx context.Context, sourcePrefix, outputPrefix string, rec
 	if err := copyPlannedTree(ctx, stage, scan, record, opts); err != nil {
 		return nil, err
 	}
-	if err := verifyWithPolicy(stage, record, &inventory, opts, policy); err != nil {
+	if err := verifyWithPolicyDigest(stage, record, &inventory, opts, policy, resolutionDigest); err != nil {
 		return nil, err
 	}
 
@@ -329,18 +362,26 @@ func Verify(outputPrefix string, record *resolution.Record, inventory *Inventory
 	if err != nil {
 		return runtimeError(CodeVerification, outputPrefix, "absolute output path: %v", err)
 	}
-	return verifyWithPolicy(filepath.Clean(root), record, inventory, opts, policy)
-}
-
-func verifyWithPolicy(root string, record *resolution.Record, inventory *Inventory, opts Options, policy *normalizedPolicy) error {
-	if inventory == nil {
-		return runtimeError(CodeVerification, "", "nil inventory")
-	}
 	resolutionDigest, err := resolution.Digest(record)
 	if err != nil {
 		return runtimeError(CodeInvalidRecord, "", "canonical resolution digest: %v", err)
 	}
-	if inventory.SchemaVersion != InventorySchemaVersion || inventory.PolicyVersion != record.PolicyVersion || inventory.ResolutionDigest != resolutionDigest.String() || inventory.PruningPolicyDigest != policy.digest || inventory.SourceDateEpoch != record.SourceDateEpoch || inventory.Prefix != policy.installPrefix {
+	return verifyWithPolicyDigest(filepath.Clean(root), record, inventory, opts, policy, resolutionDigest.String())
+}
+
+func verifyWithPolicy(root string, record *resolution.Record, inventory *Inventory, opts Options, policy *normalizedPolicy) error {
+	resolutionDigest, err := resolution.Digest(record)
+	if err != nil {
+		return runtimeError(CodeInvalidRecord, "", "canonical resolution digest: %v", err)
+	}
+	return verifyWithPolicyDigest(root, record, inventory, opts, policy, resolutionDigest.String())
+}
+
+func verifyWithPolicyDigest(root string, record *resolution.Record, inventory *Inventory, opts Options, policy *normalizedPolicy, resolutionDigest string) error {
+	if inventory == nil {
+		return runtimeError(CodeVerification, "", "nil inventory")
+	}
+	if inventory.SchemaVersion != inventorySchemaVersion(record) || inventory.PolicyVersion != record.PolicyVersion || inventory.ResolutionDigest != resolutionDigest || inventory.PruningPolicyDigest != policy.digest || inventory.SourceDateEpoch != record.SourceDateEpoch || inventory.Prefix != policy.installPrefix {
 		return runtimeError(CodeVerification, "", "inventory identity does not match resolution and pruning policy")
 	}
 	rootInfo, err := os.Lstat(root)

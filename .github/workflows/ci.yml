@@ -21,6 +21,7 @@ env:
   BUILDKIT_IMAGE: docker.io/moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2
   BINFMT_IMAGE: docker.io/tonistiigi/binfmt:latest@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
   ACTIONLINT_IMAGE: docker.io/rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+  REGISTRY_IMAGE: docker.io/library/registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
 
 jobs:
   go:
@@ -122,6 +123,7 @@ jobs:
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
       - name: Build amd64 materializer compatibility image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -166,3 +168,63 @@ jobs:
             --image dalec-homebrew-materializer:compat-arm64 \
             --platform linux/arm64 \
             --current
+
+  e2e:
+    name: Non-core multi-package container E2E
+    needs: [go, dockerfile]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install checksum-pinned Buildx
+        run: |
+          set -euo pipefail
+          [[ "$BUILDX_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case "$(uname -m)" in
+            x86_64|amd64)
+              arch=amd64
+              expected=$BUILDX_SHA256_AMD64
+              ;;
+            aarch64|arm64)
+              arch=arm64
+              expected=$BUILDX_SHA256_ARM64
+              ;;
+            *)
+              echo "unsupported Buildx host architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+          asset="buildx-${BUILDX_VERSION}.linux-${arch}"
+          binary="$RUNNER_TEMP/$asset"
+          curl --fail --location --silent --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --max-filesize 134217728 \
+            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/${asset}" \
+            --output "$binary"
+          printf '%s  %s\n' "$expected" "$binary" | sha256sum -c -
+          plugin_dir="${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins"
+          install -d -m 0755 "$plugin_dir"
+          install -m 0755 "$binary" "$plugin_dir/docker-buildx"
+          docker buildx version | grep -F " $BUILDX_VERSION "
+
+      - name: Build and test build-local non-core V2
+        env:
+          DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE: ${{ env.BUILDKIT_IMAGE }}
+          DALEC_HOMEBREW_E2E_REGISTRY_IMAGE: ${{ env.REGISTRY_IMAGE }}
+          DALEC_HOMEBREW_E2E_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          DALEC_HOMEBREW_E2E_IMAGE: dalec-homebrew-noncore-e2e:${{ github.sha }}
+          DALEC_HOMEBREW_E2E_SPEC: examples/ci-noncore-multi-package.yaml
+          DALEC_HOMEBREW_E2E_PROGRESS: plain
+        run: ./scripts/noncore-e2e.sh

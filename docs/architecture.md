@@ -133,3 +133,34 @@ The installed prefix is scanned into an inventory. Only allowlist-selected prefi
 Each declared Dalec test runs on an independent branch derived from the final pruned state. The frontend injects an ephemeral test runner and plan under `/__dalec_homebrew`; those files are not exported. Commands inherit the final image user, environment, and working directory, after which the supported test-level directory, test environment, and step environment overrides apply. BuildKit disables networking for each branch. Development frontends may set `DALEC_SKIP_TESTS`; release-bound frontends reject that bypass.
 
 The image contents and evidence files are listed in the [usage reference](usage.md).
+
+## V2 public-tap flow
+
+V2 keeps the V1 core path intact and adds a release-bound path only when a root uses `owner/tap/formula`:
+
+```text
+all-platform raw/typed preflight
+  -> official core JWS authentication
+  -> one per-invocation catalog-set request
+  -> build-local exact-commit tap extraction and canonical catalog validation
+  -> independent cross-tap normalization, cycle/order, platform, and rack-collision checks
+  -> independent GHCR descriptor resolution or one bounded HTTPS fetch exec per selected artifact
+  -> canonical resolution V2
+  -> prepare (all bottles or policy-derived bottles and fetch evidence verified; synthetic taps and trust store sealed)
+  -> one network-disabled install exec per install-order node
+  -> finalize onto the clean runtime base with V2 inventory, prune, manifest, and SPDX evidence
+```
+
+Core-only builds bypass tap extraction. For non-core roots, the frontend constructs one invocation-wide fixed-point ingestion plan. BuildKit fetches each reached default-GitHub tap once, binds its exact commit/tree/archive identity, and evaluates Formula metadata through the digest-pinned extractor with networking disabled, read-only source mounts, and disposable cache and temporary mounts. The frontend strictly decodes each bounded catalog and independently recomputes dependency normalization, closure, cycles, ordering, and rack collisions.
+
+No catalog server or signing key is involved. Metadata evidence records `build-local-tap-extraction-v1` plus the extractor reference and canonical catalog digest. Because there is no shared writer, build-local ingestion cannot provide a cross-build monotonic sequence floor; the explicit rollback policy records that limitation, and release replay requires retained catalog and artifact bytes.
+
+HTTPS bottles never use `llb.HTTP`. A minimal CA-plus-static-binary fetcher enforces public DNS/IP destinations, HTTPS port 443, redirect allowlists, exact positive size up to 1 GiB, a 15-minute deadline, and SHA-256 before atomically publishing mode-0444 output and redacted evidence.
+
+A Formula without a native bottle remains unsupported unless its exact Formula ID appears in the release-bound prebuilt-archive section of the tap policy. In that case build-local ingestion verifies the complete bounded tar+gzip inventory plus the selected static ELF and Go build properties, then creates a deterministic receiptless **derived bottle** containing only the policy-selected executable and exact authenticated Formula source. The derived bytes remain an invocation-local content-addressed BuildKit input (`build-local-artifact-v1`) and are reverified by the offline materializer. Formula `install` and `post_install` methods are not run.
+
+During ingestion, GHCR source annotations are used to recover the exact historical bottle-source commit and Formula path. The source file is fetched at that immutable revision and compared byte-for-byte with the embedded Formula after the deterministic Homebrew bottle block (which is intentionally omitted from bottle Formula copies) is removed. Generic HTTPS bottles do not expose an equivalent authenticated source revision, so V2 leaves the historical repository/commit/path fields empty and requires the explicit `https-bottle-embedded-formula-digest-only-v1` bottle-source waiver. The current build-local exact-commit tap source and the separately verified embedded-Formula digest remain distinct evidence.
+
+GHCR artifacts may advertise a Sigstore bundle through an OCI 1.1 referrer or the digest-bound `dev.sigstore.bundle.url` and `dev.sigstore.bundle.digest` annotations; generic HTTPS bottles use the deterministic `<bottle-path>.sigstore.json` sidecar convention. When present, ingestion fetches the bounded bundle, verifies its SHA-256, in-toto subject, transparency evidence, GitHub Actions issuer, and repository-scoped identity against the Sigstore trusted root embedded in the V2 tap policy. If no supported discovery route exposes evidence, the artifact records the explicit build-local catalog/checksum provenance waiver; partial, ambiguous, or invalid advertised evidence fails closed.
+
+V2 materialization seeds the protected Homebrew prefix once, stages bottle-embedded Formula source under exact synthetic tap paths, and writes a read-only `trust.json` containing only selected non-core Formula IDs. Each install starts from a fresh materializer rootfs with networking disabled; only the cumulative prefix and explicit delta evidence persist. Formula-specific runtime exceptions are granted only to exact `homebrew/core/...` identities.

@@ -538,7 +538,7 @@ func (client *Client) registryURL(repository, kind, reference string) (*url.URL,
 	if err := validateRepository(repository); err != nil {
 		return nil, err
 	}
-	if kind != "manifests" && kind != "blobs" {
+	if kind != "manifests" && kind != "blobs" && kind != "referrers" {
 		return nil, fmt.Errorf("unsupported registry object kind %q", kind)
 	}
 	if strings.ContainsAny(reference, "/\\?#\x00\r\n") || reference == "" {

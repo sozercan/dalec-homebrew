@@ -19,7 +19,9 @@ import (
 	"strconv"
 	"strings"
 
+	digest "github.com/opencontainers/go-digest"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
+	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
 type Options struct {
@@ -560,6 +562,13 @@ func discoverExposedExecutables(root, prefix, logicalPrefix string, searchPATH [
 	return exposed, nil
 }
 
+func runtimeRule(node resolution.Node, rule string, legacy func() bool) bool {
+	if node.PolicyFormulaID != "" {
+		return policyv2.HasEmbeddedRule(node.PolicyFormulaID, rule)
+	}
+	return legacy()
+}
+
 func runtimeScriptScope(root, prefix string, opts Options) (scriptScope, bool, error) {
 	resolutionData, resolutionFound, err := readRuntimeEvidence(root, prefix, opts.LogicalPrefix, "/usr/share/dalec-homebrew/resolution.json", 16<<20)
 	if err != nil {
@@ -575,13 +584,38 @@ func runtimeScriptScope(root, prefix string, opts Options) (scriptScope, bool, e
 	if !resolutionFound {
 		return scriptScope{required: map[string]struct{}{}, auxiliary: map[string]string{}}, false, nil
 	}
-	record, err := resolution.Decode(resolutionData)
+	schema, err := resolution.SchemaVersionOf(resolutionData)
 	if err != nil {
-		return scriptScope{}, false, fmt.Errorf("decode runtime resolution evidence: %w", err)
+		return scriptScope{}, false, fmt.Errorf("decode runtime resolution schema: %w", err)
 	}
-	digest, err := resolution.Digest(record)
+	var record *resolution.Record
+	var resolutionDigest string
+	expectedManifestSchema := "dalec-homebrew-runtime-manifest/v1"
+	switch schema {
+	case resolution.SchemaVersionV1:
+		record, err = resolution.Decode(resolutionData)
+		if err == nil {
+			var digestValue digest.Digest
+			digestValue, err = resolution.Digest(record)
+			resolutionDigest = digestValue.String()
+		}
+	case resolution.SchemaVersionV2:
+		var recordV2 *resolution.RecordV2
+		recordV2, err = resolution.DecodeV2(resolutionData)
+		if err == nil {
+			record, _, err = resolution.ProjectV2ForRuntime(recordV2)
+		}
+		if err == nil {
+			var digestValue digest.Digest
+			digestValue, err = resolution.DigestV2(recordV2)
+			resolutionDigest = digestValue.String()
+		}
+		expectedManifestSchema = "dalec-homebrew-runtime-manifest/v2"
+	default:
+		err = fmt.Errorf("unsupported runtime resolution schema %q", schema)
+	}
 	if err != nil {
-		return scriptScope{}, false, fmt.Errorf("digest runtime resolution evidence: %w", err)
+		return scriptScope{}, false, fmt.Errorf("decode or digest runtime resolution evidence: %w", err)
 	}
 	var manifest struct {
 		SchemaVersion    string              `json:"schema_version"`
@@ -592,7 +626,7 @@ func runtimeScriptScope(root, prefix string, opts Options) (scriptScope, bool, e
 	if err := json.Unmarshal(manifestData, &manifest); err != nil {
 		return scriptScope{}, false, fmt.Errorf("decode runtime manifest evidence: %w", err)
 	}
-	if manifest.SchemaVersion != "dalec-homebrew-runtime-manifest/v1" || manifest.ResolutionDigest != digest.String() {
+	if manifest.SchemaVersion != expectedManifestSchema || manifest.ResolutionDigest != resolutionDigest {
 		return scriptScope{}, false, fmt.Errorf("runtime manifest does not bind the embedded resolution")
 	}
 	if manifest.Prefix != opts.LogicalPrefix || manifest.Platform != record.Input.Platform || record.Input.Platform.Architecture != opts.Arch {
@@ -662,19 +696,21 @@ func runtimeScriptScope(root, prefix string, opts Options) (scriptScope, bool, e
 	}
 	for _, node := range record.Nodes {
 		switch {
-		case node.Name == "go":
+		case runtimeRule(node, "runtime-aux-go", func() bool { return node.Name == "go" && node.FullName == "homebrew/core/go" }):
 			for _, name := range []string{"all.rc", "clean.rc", "make.rc", "run.rc"} {
 				if err := add(node, path.Join("libexec/src", name), "/bin/rc -e"); err != nil {
 					return scriptScope{}, false, err
 				}
 			}
-		case node.Name == "ncurses":
+		case runtimeRule(node, "runtime-aux-ncurses", func() bool { return node.Name == "ncurses" && node.FullName == "homebrew/core/ncurses" }):
 			for _, name := range []string{"debian", "debian-mingw", "debian-mingw64"} {
 				if err := add(node, path.Join("share/ncurses/test/package", name, "rules"), "/usr/bin/make -f"); err != nil {
 					return scriptScope{}, false, err
 				}
 			}
-		case strings.HasPrefix(node.Name, "python@3."):
+		case runtimeRule(node, "runtime-aux-python", func() bool {
+			return strings.HasPrefix(node.Name, "python@3.") && node.FullName == "homebrew/core/"+node.Name
+		}):
 			minor := strings.TrimPrefix(node.Name, "python@")
 			pythonAuxiliary := map[string]string{
 				path.Join("lib/python"+minor, "idlelib/idle_test/example_noext"):             "usr/bin/env python",
@@ -687,11 +723,13 @@ func runtimeScriptScope(root, prefix string, opts Options) (scriptScope, bool, e
 					return scriptScope{}, false, err
 				}
 			}
-		case node.Name == "dbus":
+		case runtimeRule(node, "runtime-aux-dbus", func() bool { return node.Name == "dbus" && node.FullName == "homebrew/core/dbus" }):
 			if err := add(node, "share/doc/dbus/examples/GetAllMatchRules.py", "/usr/bin/env python"); err != nil {
 				return scriptScope{}, false, err
 			}
-		case node.Name == "llvm" || strings.HasPrefix(node.Name, "llvm@"):
+		case runtimeRule(node, "runtime-aux-llvm", func() bool {
+			return (node.Name == "llvm" || strings.HasPrefix(node.Name, "llvm@")) && node.FullName == "homebrew/core/"+node.Name
+		}):
 			if _, requested := requestedNames[node.Name]; requested {
 				continue
 			}

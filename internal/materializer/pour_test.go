@@ -43,3 +43,49 @@ func TestPourAdapterPropagatesDeferredHomebrewFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestPourAdapterDerivedPrebuiltSkipsFormulaHooks(t *testing.T) {
+	data, err := os.ReadFile("pour.rb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		`ARGV.fetch(3) != "derived-prebuilt-v1"`,
+		"formula.bottle_specification.sha256(",
+		"cellar: :any_skip_relocation",
+		"skip_post_install: derived_prebuilt",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("derived prebuilt adapter is missing %q", want)
+		}
+	}
+	if !strings.Contains(source, "formula.local_bottle_path = bottle_path") {
+		t.Fatal("derived prebuilt path must remain a local bottle pour")
+	}
+}
+
+func TestPourAdapterV2LoadsStagedTapFormula(t *testing.T) {
+	data, err := os.ReadFile("pour.rb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		"formula_id = ARGV.fetch(0)",
+		"formula_path = Pathname(ARGV.fetch(1)).realpath",
+		"formula = Formulary.factory(formula_path, force_bottle: true)",
+		"formula.local_bottle_path = bottle_path",
+		`"homebrew/core/#{formula.name}"`,
+		`abort "staged Formula identity mismatch" unless actual_id == formula_id`,
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("V2 adapter is missing %q", want)
+		}
+	}
+	legacy := strings.Index(source, `ENV["HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS"] = "1"`)
+	v2 := strings.Index(source, "formula_id = ARGV.fetch(0)")
+	if legacy < 0 || v2 < 0 || legacy > v2 {
+		t.Fatal("legacy path switch must remain confined to the one-argument branch")
+	}
+}

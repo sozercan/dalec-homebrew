@@ -200,13 +200,15 @@ func newRegistryFixture(t *testing.T, options registryFixtureOptions) *registryF
 }
 
 func commonAnnotations(formula Formula, reference FormulaReference, refName, title string) map[string]string {
+	commit := strings.Repeat("a", 40)
 	return map[string]string{
-		annotationPackageType:     homebrewBottlePackageType,
-		ocispec.AnnotationVendor:  "homebrew",
-		ocispec.AnnotationTitle:   title,
-		ocispec.AnnotationVersion: reference.PkgVersion,
-		ocispec.AnnotationRefName: refName,
-		ocispec.AnnotationSource:  "https://github.com/homebrew/homebrew-core/blob/0123456789abcdef/Formula/f/fixture.rb",
+		annotationPackageType:      homebrewBottlePackageType,
+		ocispec.AnnotationVendor:   "homebrew",
+		ocispec.AnnotationTitle:    title,
+		ocispec.AnnotationVersion:  reference.PkgVersion,
+		ocispec.AnnotationRefName:  refName,
+		ocispec.AnnotationRevision: commit,
+		ocispec.AnnotationSource:   "https://github.com/homebrew/homebrew-core/blob/" + commit + "/Formula/f/fixture.rb",
 	}
 }
 

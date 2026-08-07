@@ -260,7 +260,7 @@ func TestClassifyAllowsContainedIncludeLinks(t *testing.T) {
 
 func TestValidateExternalBottleSymlinkTargetsRequiresExactDependencyKeg(t *testing.T) {
 	node := resolution.Node{Name: "hello", PkgVersion: "1", Dependencies: []resolution.Requirement{{Name: "python@3.14", Direct: true}}}
-	python := resolution.Node{Name: "python@3.14", PkgVersion: "3.14.1"}
+	python := resolution.Node{Name: "python@3.14", FullName: "homebrew/core/python@3.14", PkgVersion: "3.14.1"}
 	verified := bottle.Result{Inventory: []bottle.InventoryEntry{{Path: "hello/1/libexec/bin/python3.14", PrefixTarget: "opt/python@3.14/bin/python3.14"}}}
 	snapshot := map[string]fileState{
 		"Cellar":                                   {Type: "directory"},
@@ -292,7 +292,7 @@ func TestValidateExternalBottleSymlinkTargetsRequiresExactDependencyKeg(t *testi
 
 func TestReconcileInstalledKegAllowsSignedDependencyOptSymlink(t *testing.T) {
 	node := resolution.Node{Name: "hello", PkgVersion: "1", Dependencies: []resolution.Requirement{{Name: "python@3.14", Direct: true}}}
-	python := resolution.Node{Name: "python@3.14", PkgVersion: "3.14.1"}
+	python := resolution.Node{Name: "python@3.14", FullName: "homebrew/core/python@3.14", PkgVersion: "3.14.1"}
 	verified := bottle.Result{
 		Name:       "hello",
 		PkgVersion: "1",
@@ -349,7 +349,7 @@ func TestReconcileInstalledKegAllowsNodeNPMPostInstallLinkRewrite(t *testing.T) 
 	content := []byte("npm\n")
 	digest := sha256.Sum256(content)
 	digestHex := hex.EncodeToString(digest[:])
-	node := resolution.Node{Name: "node", PkgVersion: "1"}
+	node := resolution.Node{Name: "node", FullName: "homebrew/core/node", PkgVersion: "1"}
 	verified := bottle.Result{
 		Name:       "node",
 		PkgVersion: "1",
@@ -742,7 +742,7 @@ func TestValidateNodeNPMRuntimeAndGlobalLinks(t *testing.T) {
 		return fileState{Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: target, Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true}
 	}
 
-	node := resolution.Node{Name: "node", PkgVersion: "1"}
+	node := resolution.Node{Name: "node", FullName: "homebrew/core/node", PkgVersion: "1"}
 	verified := bottle.Result{Name: "node", PkgVersion: "1", KegPrefix: "node/1"}
 	sourceRoot := "Cellar/node/1/libexec/lib/node_modules/npm"
 	after := map[string]fileState{}
@@ -871,7 +871,7 @@ func TestValidateNodeNPMRuntimeByteLimit(t *testing.T) {
 
 func nodeNPMRuntimeLimitFixture(prefix string) (resolution.Node, map[string]fileState, classifyOptions, string) {
 	directory := fileState{Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true}
-	node := resolution.Node{Name: nodeFormula, PkgVersion: "1"}
+	node := resolution.Node{Name: nodeFormula, FullName: "homebrew/core/" + nodeFormula, PkgVersion: "1"}
 	sourceRoot := path.Join("Cellar", node.Name, node.PkgVersion, nodeNPMSourceRoot)
 	after := map[string]fileState{
 		sourceRoot:           directory,
@@ -969,7 +969,7 @@ func TestClassifyAllowsGlibcToReplaceRuntimeLoader(t *testing.T) {
 		"lib/ld.so":                {Type: "symlink", Link: "/prefix/opt/glibc/bin/ld.so"},
 	}
 	changes := diff(before, after)
-	if err := classify(prefix, resolution.Node{Name: "glibc", PkgVersion: "2"}, before, after, changes); err != nil {
+	if err := classify(prefix, resolution.Node{Name: "glibc", FullName: "homebrew/core/glibc", PkgVersion: "2"}, before, after, changes); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1318,6 +1318,63 @@ func TestReconcileAllowsOwnerWriteForDeclaredChangedFile(t *testing.T) {
 	}
 }
 
+func TestAllowsInstallerUmaskTightening(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected fs.FileMode
+		actual   fs.FileMode
+		want     bool
+	}{
+		{name: "regular group write removed", expected: 0o664, actual: 0o644, want: true},
+		{name: "directory group write removed", expected: 0o775, actual: 0o755, want: true},
+		{name: "group and other write removed", expected: 0o777, actual: 0o755, want: true},
+		{name: "unchanged", expected: 0o755, actual: 0o755},
+		{name: "owner write removed", expected: 0o755, actual: 0o555},
+		{name: "group read removed", expected: 0o775, actual: 0o715},
+		{name: "group write added", expected: 0o755, actual: 0o775},
+		{name: "sticky removed", expected: os.ModeSticky | 0o775, actual: 0o755},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := allowsInstallerUmaskTightening(tc.expected, tc.actual); got != tc.want {
+				t.Fatalf("allowsInstallerUmaskTightening(%#o, %#o)=%t, want %t", tc.expected, tc.actual, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReconcileAllowsInstallerUmaskTighteningForBottleMetadata(t *testing.T) {
+	node := resolution.Node{Name: "libdf", PkgVersion: "0.5.6+d375b2d"}
+	verified := bottle.Result{
+		Name:       node.Name,
+		PkgVersion: node.PkgVersion,
+		KegPrefix:  node.Name + "/" + node.PkgVersion,
+		Inventory: []bottle.InventoryEntry{
+			{Path: "libdf/0.5.6+d375b2d/.brew", KegPath: ".brew", Type: bottle.EntryDirectory, Mode: 0o775},
+			{Path: "libdf/0.5.6+d375b2d/.brew/libdf.rb", KegPath: ".brew/libdf.rb", Type: bottle.EntryRegular, Mode: 0o664, SHA256: "sha256:" + strings.Repeat("a", 64)},
+			{Path: "libdf/0.5.6+d375b2d/INSTALL_RECEIPT.json", KegPath: "INSTALL_RECEIPT.json", Type: bottle.EntryRegular, Mode: 0o664, SHA256: "sha256:" + strings.Repeat("b", 64)},
+			{Path: "libdf/0.5.6+d375b2d/sbom.spdx.json", KegPath: "sbom.spdx.json", Type: bottle.EntryRegular, Mode: 0o664, SHA256: "sha256:" + strings.Repeat("c", 64)},
+		},
+	}
+	after := map[string]fileState{
+		"Cellar/libdf/0.5.6+d375b2d/.brew":                {Type: "directory", Mode: os.ModeDir | 0o755},
+		"Cellar/libdf/0.5.6+d375b2d/.brew/libdf.rb":       {Type: "regular", Mode: 0o644, Digest: strings.Repeat("a", 64)},
+		"Cellar/libdf/0.5.6+d375b2d/INSTALL_RECEIPT.json": {Type: "regular", Mode: 0o644, Digest: strings.Repeat("b", 64)},
+		"Cellar/libdf/0.5.6+d375b2d/sbom.spdx.json":       {Type: "regular", Mode: 0o644, Digest: strings.Repeat("c", 64)},
+	}
+	if err := reconcileInstalledKeg("/prefix", node, verified, after); err != nil {
+		t.Fatal(err)
+	}
+
+	mutated := maps.Clone(after)
+	formula := mutated["Cellar/libdf/0.5.6+d375b2d/.brew/libdf.rb"]
+	formula.Digest = strings.Repeat("d", 64)
+	mutated["Cellar/libdf/0.5.6+d375b2d/.brew/libdf.rb"] = formula
+	if err := reconcileInstalledKeg("/prefix", node, verified, mutated); err == nil {
+		t.Fatal("Formula metadata content mutation was accepted with umask tightening")
+	}
+}
+
 func TestReconcileRejectsOtherPermissionChangesForDeclaredChangedFile(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1362,7 +1419,7 @@ func TestReconcileRejectsOtherPermissionChangesForDeclaredChangedFile(t *testing
 }
 
 func TestReconcileAllowsPythonVenvTemplateOwnerWritePostInstall(t *testing.T) {
-	node := resolution.Node{Name: "python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"}
+	node := resolution.Node{Name: "python@3.14", FullName: "homebrew/core/python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"}
 	paths := []string{
 		"lib/python3.14/venv/scripts/common/Activate.ps1",
 		"lib/python3.14/venv/scripts/common/activate",
@@ -1413,7 +1470,7 @@ func TestReconcileRejectsBroaderPythonVenvPostInstallChanges(t *testing.T) {
 	}{
 		{
 			name:    "wrong formula minor",
-			node:    resolution.Node{Name: "python@3.13", FormulaVersion: "3.13.9", PkgVersion: "3.13.9"},
+			node:    resolution.Node{Name: "python@3.13", FullName: "homebrew/core/python@3.13", FormulaVersion: "3.13.9", PkgVersion: "3.13.9"},
 			kegPath: "lib/python3.14/venv/scripts/common/Activate.ps1", expectedMode: 0o444, actualMode: 0o644,
 		},
 		{
@@ -1423,39 +1480,39 @@ func TestReconcileRejectsBroaderPythonVenvPostInstallChanges(t *testing.T) {
 		},
 		{
 			name:    "mismatched formula version",
-			node:    resolution.Node{Name: "python@3.14", FormulaVersion: "3.13.9", PkgVersion: "3.13.9"},
+			node:    resolution.Node{Name: "python@3.14", FullName: "homebrew/core/python@3.14", FormulaVersion: "3.13.9", PkgVersion: "3.13.9"},
 			kegPath: "lib/python3.14/venv/scripts/common/Activate.ps1", expectedMode: 0o444, actualMode: 0o644,
 		},
 		{
 			name:    "outside scripts subtree",
-			node:    resolution.Node{Name: "python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
+			node:    resolution.Node{Name: "python@3.14", FullName: "homebrew/core/python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
 			kegPath: "lib/python3.14/venv/Activate.ps1", expectedMode: 0o444, actualMode: 0o644,
 		},
 		{
 			name:    "scripts prefix spoof",
-			node:    resolution.Node{Name: "python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
+			node:    resolution.Node{Name: "python@3.14", FullName: "homebrew/core/python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
 			kegPath: "lib/python3.14/venv/scripts-evil/Activate.ps1", expectedMode: 0o444, actualMode: 0o644,
 		},
 		{
 			name:    "missing verified formula evidence",
-			node:    resolution.Node{Name: "python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
+			node:    resolution.Node{Name: "python@3.14", FullName: "homebrew/core/python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
 			kegPath: "lib/python3.14/venv/scripts/common/Activate.ps1", expectedMode: 0o444, actualMode: 0o644,
 			omitFormula: true,
 		},
 		{
 			name:    "content mutation",
-			node:    resolution.Node{Name: "python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
+			node:    resolution.Node{Name: "python@3.14", FullName: "homebrew/core/python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
 			kegPath: "lib/python3.14/venv/scripts/common/Activate.ps1", expectedMode: 0o444, actualMode: 0o644,
 			expectedDigest: strings.Repeat("a", 64), actualDigest: strings.Repeat("b", 64),
 		},
 		{
 			name:    "group writable",
-			node:    resolution.Node{Name: "python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
+			node:    resolution.Node{Name: "python@3.14", FullName: "homebrew/core/python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
 			kegPath: "lib/python3.14/venv/scripts/common/Activate.ps1", expectedMode: 0o444, actualMode: 0o664,
 		},
 		{
 			name:    "made executable",
-			node:    resolution.Node{Name: "python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
+			node:    resolution.Node{Name: "python@3.14", FullName: "homebrew/core/python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"},
 			kegPath: "lib/python3.14/venv/scripts/common/Activate.ps1", expectedMode: 0o444, actualMode: 0o744,
 		},
 	}
@@ -1664,7 +1721,7 @@ func newGdkPixbufCacheFixture(t *testing.T, writer string, includeContributor bo
 	for _, formula := range formulae {
 		closureKegs[path.Join("Cellar", formula, gdkPixbufTestVersions[formula])] = struct{}{}
 	}
-	node := resolution.Node{Name: writer, PkgVersion: writerVersion}
+	node := resolution.Node{Name: writer, FullName: "homebrew/core/" + writer, PkgVersion: writerVersion}
 	if writer != gdkPixbufFormula {
 		node.Dependencies = []resolution.Requirement{{Name: gdkPixbufFormula}}
 	}
@@ -2070,7 +2127,7 @@ func TestPreinstallSymlinkValidationAllowsBrewedGlibcLoader(t *testing.T) {
 		"Cellar/glibc/2/bin":       {Type: "directory"},
 		"Cellar/glibc/2/bin/ld.so": {Type: "regular", Mode: 0o755},
 	}
-	record := testRecord("amd64", resolution.Node{Name: "glibc", PkgVersion: "2"})
+	record := testRecord("amd64", resolution.Node{Name: "glibc", FullName: "homebrew/core/glibc", PkgVersion: "2"})
 	if err := validatePreinstallSymlinks("/prefix", snapshot, record); err != nil {
 		t.Fatal(err)
 	}
@@ -2419,7 +2476,7 @@ func writeMaterializerReceipt(t *testing.T, prefix string, node resolution.Node,
 }
 
 func TestReconcileAllowsBoundGlibcPostInstallLocaleData(t *testing.T) {
-	node := resolution.Node{Name: "glibc", PkgVersion: "2.39_1"}
+	node := resolution.Node{Name: "glibc", FullName: "homebrew/core/glibc", PkgVersion: "2.39_1"}
 	verified := bottle.Result{
 		Name:       "glibc",
 		PkgVersion: "2.39_1",
@@ -2483,7 +2540,7 @@ func TestGlibcPostInstallLocaleDataRejectsUnsafeContent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			after := maps.Clone(base)
 			tc.mutate(after)
-			if _, err := allowedPostInstallKegPaths(resolution.Node{Name: "glibc"}, "Cellar/glibc/2.39_1", after); err == nil {
+			if _, err := allowedPostInstallKegPaths(resolution.Node{Name: "glibc", FullName: "homebrew/core/glibc"}, "Cellar/glibc/2.39_1", after); err == nil {
 				t.Fatal("unsafe generated locale content accepted")
 			}
 		})
@@ -2491,7 +2548,7 @@ func TestGlibcPostInstallLocaleDataRejectsUnsafeContent(t *testing.T) {
 }
 
 func TestReconcileGlibcStillRejectsOtherGeneratedKegPaths(t *testing.T) {
-	node := resolution.Node{Name: "glibc", PkgVersion: "2.39_1"}
+	node := resolution.Node{Name: "glibc", FullName: "homebrew/core/glibc", PkgVersion: "2.39_1"}
 	verified := bottle.Result{Name: "glibc", PkgVersion: "2.39_1", KegPrefix: "glibc/2.39_1"}
 	after := map[string]fileState{
 		"Cellar/glibc/2.39_1/lib/locale":   {Type: "directory", Mode: os.ModeDir | 0o755, UID: 1000, GID: 1000, OwnershipKnown: true},
@@ -2519,7 +2576,7 @@ type sharedMimeFixture struct {
 func newSharedMimeFixture(t *testing.T) sharedMimeFixture {
 	t.Helper()
 	prefix := t.TempDir()
-	node := resolution.Node{Name: sharedMimeInfoFormula, PkgVersion: "2.5.1"}
+	node := resolution.Node{Name: sharedMimeInfoFormula, FullName: "homebrew/core/" + sharedMimeInfoFormula, PkgVersion: "2.5.1"}
 	keg := filepath.Join(prefix, "Cellar", node.Name, node.PkgVersion)
 	sourceData := []byte("<mime-info/>\n")
 	source := filepath.Join(keg, filepath.FromSlash(sharedMimeVerifiedSourcePath))
@@ -2748,5 +2805,27 @@ func TestClassifyRejectsLaterSharedMimePackageCopyWithoutRefresh(t *testing.T) {
 	options := classifyOptions{optNames: map[string]struct{}{node.Name: {}}, verified: verified}
 	if err := classify("/prefix", node, nil, after, diff(nil, after), options); err == nil {
 		t.Fatal("later shared MIME package copy without database refresh was accepted")
+	}
+}
+
+func TestNonCoreGlibcRackDoesNotReceiveCorePostInstallCapability(t *testing.T) {
+	node := resolution.Node{Name: "glibc", FullName: "acme/tools/glibc", PkgVersion: "2"}
+	allowed, err := allowedPostInstallKegPaths(node, "Cellar/glibc/2", map[string]fileState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allowed) != 0 {
+		t.Fatalf("non-core glibc received post-install paths: %v", allowed)
+	}
+	if isBrewedLoaderMutation("/prefix", node, "lib/ld.so", map[string]fileState{"lib/ld.so": {Type: "symlink", Link: "/prefix/opt/glibc/bin/ld.so"}}) {
+		t.Fatal("non-core glibc received loader mutation capability")
+	}
+}
+
+func TestNonCorePythonRackDoesNotReceiveVenvTemplateException(t *testing.T) {
+	node := resolution.Node{Name: "python@3.14", FullName: "acme/tools/python@3.14", FormulaVersion: "3.14.6", PkgVersion: "3.14.6"}
+	verified := bottle.Result{Name: node.Name, PkgVersion: node.PkgVersion, KegPrefix: node.Name + "/" + node.PkgVersion, Formula: bottle.FormulaEvidence{Path: node.Name + "/" + node.PkgVersion + "/.brew/" + node.Name + ".rb", ClassName: "PythonAT314", SHA256: "sha256:" + strings.Repeat("a", 64), Size: 1}}
+	if isPythonVenvTemplate(node, verified, "lib/python3.14/venv/scripts/common/activate") {
+		t.Fatal("non-core Python received venv template exception")
 	}
 }

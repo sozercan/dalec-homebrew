@@ -8,6 +8,7 @@ import (
 
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/sozercan/dalec-homebrew/internal/catalog"
 	"github.com/sozercan/dalec-homebrew/internal/homebrew/metadata"
 	"github.com/sozercan/dalec-homebrew/internal/homebrew/oci"
 	"github.com/sozercan/dalec-homebrew/internal/policy"
@@ -133,5 +134,25 @@ func TestRuntimeCompatibilityValidatesArchAndGlibc(t *testing.T) {
 func TestResolverRejectsPlatformVariant(t *testing.T) {
 	if _, err := Resolve(context.Background(), fakeCatalog{}, fakeBottles{}, []string{"x"}, ocispec.Platform{OS: "linux", Architecture: "arm64", Variant: "v9"}, options()); err == nil {
 		t.Fatal("variant accepted")
+	}
+}
+
+func TestCoreResolutionUpgradesToV2WithoutCatalogService(t *testing.T) {
+	hello := formula("hello", "1")
+	cat := fakeCatalog{"hello": {Requested: "hello", Canonical: "hello", Kind: metadata.MatchCanonical, Formula: hello}}
+	opts := options()
+	d := digest.FromString("component").String()
+	opts.Components = resolution.Components{FrontendRef: "ghcr.io/example/frontend@" + d, RuntimeBaseRef: "ghcr.io/example/base@" + d, MaterializerRef: "ghcr.io/example/materializer@" + d, HomebrewCommit: "0123456789abcdef0123456789abcdef01234567", RubyRuntime: "4.0.6", VerificationKeys: d, DalecModule: "dalec@v1", BuildKitModule: "buildkit@v1"}
+	legacy, err := Resolve(context.Background(), cat, fakeBottles{deps: map[string][]resolution.RuntimeDependency{}}, []string{"hello"}, ocispec.Platform{OS: "linux", Architecture: "amd64"}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	components := resolution.ComponentsV2{FrontendIndexRef: "ghcr.io/example/frontend@" + d, FrontendRef: "ghcr.io/example/frontend@" + d, RuntimeBaseRef: "ghcr.io/example/base@" + d, MaterializerRef: "ghcr.io/example/materializer@" + d, BottleFetcherRef: "ghcr.io/example/fetcher@" + d, CatalogServiceOrigin: "https://catalog.example.com", IngestionJWSKeyPolicyDigest: d, TapPolicyDigest: d, ExecutableRuntimePolicyDigest: d, HomebrewCommit: opts.Components.HomebrewCommit, RubyRuntime: "4.0.6", VerificationKeys: d, DalecModule: "dalec@v1", BuildKitModule: "buildkit@v1", SupportedCatalogPolicyVersions: []string{catalog.TapCatalogPolicyVersion}, SupportedFetchPolicyVersions: []string{resolution.HTTPSFetchPolicyVersionV1}, SupportedProvenancePolicyVersions: []string{resolution.CoreProvenanceWaiverPolicyV1, resolution.HTTPSBottleSourceWaiverPolicyV1, resolution.ProvenanceWaiverPolicyV1, resolution.PrebuiltProvenanceWaiverPolicyV1, resolution.VerifiedProvenancePolicyV1}}
+	record, err := RecordV2FromCore(legacy, components, opts.Metadata, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Nodes[0].Bottle.Verification.PolicyVersion != resolution.CoreBottleVerificationDeferredV1 || record.Nodes[0].Provenance.Waiver.Policy != resolution.CoreProvenanceWaiverPolicyV1 {
+		t.Fatalf("record=%+v", record)
 	}
 }
