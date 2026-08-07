@@ -19,6 +19,7 @@ env:
   BUILDX_SHA256_AMD64: 07823fdfcd82a41be90155a8b16876c1a780a6462de805a9f3f63b3119ccfb99
   BUILDX_SHA256_ARM64: 70382de03915c07c488ae4ddc4f7e169ee978f953e754ecfce110ba017e0132b
   BUILDKIT_IMAGE: docker.io/moby/buildkit:v0.32.0@sha256:1f8167fcb0eca5b7126353d35299386945cbb8949cc516c592a49f80cfce4fa2
+  BINFMT_IMAGE: docker.io/tonistiigi/binfmt:latest@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
   ACTIONLINT_IMAGE: docker.io/rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
   REGISTRY_IMAGE: docker.io/library/registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
 
@@ -95,6 +96,12 @@ jobs:
           jq -e '.schema_version == "dalec-homebrew-release-inputs/v1"' \
             "$RUNNER_TEMP/release-inputs.json"
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          image: ${{ env.BINFMT_IMAGE }}
+          platforms: arm64
+
       - name: Set up Docker Buildx
         run: |
           set -euo pipefail
@@ -116,6 +123,51 @@ jobs:
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build amd64 materializer compatibility image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          target: materializer
+          platforms: linux/amd64
+          load: true
+          tags: dalec-homebrew-materializer:compat-amd64
+          build-args: RUNTIME_BASE=docker.io/library/ubuntu@sha256:52df9b1ee71626e0088f7d400d5c6b5f7bb916f8f0c82b474289a4ece6cf3faf
+          provenance: false
+          cache-from: type=gha,scope=materializer-compat-amd64
+          cache-to: type=gha,mode=max,scope=materializer-compat-amd64
+      - name: Check amd64 pinned Homebrew compatibility
+        run: |
+          set -euo pipefail
+          ./scripts/materializer-compat.sh \
+            --image dalec-homebrew-materializer:compat-amd64 \
+            --platform linux/amd64
+          ./scripts/materializer-compat.sh \
+            --image dalec-homebrew-materializer:compat-amd64 \
+            --platform linux/amd64 \
+            --current
+      - name: Build arm64 materializer compatibility image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          target: materializer
+          platforms: linux/arm64
+          load: true
+          tags: dalec-homebrew-materializer:compat-arm64
+          build-args: RUNTIME_BASE=docker.io/library/ubuntu@sha256:7f622ca8766bccb22f04242ecb6f19f770b2f08827dc4b8c707de5e78a6da7ab
+          provenance: false
+          cache-from: type=gha,scope=materializer-compat-arm64
+          cache-to: type=gha,mode=max,scope=materializer-compat-arm64
+      - name: Check arm64 pinned Homebrew compatibility
+        run: |
+          set -euo pipefail
+          ./scripts/materializer-compat.sh \
+            --image dalec-homebrew-materializer:compat-arm64 \
+            --platform linux/arm64
+          ./scripts/materializer-compat.sh \
+            --image dalec-homebrew-materializer:compat-arm64 \
+            --platform linux/arm64 \
+            --current
 
   e2e:
     name: Non-core multi-package container E2E

@@ -557,6 +557,178 @@ func TestClassifyRejectsUnsafeBashCompletionLinks(t *testing.T) {
 	}
 }
 
+func TestClassifyAllowsCurrentGlibcLoaderConfigurationLink(t *testing.T) {
+	node := resolution.Node{Name: "glibc", PkgVersion: "2.42"}
+	after := loaderConfigurationSnapshot(node)
+	changes := []Change{{Path: "etc/ld.so.conf", Kind: "created"}}
+	if err := classify("/prefix", node, nil, after, changes, loaderConfigurationOptions(node)); err != nil {
+		t.Fatal(err)
+	}
+	if changes[0].Classification != "configuration" {
+		t.Fatalf("classification=%q", changes[0].Classification)
+	}
+}
+
+func TestClassifyRejectsUnsafeGlibcLoaderConfigurationLinks(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		node   resolution.Node
+		path   string
+		mutate func(map[string]fileState, *classifyOptions)
+	}{
+		{
+			name: "another formula",
+			node: resolution.Node{Name: "hello", PkgVersion: "1"},
+			path: "etc/ld.so.conf",
+		},
+		{
+			name: "another configuration path",
+			node: resolution.Node{Name: "glibc", PkgVersion: "2.42"},
+			path: "etc/alternate.conf",
+		},
+		{
+			name: "opt indirection",
+			node: resolution.Node{Name: "glibc", PkgVersion: "2.42"},
+			path: "etc/ld.so.conf",
+			mutate: func(after map[string]fileState, _ *classifyOptions) {
+				after["etc/ld.so.conf"] = fileState{Type: "symlink", Link: "../opt/glibc/etc/ld.so.conf"}
+			},
+		},
+		{
+			name: "different current-keg file",
+			node: resolution.Node{Name: "glibc", PkgVersion: "2.42"},
+			path: "etc/ld.so.conf",
+			mutate: func(after map[string]fileState, _ *classifyOptions) {
+				after["Cellar/glibc/2.42/etc/alternate.conf"] = fileState{Type: "regular", Mode: 0o644}
+				after["etc/ld.so.conf"] = fileState{Type: "symlink", Link: "/prefix/Cellar/glibc/2.42/etc/alternate.conf"}
+			},
+		},
+		{
+			name: "other glibc version",
+			node: resolution.Node{Name: "glibc", PkgVersion: "2.42"},
+			path: "etc/ld.so.conf",
+			mutate: func(after map[string]fileState, _ *classifyOptions) {
+				after["Cellar/glibc/2.41"] = fileState{Type: "directory"}
+				after["Cellar/glibc/2.41/etc"] = fileState{Type: "directory"}
+				after["Cellar/glibc/2.41/etc/ld.so.conf"] = fileState{Type: "regular", Mode: 0o644}
+				after["etc/ld.so.conf"] = fileState{Type: "symlink", Link: "/prefix/Cellar/glibc/2.41/etc/ld.so.conf"}
+			},
+		},
+		{
+			name: "other formula keg",
+			node: resolution.Node{Name: "glibc", PkgVersion: "2.42"},
+			path: "etc/ld.so.conf",
+			mutate: func(after map[string]fileState, _ *classifyOptions) {
+				after["Cellar/other"] = fileState{Type: "directory"}
+				after["Cellar/other/1"] = fileState{Type: "directory"}
+				after["Cellar/other/1/etc"] = fileState{Type: "directory"}
+				after["Cellar/other/1/etc/ld.so.conf"] = fileState{Type: "regular", Mode: 0o644}
+				after["etc/ld.so.conf"] = fileState{Type: "symlink", Link: "/prefix/Cellar/other/1/etc/ld.so.conf"}
+			},
+		},
+		{
+			name: "missing verified inventory",
+			node: resolution.Node{Name: "glibc", PkgVersion: "2.42"},
+			path: "etc/ld.so.conf",
+			mutate: func(_ map[string]fileState, options *classifyOptions) {
+				options.verified.Inventory = nil
+			},
+		},
+		{
+			name: "mismatched verified identity",
+			node: resolution.Node{Name: "glibc", PkgVersion: "2.42"},
+			path: "etc/ld.so.conf",
+			mutate: func(_ map[string]fileState, options *classifyOptions) {
+				options.verified.PkgVersion = "2.41"
+				options.verified.KegPrefix = "glibc/2.41"
+			},
+		},
+		{
+			name: "non-regular current-keg source",
+			node: resolution.Node{Name: "glibc", PkgVersion: "2.42"},
+			path: "etc/ld.so.conf",
+			mutate: func(after map[string]fileState, _ *classifyOptions) {
+				after["Cellar/glibc/2.42/etc/ld.so.conf"] = fileState{Type: "directory"}
+			},
+		},
+		{
+			name: "non-regular verified inventory",
+			node: resolution.Node{Name: "glibc", PkgVersion: "2.42"},
+			path: "etc/ld.so.conf",
+			mutate: func(_ map[string]fileState, options *classifyOptions) {
+				options.verified.Inventory[0].Type = bottle.EntrySymlink
+			},
+		},
+		{
+			name: "source mode differs from verified inventory",
+			node: resolution.Node{Name: "glibc", PkgVersion: "2.42"},
+			path: "etc/ld.so.conf",
+			mutate: func(after map[string]fileState, _ *classifyOptions) {
+				state := after["Cellar/glibc/2.42/etc/ld.so.conf"]
+				state.Mode = 0o600
+				after["Cellar/glibc/2.42/etc/ld.so.conf"] = state
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			after := loaderConfigurationSnapshot(tc.node)
+			options := loaderConfigurationOptions(tc.node)
+			if tc.path != "etc/ld.so.conf" {
+				delete(after, "etc/ld.so.conf")
+				after[path.Join("Cellar", tc.node.Name, tc.node.PkgVersion, tc.path)] = fileState{Type: "regular", Mode: 0o644}
+				after[tc.path] = fileState{Type: "symlink", Link: path.Join("/prefix", "Cellar", tc.node.Name, tc.node.PkgVersion, tc.path)}
+				options.verified.Inventory[0].KegPath = tc.path
+			}
+			if tc.mutate != nil {
+				tc.mutate(after, &options)
+			}
+			if err := classify("/prefix", tc.node, nil, after, []Change{{Path: tc.path, Kind: "created"}}, options); err == nil {
+				t.Fatalf("unsafe loader configuration link %s accepted", tc.path)
+			}
+		})
+	}
+}
+
+func TestClassifyRejectsReplacingExistingGlibcLoaderConfiguration(t *testing.T) {
+	node := resolution.Node{Name: "glibc", PkgVersion: "2.42"}
+	after := loaderConfigurationSnapshot(node)
+	before := maps.Clone(after)
+	before["etc/ld.so.conf"] = fileState{Type: "regular", Mode: 0o644}
+	if err := classify("/prefix", node, before, after, []Change{{Path: "etc/ld.so.conf", Kind: "modified"}}, loaderConfigurationOptions(node)); err == nil {
+		t.Fatal("replacement of pre-existing loader configuration accepted")
+	}
+}
+
+func loaderConfigurationSnapshot(node resolution.Node) map[string]fileState {
+	keg := path.Join("Cellar", node.Name, node.PkgVersion)
+	source := path.Join(keg, "etc/ld.so.conf")
+	return map[string]fileState{
+		"Cellar":                    {Type: "directory"},
+		path.Dir(keg):               {Type: "directory"},
+		keg:                         {Type: "directory"},
+		path.Join(keg, "etc"):       {Type: "directory"},
+		source:                      {Type: "regular", Mode: 0o644},
+		"opt":                       {Type: "directory"},
+		path.Join("opt", node.Name): {Type: "symlink", Link: path.Join("..", keg)},
+		"etc":                       {Type: "directory"},
+		"etc/ld.so.conf":            {Type: "symlink", Link: path.Join("/prefix", source)},
+		"var":                       {Type: "directory"},
+	}
+}
+
+func loaderConfigurationOptions(node resolution.Node) classifyOptions {
+	return classifyOptions{verified: bottle.Result{
+		Name:       node.Name,
+		PkgVersion: node.PkgVersion,
+		KegPrefix:  path.Join(node.Name, node.PkgVersion),
+		Inventory: []bottle.InventoryEntry{{
+			KegPath: "etc/ld.so.conf",
+			Type:    bottle.EntryRegular,
+			Mode:    0o644,
+		}},
+	}}
+}
+
 func TestValidateNodeNPMRuntimeAndGlobalLinks(t *testing.T) {
 	const prefix = "/prefix"
 	directory := func() fileState {

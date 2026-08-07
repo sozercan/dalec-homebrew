@@ -58,9 +58,9 @@ The repository currently pins:
 - `github.com/project-dalec/dalec v0.21.5-0.20260728234020-5fa2c46d716b`
 - `github.com/moby/buildkit v0.31.2`
 - digest-pinned Dockerfile frontend and Go `1.25.9` builder images
-- Homebrew commit `77d90328ca2f63ff4ec1f67de0ade5632f5d2335` and source
+- Homebrew commit `935053a12d38d62e59c467bf7f0f50dbc11cbcb6` and source
   archive SHA-256
-  `42e3678a8b00d53319f6b88b9384fcc7baa072e44864e41117cc7fd4f78fcb54`
+  `09eafcf099e344f5c1a4040992a2e1add3789e9b553b9141ab14df9f727f8c6b`
 - portable Ruby `4.0.6`
 - Ubuntu Noble platform-child digests in [`../docker-bake.hcl`](../docker-bake.hcl)
 - Ubuntu snapshot `20260610T000000Z`
@@ -96,7 +96,10 @@ The example runtimes are integration fixtures and are not promoted.
 
 1. Build `amd64` and `arm64` runtime-base children from the pinned Chisel binary, immutable `chisel-releases` commit, and Ubuntu snapshot with `SOURCE_DATE_EPOCH` fixed.
 2. Build materializer children from the corresponding pinned full Ubuntu child images and copy only the matching Chisel runtime-base package and artifact evidence into them.
-3. Smoke-test the runtime-base and materializer children, then assemble and verify their immutable multi-platform indexes.
+3. Smoke-test the runtime-base and materializer children, pour both the fixed
+   `glibc` regression bottle and the currently authenticated `glibc` bottle
+   offline with each materializer child, then assemble and verify their
+   immutable multi-platform indexes.
 4. Build the frontend with the base, materializer, Homebrew, key-set, module, and policy inputs bound; publish its platform children and index by digest; generate and verify the completed component manifest; and run every focused runtime spec on native `amd64` and `arm64` workers while producing runtime evidence, component-child SPDX SBOMs, and vulnerability reports.
 5. Sign all six component children and three indexes, attach the exact SLSA predicate to every subject and the matching SPDX predicate to each child, then blob-sign the component manifest, accepted metadata snapshot, and checksum set.
 6. Resolve once, retain the signed metadata envelopes and resolution records, and mirror every selected layer by digest.

@@ -430,14 +430,22 @@ jobs:
             arch=${platform#*/}
             runtime_base_var="runtime_base_${arch}"
             materializer_var="materializer_${arch}"
+            materializer_ref="$materializer_repo@${!materializer_var}"
             docker run --rm --platform "$platform" \
               --entrypoint /bin/bash \
               "$runtime_base_repo@${!runtime_base_var}" \
               -euc 'test "$(id -u):$(id -g)" = 1000:1000; test ! -e /usr/bin/apt; test -r /usr/share/dalec-homebrew/runtime-base-packages.tsv'
             docker run --rm --platform "$platform" \
               --entrypoint /bin/bash \
-              "$materializer_repo@${!materializer_var}" \
+              "$materializer_ref" \
               -euc 'test -x /usr/local/bin/dalec-homebrew-materializer; test -x /home/linuxbrew/.linuxbrew/Homebrew/bin/brew; test -r /usr/share/dalec-homebrew/runtime-base-packages.tsv'
+            ./scripts/materializer-compat.sh \
+              --image "$materializer_ref" \
+              --platform "$platform"
+            ./scripts/materializer-compat.sh \
+              --image "$materializer_ref" \
+              --platform "$platform" \
+              --current
           done
 
           runtime_base_index=$(create_index \

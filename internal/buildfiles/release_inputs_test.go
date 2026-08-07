@@ -24,6 +24,7 @@ func TestReleaseInputsFixture(t *testing.T) {
 		SchemaVersion          string            `json:"schema_version"`
 		UbuntuBase             map[string]string `json:"ubuntu_base"`
 		HomebrewCommit         string            `json:"homebrew_commit"`
+		HomebrewArchiveSHA256  string            `json:"homebrew_archive_sha256"`
 		VerificationKeysDigest string            `json:"verification_keys_digest"`
 		DalecModule            string            `json:"dalec_module"`
 		BuildKitModule         string            `json:"buildkit_module"`
@@ -39,6 +40,9 @@ func TestReleaseInputsFixture(t *testing.T) {
 	}
 	if inputs.HomebrewCommit != testHomebrewCommit {
 		t.Fatalf("homebrew_commit = %q", inputs.HomebrewCommit)
+	}
+	if inputs.HomebrewArchiveSHA256 != testHomebrewArchiveSHA256 {
+		t.Fatalf("homebrew_archive_sha256 = %q", inputs.HomebrewArchiveSHA256)
 	}
 	if inputs.VerificationKeysDigest != testVerificationKeysDigest {
 		t.Fatalf("verification_keys_digest = %q", inputs.VerificationKeysDigest)
@@ -195,7 +199,8 @@ const (
 	testSourceDateEpoch        = "1781049600"
 	testRuntimeBaseAMD64       = "docker.io/library/ubuntu@sha256:52df9b1ee71626e0088f7d400d5c6b5f7bb916f8f0c82b474289a4ece6cf3faf"
 	testRuntimeBaseARM64       = "docker.io/library/ubuntu@sha256:7f622ca8766bccb22f04242ecb6f19f770b2f08827dc4b8c707de5e78a6da7ab"
-	testHomebrewCommit         = "77d90328ca2f63ff4ec1f67de0ade5632f5d2335"
+	testHomebrewCommit         = "935053a12d38d62e59c467bf7f0f50dbc11cbcb6"
+	testHomebrewArchiveSHA256  = "09eafcf099e344f5c1a4040992a2e1add3789e9b553b9141ab14df9f727f8c6b"
 	testVerificationKeysDigest = "sha256:ef2d2c9e0219d485df9f07fff7b037feadc36c93085be9ffefb1390f31a3de1d"
 )
 

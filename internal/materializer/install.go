@@ -842,7 +842,7 @@ func classify(prefix string, node resolution.Node, before, after map[string]file
 			c.Classification = "configuration"
 			if a, ok := after[p]; ok && a.Type == "symlink" {
 				resolved, err := resolveSnapshotPath(prefix, after, p)
-				if err != nil || (!snapshotPathWithin(resolved, "etc") && !isCurrentKegBashCompletionLink(prefix, after, p, resolved, keg)) {
+				if err != nil || (!snapshotPathWithin(resolved, "etc") && !isCurrentKegBashCompletionLink(prefix, after, p, resolved, keg) && !isCurrentGlibcLoaderConfigurationLink(prefix, node, options.verified, after, p, resolved, keg)) {
 					return fmt.Errorf("configuration symlink %s escapes etc", p)
 				}
 			}
@@ -2310,6 +2310,27 @@ func isCurrentKegBashCompletionLink(prefix string, snapshot map[string]fileState
 	}
 	sourceResolved, err := resolveSnapshotPath(prefix, snapshot, expected)
 	return err == nil && sourceResolved == resolved && snapshotPathWithin(sourceResolved, keg)
+}
+
+func isCurrentGlibcLoaderConfigurationLink(prefix string, node resolution.Node, verified bottle.Result, snapshot map[string]fileState, linkPath, resolved, keg string) bool {
+	if node.Name != "glibc" || linkPath != "etc/ld.so.conf" || !verifiedBottleMatchesNode(node, verified) {
+		return false
+	}
+	expected := path.Join(keg, linkPath)
+	direct, err := directSnapshotSymlinkTarget(prefix, snapshot, linkPath)
+	if err != nil || direct != expected || resolved != expected {
+		return false
+	}
+	source, ok := snapshot[expected]
+	if !ok || source.Type != "regular" {
+		return false
+	}
+	for _, entry := range verified.Inventory {
+		if entry.KegPath == linkPath && entry.Type == bottle.EntryRegular {
+			return source.Mode.Perm() == os.FileMode(entry.Mode).Perm()
+		}
+	}
+	return false
 }
 
 func directSnapshotSymlinkTarget(prefix string, snapshot map[string]fileState, linkPath string) (string, error) {
