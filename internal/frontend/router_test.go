@@ -30,7 +30,7 @@ func TestHandlerAdvertisesOnlyImageRoute(t *testing.T) {
 	})
 
 	result, err := handler(t.Context(), clientWithOpts(map[string]string{
-		requestIDOption: bktargets.RequestTargets,
+		"requestid": bktargets.RequestTargets,
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -44,21 +44,15 @@ func TestHandlerAdvertisesOnlyImageRoute(t *testing.T) {
 	}
 }
 
-func TestHandlerPreservesDirectInvocation(t *testing.T) {
-	calls := 0
-	handler := newHandler(t.Context(), func(_ context.Context, client gwclient.Client) (*gwclient.Result, error) {
-		calls++
-		if got := client.BuildOpts().Opts[targetOption]; got != "production" {
-			t.Fatalf("target=%q, want production", got)
-		}
-		return gwclient.NewResult(), nil
+func TestHandlerRejectsUnforwardedInvocation(t *testing.T) {
+	handler := newHandler(t.Context(), func(context.Context, gwclient.Client) (*gwclient.Result, error) {
+		t.Fatal("image handler called without upstream Dalec forwarding context")
+		return nil, nil
 	})
 
-	if _, err := handler(t.Context(), clientWithOpts(map[string]string{targetOption: "production"})); err != nil {
-		t.Fatal(err)
-	}
-	if calls != 1 {
-		t.Fatalf("image handler calls=%d, want 1", calls)
+	_, err := handler(t.Context(), clientWithOpts(map[string]string{targetOption: imageRoute}))
+	if err == nil || !strings.Contains(err.Error(), `forwarded Dalec target must be "homebrew"`) {
+		t.Fatalf("error=%v, want missing forwarding context rejection", err)
 	}
 }
 

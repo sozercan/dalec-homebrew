@@ -12,14 +12,11 @@ import (
 const (
 	forwardedTargetKey = "homebrew"
 	imageRoute         = "image"
-	requestIDOption    = "requestid"
 	targetOption       = "target"
 )
 
-// NewHandler returns the gateway entrypoint for direct and upstream-Dalec
-// invocations. Direct builds keep their existing target semantics. Forwarded
-// builds and subrequests go through Dalec's router, which exposes only the
-// provider-owned image route.
+// NewHandler returns the gateway entrypoint for upstream-Dalec forwarded
+// invocations and subrequests. The provider exposes only the image route.
 func NewHandler(ctx context.Context) gwclient.BuildFunc {
 	return newHandler(ctx, Handle)
 }
@@ -35,13 +32,7 @@ func newHandler(ctx context.Context, imageHandler gwclient.BuildFunc) gwclient.B
 		}},
 	})
 
-	return func(ctx context.Context, client gwclient.Client) (*gwclient.Result, error) {
-		opts := client.BuildOpts().Opts
-		if opts[requestIDOption] != "" || dalecfrontend.GetTargetKey(client) != "" {
-			return router.Handle(ctx, client)
-		}
-		return imageHandler(ctx, client)
-	}
+	return router.Handle
 }
 
 func exactForwardedImageHandler(next gwclient.BuildFunc) gwclient.BuildFunc {

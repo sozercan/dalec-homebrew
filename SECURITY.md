@@ -19,12 +19,12 @@ The V1 implementation is expected to preserve these properties:
 13. Generated shared runtime data is accepted only at versioned paths with package and capability checks, bounded structure and size, authenticated runtime ownership, and explicit evidence attribution. Node's global `lib/node_modules/npm` runtime is accepted only as a bounded, exact copy of the verified private npm tree plus one exact prefix-bound `npmrc`, with command and manpage links bound back to that validated tree. Unrelated global `lib` or shared-data mutations continue to fail closed.
 14. Creating a `v*.*.*` release tag is a trusted release-operator action. Repository access must restrict tag creation to those operators, and tag rules should prevent update or deletion. The checked-in tag workflow rejects tag updates and deletions, dispatches only the privileged release workflow on `main`, and binds the initially pushed commit; a new build requires that commit to equal the trusted workflow commit before any registry or signing job runs.
 
-Canonical forwarded builds additionally require the upstream Dalec target to be
+Production builds require the upstream Dalec target to be
 exactly `homebrew`, the child route to be exactly `image`, an empty frontend
 `cmdline`, and exact equality between `targets.homebrew.frontend.image` and the
 child gateway `source`. The source and all release/provider references must be
-SHA-256 digest-pinned. Direct invocation continues to reject target frontend
-metadata instead of interpreting it as nested forwarding.
+SHA-256 digest-pinned. Target frontend metadata is accepted only as routing
+metadata for this exact chain; nested forwarding remains rejected.
 
 The forwarded child does **not** receive an authenticated identity for the
 upstream Dalec parent. In the child solve, `source` identifies

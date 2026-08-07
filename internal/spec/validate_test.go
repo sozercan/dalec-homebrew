@@ -17,8 +17,8 @@ revision: 1
 license: Apache-2.0
 dependencies:
   runtime:
-    - hello
-    - jq
+    hello: {}
+    jq: {}
 image:
   entrypoint: hello
 `
@@ -32,7 +32,7 @@ func load(t *testing.T, data string) *dalec.Spec {
 	return s
 }
 
-func TestListShorthandAndOrder(t *testing.T) {
+func TestMapFormAndOrder(t *testing.T) {
 	order, err := RuntimeDependencyOrder([]byte(baseSpec), "")
 	if err != nil {
 		t.Fatal(err)
@@ -46,6 +46,14 @@ func TestListShorthandAndOrder(t *testing.T) {
 	}
 	if got := sel.Roots[0].Name; got != "hello" {
 		t.Fatalf("first root %q", got)
+	}
+}
+
+func TestRuntimeDependencyOrderRejectsListShorthand(t *testing.T) {
+	data := "dependencies:\n  runtime: [hello, jq]\n"
+	_, err := RuntimeDependencyOrder([]byte(data), "")
+	if err == nil || !strings.Contains(err.Error(), "must use map form") {
+		t.Fatalf("error=%v, want map-form rejection", err)
 	}
 }
 
@@ -171,17 +179,8 @@ func TestValidateForwardedTargetFrontendFailures(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsTargetFrontendDuringDirectInvocation(t *testing.T) {
-	frontendRef := "ghcr.io/example/dalec-homebrew@sha256:" + strings.Repeat("a", 64)
-	data := forwardedSpec(frontendRef, "")
-	_, err := Validate(load(t, data), "homebrew", "amd64", []string{"hello"})
-	if err == nil || !strings.Contains(err.Error(), "not supported during direct invocation") {
-		t.Fatalf("error=%v", err)
-	}
-}
-
 func TestRejectVersionAndForbiddenFields(t *testing.T) {
-	data := strings.Replace(baseSpec, "    - hello\n    - jq", "    hello:\n      version: ['>=2']\n    jq: {}", 1) + "\nsources:\n  x:\n    http:\n      url: https://example.invalid/x\n"
+	data := strings.Replace(baseSpec, "    hello: {}\n    jq: {}", "    hello:\n      version: ['>=2']\n    jq: {}", 1) + "\nsources:\n  x:\n    http:\n      url: https://example.invalid/x\n"
 	_, err := Validate(load(t, data), "", "amd64", nil)
 	if err == nil || !strings.Contains(err.Error(), "historical versions") || !strings.Contains(err.Error(), "sources") {
 		t.Fatalf("err=%v", err)

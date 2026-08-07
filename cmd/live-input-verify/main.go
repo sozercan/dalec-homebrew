@@ -60,7 +60,7 @@ type options struct {
 	dalecFrontendRef     string
 	dalecRoute           string
 	platform             string
-	directSpecFile       string
+	baseSpecFile         string
 	pinnedRefs           namedPinnedRefs
 }
 
@@ -104,7 +104,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	flags.StringVar(&opts.dalecFrontendRef, "dalec-frontend-ref", "", "explicit digest-pinned upstream Dalec frontend index or platform child")
 	flags.StringVar(&opts.dalecRoute, "dalec-route", "", "explicit upstream Dalec forwarding route")
 	flags.StringVar(&opts.platform, "platform", "", "target platform for an explicit upstream Dalec frontend child")
-	flags.StringVar(&opts.directSpecFile, "direct-spec-file", "", "direct-form Dalec spec to validate before forwarding metadata is injected")
+	flags.StringVar(&opts.baseSpecFile, "base-spec-file", "", "base Dalec spec to validate before forwarding metadata is injected")
 	flags.Var(&opts.pinnedRefs, "pinned-ref", "additional digest-pinned NAME=REFERENCE to validate (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -162,8 +162,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}
 		selection = &selected
 	}
-	if opts.directSpecFile != "" {
-		if err := validateDirectSpec(opts.directSpecFile); err != nil {
+	if opts.baseSpecFile != "" {
+		if err := validateBaseSpec(opts.baseSpecFile); err != nil {
 			return fmt.Errorf("DALEC_HOMEBREW_LIVE_SPEC: %w", err)
 		}
 	}
@@ -175,7 +175,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func validateDirectSpec(path string) error {
+func validateBaseSpec(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open %q: %w", path, err)
@@ -197,21 +197,26 @@ func validateDirectSpec(path string) error {
 	if !bytes.HasPrefix(firstLine, []byte("# syntax=")) {
 		return errors.New("must start with a # syntax= directive")
 	}
-	spec, err := dalec.LoadSpec(data)
-	if err != nil {
-		return fmt.Errorf("decode %q: %w", path, err)
-	}
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return fmt.Errorf("decode %q routing shape: %w", path, err)
 	}
-	if _, ok := raw["targets"]; ok || len(spec.Targets) != 0 {
+	if _, ok := raw["targets"]; ok {
 		return errors.New("must not define top-level targets; the live helper reserves targets.homebrew for forwarding")
 	}
-	if dependencies, ok := raw["dependencies"].(map[string]any); ok {
-		if _, list := dependencies["runtime"].([]any); list {
-			return errors.New("must use map-form dependencies.runtime; the release-pinned upstream Dalec frontend does not preserve list shorthand while forwarding")
-		}
+	dependencies, ok := raw["dependencies"].(map[string]any)
+	if !ok {
+		return errors.New("dependencies.runtime must use map form")
+	}
+	if _, ok := dependencies["runtime"].(map[string]any); !ok {
+		return errors.New("dependencies.runtime must use map form")
+	}
+	spec, err := dalec.LoadSpec(data)
+	if err != nil {
+		return fmt.Errorf("decode %q: %w", path, err)
+	}
+	if len(spec.Targets) != 0 {
+		return errors.New("must not define top-level targets; the live helper reserves targets.homebrew for forwarding")
 	}
 	return nil
 }

@@ -42,9 +42,9 @@ binding checks before signing.
 
 ## Upstream Dalec dispatcher binding
 
-Forwarded release builds enter through the upstream Dalec gateway frontend and
-then dispatch the fixed `homebrew/image` route to `dalec-homebrew`. The external
-dispatcher binding is checked in as
+Release builds use the only production invocation chain: the upstream Dalec
+gateway frontend dispatches the fixed `homebrew/image` route to
+`dalec-homebrew`. The external dispatcher binding is checked in as
 [`../release/dalec-frontend.json`](../release/dalec-frontend.json). It records:
 
 - schema `dalec-homebrew-dalec-frontend/v1`;

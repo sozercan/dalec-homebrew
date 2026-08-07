@@ -220,7 +220,7 @@ func TestDalecFrontendPin(t *testing.T) {
 	})
 }
 
-func TestDirectSpecValidation(t *testing.T) {
+func TestBaseSpecValidation(t *testing.T) {
 	writeSpec := func(t *testing.T, data string) string {
 		t.Helper()
 		path := filepath.Join(t.TempDir(), "spec.yaml")
@@ -245,9 +245,24 @@ func TestDirectSpecValidation(t *testing.T) {
 			want: "must start with a # syntax= directive",
 		},
 		{
-			name: "list shorthand",
+			name: "runtime list",
 			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime: [hello, jq]\n",
-			want: "must use map-form dependencies.runtime",
+			want: "dependencies.runtime must use map form",
+		},
+		{
+			name: "missing dependencies",
+			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\nname: example\n",
+			want: "dependencies.runtime must use map form",
+		},
+		{
+			name: "missing runtime",
+			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies: {}\n",
+			want: "dependencies.runtime must use map form",
+		},
+		{
+			name: "runtime scalar",
+			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime: hello\n",
+			want: "dependencies.runtime must use map form",
 		},
 		{
 			name: "empty targets",
@@ -264,7 +279,7 @@ func TestDirectSpecValidation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			path := writeSpec(t, test.data)
-			err := run([]string{"--direct-spec-file", path}, io.Discard, io.Discard)
+			err := run([]string{"--base-spec-file", path}, io.Discard, io.Discard)
 			if test.want == "" {
 				if err != nil {
 					t.Fatalf("run: %v", err)

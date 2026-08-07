@@ -50,7 +50,7 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 	text := string(script)
 	for _, want := range []string{
 		`--dalec-frontend-file "$DALEC_FRONTEND_PIN"`,
-		`--direct-spec-file "$SPEC"`,
+		`--base-spec-file "$SPEC"`,
 		`--pinned-ref "DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE=$BUILDKIT_IMAGE"`,
 		`--pinned-ref "DALEC_HOMEBREW_E2E_REGISTRY_IMAGE=$REGISTRY_IMAGE"`,
 		`DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN="$DALEC_FRONTEND_PIN"`,

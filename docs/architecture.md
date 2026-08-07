@@ -4,7 +4,7 @@
 
 ## Frontend routing
 
-The canonical invocation is an out-of-tree Dalec provider chain:
+The only production invocation is an out-of-tree Dalec provider chain:
 
 ```text
 BuildKit
@@ -21,9 +21,8 @@ frontend's advertised routes, and forwards `homebrew/image` as child target
 Before any metadata or registry access, `dalec-homebrew` requires the selected
 spec target to be exactly `homebrew`, the child route to be exactly `image`, the
 target's frontend image to equal its gateway `source`, and both target and
-invocation `cmdline` values to be empty. Direct invocation remains a
-compatibility path and retains its previous target semantics without a target
-`frontend` block.
+invocation `cmdline` values to be empty. These routing checks complete before
+metadata or registry access.
 
 The child can authenticate only its own gateway source. BuildKit does not give
 the child an authenticated identity for the parent that initiated the nested
@@ -84,7 +83,7 @@ See [`../SECURITY.md`](../SECURITY.md) for the properties enforced at each bound
 - `internal/runtimefs`: allowlist assembly, ownership and mode normalization, inventory, pruning evidence, runtime manifest, and SPDX output.
 - `internal/runtimecheck`: static ELF, loader, library, shebang, and link checks.
 - `internal/testplan` and `internal/testrunner`: conversion and execution for the supported public Dalec test subset.
-- `internal/frontend`: direct/forwarded gateway routing, target-list
+- `internal/frontend`: provider gateway routing, target-list
   subrequests, DockerUI fan-out, shared snapshot orchestration, image
   configuration, test dependencies, and exporter epoch.
 - `internal/release`: canonical component-manifest and platform-reference validation; online registry, signing, and promotion checks remain release-workflow responsibilities.

@@ -42,7 +42,7 @@ if ! DALEC_SELECTION=$(GOWORK=off GOFLAGS='' go run ./cmd/live-input-verify \
   --dalec-frontend-ref "$DALEC_FRONTEND_OVERRIDE" \
   --dalec-route "$DALEC_TARGET_OVERRIDE" \
   --platform "$PLATFORM" \
-  --direct-spec-file "$SPEC"); then
+  --base-spec-file "$SPEC"); then
   exit 64
 fi
 DALEC_FRONTEND_REF=$(jq -er '.index | select(type == "string" and length > 0)' <<<"$DALEC_SELECTION") ||
@@ -81,7 +81,8 @@ and frontend references are always consumed by digest even though temporary
 tags are used for publication. The upstream Dalec index and the fixed
 homebrew/image route come from the validated external pin file. The optional
 upstream reference and target overrides must be supplied together and match
-that pin.
+that pin. The base fixture must define dependencies.runtime in map form and must
+not define targets; the helper injects the release-bound forwarding target.
 USAGE
   exit 64
 fi

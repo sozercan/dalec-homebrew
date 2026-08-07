@@ -28,7 +28,7 @@ done
 [[ "$RUN_ID" =~ ^[0-9A-Za-z][0-9A-Za-z_.-]{0,63}$ ]] || fail_usage "invalid E2E run ID"
 if ! DALEC_SELECTION=$(GOWORK=off GOFLAGS='' go run ./cmd/live-input-verify \
   --dalec-frontend-file "$DALEC_FRONTEND_PIN" \
-  --direct-spec-file "$SPEC" \
+  --base-spec-file "$SPEC" \
   --pinned-ref "DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE=$BUILDKIT_IMAGE" \
   --pinned-ref "DALEC_HOMEBREW_E2E_REGISTRY_IMAGE=$REGISTRY_IMAGE"); then
   exit 64

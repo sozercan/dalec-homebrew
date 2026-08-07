@@ -51,6 +51,9 @@ type Selection struct {
 	Image *dalec.ImageConfig
 }
 
+// Validate validates the Homebrew runtime contract without gateway-routing
+// checks. Frontend builds use ValidateForwarded so routing metadata is always
+// authenticated against the executing child gateway source.
 func Validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string, capability ...Capabilities) (*Selection, error) {
 	return validate(s, targetKey, arch, declarationOrder, nil, capability...)
 }
@@ -151,23 +154,21 @@ func validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string, 
 	}
 	if hasTarget {
 		validateDeps("target "+targetKey, selectedTarget.Dependencies)
-		if forwarding == nil {
-			if selectedTarget.Frontend != nil {
-				errs = append(errs, fmt.Errorf("target %q frontend forwarding is not supported during direct invocation", targetKey))
-			}
-		} else if selectedTarget.Frontend == nil {
-			errs = append(errs, fmt.Errorf("forwarded target %q does not declare frontend routing metadata", targetKey))
-		} else {
-			if forwarding.Source == "" {
-				errs = append(errs, errors.New("forwarded invocation is missing the gateway source"))
-			} else if selectedTarget.Frontend.Image != forwarding.Source {
-				errs = append(errs, fmt.Errorf("forwarded target %q frontend image %q does not match invoking gateway source %q", targetKey, selectedTarget.Frontend.Image, forwarding.Source))
-			}
-			if selectedTarget.Frontend.CmdLine != "" {
-				errs = append(errs, fmt.Errorf("forwarded target %q frontend cmdline must be empty", targetKey))
-			}
-			if forwarding.CmdLine != "" {
-				errs = append(errs, fmt.Errorf("forwarded invocation cmdline must be empty, got %q", forwarding.CmdLine))
+		if forwarding != nil {
+			if selectedTarget.Frontend == nil {
+				errs = append(errs, fmt.Errorf("forwarded target %q does not declare frontend routing metadata", targetKey))
+			} else {
+				if forwarding.Source == "" {
+					errs = append(errs, errors.New("forwarded invocation is missing the gateway source"))
+				} else if selectedTarget.Frontend.Image != forwarding.Source {
+					errs = append(errs, fmt.Errorf("forwarded target %q frontend image %q does not match invoking gateway source %q", targetKey, selectedTarget.Frontend.Image, forwarding.Source))
+				}
+				if selectedTarget.Frontend.CmdLine != "" {
+					errs = append(errs, fmt.Errorf("forwarded target %q frontend cmdline must be empty", targetKey))
+				}
+				if forwarding.CmdLine != "" {
+					errs = append(errs, fmt.Errorf("forwarded invocation cmdline must be empty, got %q", forwarding.CmdLine))
+				}
 			}
 		}
 		if selectedTarget.PackageConfig != nil {

@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/sozercan/dalec-homebrew/internal/homebrew/formulaid"
@@ -8,7 +9,7 @@ import (
 )
 
 // RuntimeDependencyOrder extracts declaration order without replacing Dalec's
-// authoritative decoder. It supports both the list shorthand and map form.
+// authoritative decoder. Runtime dependencies must use map form.
 func RuntimeDependencyOrder(data []byte, targetKey string) ([]string, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
@@ -21,9 +22,9 @@ func RuntimeDependencyOrder(data []byte, targetKey string) ([]string, error) {
 	global := mappingPath(root, "dependencies", "runtime")
 	selected := mappingPath(root, "targets", targetKey, "dependencies", "runtime")
 	if nodeLength(selected) > 0 {
-		return namesFromNode(selected), nil
+		return namesFromNode(selected)
 	}
-	return namesFromNode(global), nil
+	return namesFromNode(global)
 }
 
 func PreflightFormulaNames(data []byte, targetKey string, capability ...Capabilities) error {
@@ -74,24 +75,18 @@ func nodeLength(n *yaml.Node) int {
 	return len(n.Content)
 }
 
-func namesFromNode(n *yaml.Node) []string {
+func namesFromNode(n *yaml.Node) ([]string, error) {
 	if n == nil {
-		return nil
+		return nil, nil
 	}
-	var out []string
-	switch n.Kind {
-	case yaml.SequenceNode:
-		for _, c := range n.Content {
-			if c.Kind == yaml.ScalarNode {
-				out = append(out, c.Value)
-			}
-		}
-	case yaml.MappingNode:
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			if n.Content[i].Kind == yaml.ScalarNode && n.Content[i].Value != "<<" {
-				out = append(out, n.Content[i].Value)
-			}
+	if n.Kind != yaml.MappingNode {
+		return nil, errors.New("dependencies.runtime must use map form")
+	}
+	out := make([]string, 0, len(n.Content)/2)
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Kind == yaml.ScalarNode && n.Content[i].Value != "<<" {
+			out = append(out, n.Content[i].Value)
 		}
 	}
-	return out
+	return out, nil
 }

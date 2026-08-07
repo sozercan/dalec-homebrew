@@ -16,7 +16,7 @@
 
 ## Build an image
 
-The canonical path uses two immutable gateway images:
+The only supported production path uses two immutable gateway images:
 
 1. the upstream Dalec frontend, which selects and forwards the target; and
 2. the `dalec-homebrew` frontend, which implements the `image` provider route.
@@ -94,11 +94,6 @@ The upstream frontend forwards the effective Dalec spec to the exact
 `dalec-homebrew`, so the child can authenticate its own digest but cannot prove
 which parent frontend invoked it. Trusted releases bind the upstream Dalec
 index and children externally through the release pin and signed provenance.
-
-Direct invocation remains available for compatibility: put the digest-pinned
-`dalec-homebrew` image in `# syntax=`, omit `targets.homebrew.frontend`, and omit
-`--target homebrew/image`. The forwarded path above is the canonical release and
-integration path.
 
 See the [usage reference](docs/usage.md) for image settings, tests, dependency rules, and the complete supported contract.
 

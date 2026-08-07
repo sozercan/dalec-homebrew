@@ -20,7 +20,7 @@ are not accepted as trusted inputs.
 
 ## Build an image
 
-The canonical forwarded spec uses upstream Dalec as its syntax frontend and
+The supported production spec uses upstream Dalec as its syntax frontend and
 selects `dalec-homebrew` through the `homebrew` target:
 
 ```yaml
@@ -65,14 +65,10 @@ omitted or empty. Bare `--target homebrew`, unknown child routes, nested routes,
 and mutable or mismatched provider references fail closed before Homebrew
 metadata access.
 
-Direct invocation remains supported for compatibility. In that mode, put the
-digest-pinned `dalec-homebrew` image directly in `# syntax=`, omit the target's
-`frontend` block, and use the previous direct target semantics. Official live
-and release integration uses upstream forwarding.
-
 ## Declare runtime dependencies
 
-The map form supports the V1 per-Formula options:
+`dependencies.runtime` must use map form. This form also supports the V1
+per-Formula options:
 
 ```yaml
 dependencies:
@@ -83,19 +79,6 @@ dependencies:
     ripgrep:
       arch: [amd64, arm64]
 ```
-
-The list shorthand is also accepted:
-
-```yaml
-dependencies:
-  runtime: [hello, jq]
-```
-
-Direct compatibility mode accepts this shorthand. The currently pinned upstream
-Dalec `v0.21.5` dispatcher does not preserve list-form runtime dependencies when
-it reserializes a forwarded spec, so release-forwarded builds must use the map
-form. The child still fails closed with no applicable roots if a list reaches that
-path.
 
 Dependency rules:
 
@@ -113,8 +96,8 @@ Dependency rules:
 - Root declaration order is preserved for resolution records and the default generated `PATH`. Requested Formulae that expose the same executable basename fail instead of silently shadowing one another.
 - A multi-platform build fails if the same canonical requested root resolves to different package versions on different platforms. Architecture-filtered roots that appear on only one platform are independent.
 
-In the canonical forwarded mode, target-specific dependencies, image settings,
-and tests belong to the fixed `homebrew` target alongside its routing metadata:
+Target-specific dependencies, image settings, and tests belong to the fixed
+`homebrew` target alongside its routing metadata:
 
 ```yaml
 targets:
@@ -137,10 +120,6 @@ docker buildx build \
   --load \
   .
 ```
-
-Direct compatibility mode may still select an arbitrary spec target such as
-`production` with `--target production`, but that target must not contain a
-`frontend` block.
 
 ## Configure the image
 

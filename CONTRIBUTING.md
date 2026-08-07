@@ -70,10 +70,10 @@ checks from [Build component images](#build-component-images) locally.
 ## Run the live BuildKit test
 
 The live helper builds and tests one final, single-platform runtime image in
-either component mode, but both modes use the canonical forwarding chain:
+either component mode. Both modes use the only production invocation chain:
 
 ```text
-BuildKit -> upstream Dalec -> dalec-homebrew homebrew/image -> runtime image
+BuildKit -> upstream Dalec -> homebrew/image -> dalec-homebrew -> runtime image
 ```
 
 | Mode | Required variables | Behavior |
@@ -92,9 +92,10 @@ is inspected.
 
 Leave all three provider-component reference variables unset to rebuild, or set
 all three to replay a published tuple. The input fixture must start with a
-`# syntax=` directive and must not already define a top-level `targets` mapping.
-The helper replaces the directive with upstream Dalec, injects the exact
-`targets.homebrew.frontend.image`, and builds `--target homebrew/image`.
+`# syntax=` directive, define `dependencies.runtime` in map form, and not already
+define a top-level `targets` mapping. The helper replaces the directive with
+upstream Dalec, injects the exact `targets.homebrew.frontend.image`, and builds
+`--target homebrew/image`.
 
 Example component rebuild:
 
@@ -123,7 +124,7 @@ Common optional variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DALEC_HOMEBREW_LIVE_SPEC` | `examples/live-test.yaml` | Direct-form Dalec fixture adapted for the forwarded final image |
+| `DALEC_HOMEBREW_LIVE_SPEC` | `examples/live-test.yaml` | Base Dalec fixture validated and completed with release-bound forwarding metadata |
 | `DALEC_HOMEBREW_LIVE_IMAGE` | `dalec-homebrew-live:dev` | Final local or registry tag |
 | `DALEC_HOMEBREW_LIVE_OUTPUT` | `load` | `load` the final image or `push` it |
 | `DALEC_HOMEBREW_LIVE_PROGRESS` | `plain` | Buildx progress output |

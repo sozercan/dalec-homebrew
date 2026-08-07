@@ -49,7 +49,7 @@ case "$target" in
   runtime-base) digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
   materializer) digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
   frontend) digest=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ;;
-  homebrew/image|final) digest=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd ;;
+  homebrew/image) digest=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd ;;
   *) echo "unexpected build target: $target" >&2; exit 1 ;;
 esac
 printf '{"containerimage.digest":"sha256:%s"}\n' "$digest" > "$metadata_file"
@@ -199,6 +199,15 @@ printf 'name: missing-syntax\n' > "$TEST_ROOT/missing-syntax.yaml"
 expect_rejected missing-syntax "must start with a # syntax= directive" \
   "${PUBLISHED_ENV[@]}" \
   "DALEC_HOMEBREW_LIVE_SPEC=$TEST_ROOT/missing-syntax.yaml"
+
+cat > "$TEST_ROOT/list-runtime.yaml" <<'EOF_SPEC'
+# syntax=example/frontend@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+dependencies:
+  runtime: [hello, jq]
+EOF_SPEC
+expect_rejected list-runtime "dependencies.runtime must use map form" \
+  "${PUBLISHED_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_SPEC=$TEST_ROOT/list-runtime.yaml"
 
 cat > "$TEST_ROOT/existing-targets.yaml" <<'EOF_SPEC'
 # syntax=example/frontend@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

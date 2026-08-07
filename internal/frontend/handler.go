@@ -62,9 +62,8 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		return nil, fmt.Errorf("invoking gateway frontend: %w", err)
 	}
 	targetKey := dalecfrontend.GetTargetKey(dc)
-	forwarded := targetKey != ""
-	if !forwarded {
-		targetKey = dc.Target
+	if targetKey != forwardedTargetKey {
+		return nil, fmt.Errorf("forwarded Dalec target must be %q, got %q", forwardedTargetKey, targetKey)
 	}
 
 	// This raw pass is intentionally before any metadata or registry request.
@@ -99,15 +98,10 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		if err != nil {
 			return nil, err
 		}
-		var selection *speccontract.Selection
-		if forwarded {
-			selection, err = speccontract.ValidateForwarded(dalecSpec, targetKey, p.Architecture, declarationOrder, speccontract.Forwarding{
-				Source:  opts["source"],
-				CmdLine: opts["cmdline"],
-			}, nonCoreCapability)
-		} else {
-			selection, err = speccontract.Validate(dalecSpec, targetKey, p.Architecture, declarationOrder, nonCoreCapability)
-		}
+		selection, err := speccontract.ValidateForwarded(dalecSpec, targetKey, p.Architecture, declarationOrder, speccontract.Forwarding{
+			Source:  opts["source"],
+			CmdLine: opts["cmdline"],
+		}, nonCoreCapability)
 		if err != nil {
 			return nil, err
 		}
