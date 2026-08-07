@@ -94,8 +94,8 @@ Leave all three provider-component reference variables unset to rebuild, or set
 all three to replay a published tuple. The input fixture must start with a
 `# syntax=` directive, define `dependencies.runtime` in map form, and not already
 define a top-level `targets` mapping. The helper replaces the directive with
-upstream Dalec, injects the exact `targets.homebrew.frontend.image`, and builds
-`--target homebrew/image`.
+upstream Dalec, injects the versioned `x-dalec-homebrew` order extension and
+exact `targets.homebrew.frontend.image`, and builds `--target homebrew/image`.
 
 Example component rebuild:
 

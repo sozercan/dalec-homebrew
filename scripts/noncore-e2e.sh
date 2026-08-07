@@ -187,6 +187,14 @@ for name in resolution.json materialization-v2.json runtime-inventory.json; do
     "/usr/share/dalec-homebrew/$name" > "$WORK/$name"
 done
 
+jq -e '
+  (.requested | map(.requested)) == [
+    "svt/avtools/libdf",
+    "sozercan/repo/a365",
+    "hello"
+  ]
+' "$WORK/resolution.json" >/dev/null
+
 LIBDF_ID=svt/avtools/libdf
 LIBDF_TAP=svt/avtools
 jq -e --arg id "$LIBDF_ID" --arg tap "$LIBDF_TAP" '

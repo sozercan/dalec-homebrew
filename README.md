@@ -34,6 +34,11 @@ DALEC_FRONTEND=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-diges
 DALEC_HOMEBREW_FRONTEND=ghcr.io/sozercan/dalec-homebrew@sha256:<provider-digest>
 
 jq -nc --arg provider "$DALEC_HOMEBREW_FRONTEND" '{
+  "x-dalec-homebrew": {
+    schema_version: "dalec-homebrew-forwarding/v1",
+    target: "homebrew",
+    runtime_dependency_order: ["hello"]
+  },
   dependencies: {runtime: {hello: {}}},
   image: {entrypoint: "/home/linuxbrew/.linuxbrew/bin/hello"},
   targets: {homebrew: {frontend: {image: $provider}}}
@@ -55,6 +60,11 @@ Save this as `hello.yaml`, replacing both placeholders with immutable digests:
 
 ```yaml
 # syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
+
+x-dalec-homebrew:
+  schema_version: dalec-homebrew-forwarding/v1
+  target: homebrew
+  runtime_dependency_order: [hello]
 
 dependencies:
   runtime:

@@ -23,8 +23,11 @@ Production builds require the upstream Dalec target to be
 exactly `homebrew`, the child route to be exactly `image`, an empty frontend
 `cmdline`, and exact equality between `targets.homebrew.frontend.image` and the
 child gateway `source`. The source and all release/provider references must be
-SHA-256 digest-pinned. Target frontend metadata is accepted only as routing
-metadata for this exact chain; nested forwarding remains rejected.
+SHA-256 digest-pinned. The versioned top-level `x-dalec-homebrew` extension is
+mandatory and its root-order sequence must exactly match the selected runtime
+dependency keys; unknown, missing, duplicate, additional, or omitted entries
+fail before network access. Target frontend metadata is accepted only as
+routing metadata for this exact chain; nested forwarding remains rejected.
 
 The forwarded child does **not** receive an authenticated identity for the
 upstream Dalec parent. In the child solve, `source` identifies

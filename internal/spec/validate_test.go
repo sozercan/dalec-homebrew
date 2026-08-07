@@ -17,8 +17,8 @@ revision: 1
 license: Apache-2.0
 dependencies:
   runtime:
-    hello: {}
     jq: {}
+    hello: {}
 image:
   entrypoint: hello
 `
@@ -32,15 +32,15 @@ func load(t *testing.T, data string) *dalec.Spec {
 	return s
 }
 
-func TestMapFormAndOrder(t *testing.T) {
-	order, err := RuntimeDependencyOrder([]byte(baseSpec), "")
+func TestMapFormCanonicalNames(t *testing.T) {
+	order, err := RuntimeDependencyNames([]byte(baseSpec), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(order, ",") != "hello,jq" {
-		t.Fatalf("order=%v", order)
+		t.Fatalf("names=%v", order)
 	}
-	sel, err := Validate(load(t, baseSpec), "", "amd64", order)
+	sel, err := Validate(load(t, baseSpec), "", "amd64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,9 +49,19 @@ func TestMapFormAndOrder(t *testing.T) {
 	}
 }
 
-func TestRuntimeDependencyOrderRejectsListShorthand(t *testing.T) {
+func TestRuntimeDependencyOrderPreservesOriginalInput(t *testing.T) {
+	order, err := RuntimeDependencyOrder([]byte(baseSpec), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(order, ",") != "jq,hello" {
+		t.Fatalf("order=%v", order)
+	}
+}
+
+func TestRuntimeDependencyNamesRejectsListShorthand(t *testing.T) {
 	data := "dependencies:\n  runtime: [hello, jq]\n"
-	_, err := RuntimeDependencyOrder([]byte(data), "")
+	_, err := RuntimeDependencyNames([]byte(data), "")
 	if err == nil || !strings.Contains(err.Error(), "must use map form") {
 		t.Fatalf("error=%v, want map-form rejection", err)
 	}
@@ -59,11 +69,7 @@ func TestRuntimeDependencyOrderRejectsListShorthand(t *testing.T) {
 
 func TestBareDependencyOnlySpec(t *testing.T) {
 	data := `{"dependencies":{"runtime":{"hello":{}}},"image":{"entrypoint":"/home/linuxbrew/.linuxbrew/bin/hello"}}`
-	order, err := RuntimeDependencyOrder([]byte(data), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel, err := Validate(load(t, data), "", "amd64", order)
+	sel, err := Validate(load(t, data), "", "amd64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,11 +91,7 @@ targets:
           arch: [arm64]
         hello: {}
 `
-	order, err := RuntimeDependencyOrder([]byte(data), "prod")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel, err := Validate(load(t, data), "prod", "amd64", order)
+	sel, err := Validate(load(t, data), "prod", "amd64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,11 +103,7 @@ targets:
 func TestValidateForwardedTargetFrontend(t *testing.T) {
 	frontendRef := "ghcr.io/example/dalec-homebrew@sha256:" + strings.Repeat("a", 64)
 	data := forwardedSpec(frontendRef, "")
-	order, err := RuntimeDependencyOrder([]byte(data), "homebrew")
-	if err != nil {
-		t.Fatal(err)
-	}
-	selection, err := ValidateForwarded(load(t, data), "homebrew", "amd64", order, Forwarding{Source: frontendRef})
+	selection, err := ValidateForwarded(load(t, data), "homebrew", "amd64", Forwarding{Source: frontendRef})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +169,7 @@ func TestValidateForwardedTargetFrontendFailures(t *testing.T) {
 			if test.mutateSpec != nil {
 				test.mutateSpec(spec)
 			}
-			_, err := ValidateForwarded(spec, "homebrew", "amd64", []string{"hello"}, test.forwarding)
+			_, err := ValidateForwarded(spec, "homebrew", "amd64", test.forwarding)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error=%v, want %q", err, test.want)
 			}
@@ -180,8 +178,8 @@ func TestValidateForwardedTargetFrontendFailures(t *testing.T) {
 }
 
 func TestRejectVersionAndForbiddenFields(t *testing.T) {
-	data := strings.Replace(baseSpec, "    hello: {}\n    jq: {}", "    hello:\n      version: ['>=2']\n    jq: {}", 1) + "\nsources:\n  x:\n    http:\n      url: https://example.invalid/x\n"
-	_, err := Validate(load(t, data), "", "amd64", nil)
+	data := strings.Replace(baseSpec, "    jq: {}\n    hello: {}", "    jq: {}\n    hello:\n      version: ['>=2']", 1) + "\nsources:\n  x:\n    http:\n      url: https://example.invalid/x\n"
+	_, err := Validate(load(t, data), "", "amd64")
 	if err == nil || !strings.Contains(err.Error(), "historical versions") || !strings.Contains(err.Error(), "sources") {
 		t.Fatalf("err=%v", err)
 	}
@@ -195,11 +193,7 @@ func TestRejectNonCoreVersionConstraint(t *testing.T) {
 image:
   entrypoint: a365
 `
-	order, err := RuntimeDependencyOrder([]byte(data), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Validate(load(t, data), "", "amd64", order, Capabilities{NonCoreTaps: true}); err == nil || !strings.Contains(err.Error(), "historical versions") {
+	if _, err := Validate(load(t, data), "", "amd64", Capabilities{NonCoreTaps: true}); err == nil || !strings.Contains(err.Error(), "historical versions") {
 		t.Fatalf("Validate() error = %v", err)
 	}
 }
@@ -214,7 +208,7 @@ targets:
       volumes:
         /home/linuxbrew: {}
 `
-	_, err := Validate(load(t, data), "prod", "amd64", nil)
+	_, err := Validate(load(t, data), "prod", "amd64")
 	if err == nil || !strings.Contains(err.Error(), "sysext") || !strings.Contains(err.Error(), "overlaps") {
 		t.Fatalf("err=%v", err)
 	}
@@ -225,11 +219,7 @@ func TestPreflightCanonicalizesExplicitCore(t *testing.T) {
 	if err := PreflightFormulaNames([]byte(data), ""); err != nil {
 		t.Fatal(err)
 	}
-	order, err := RuntimeDependencyOrder([]byte(data), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel, err := Validate(load(t, data), "", "amd64", order)
+	sel, err := Validate(load(t, data), "", "amd64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,11 +236,7 @@ func TestQualifiedRootRequiresCapability(t *testing.T) {
 	if err := PreflightFormulaNames([]byte(data), "", Capabilities{NonCoreTaps: true}); err != nil {
 		t.Fatal(err)
 	}
-	order, err := RuntimeDependencyOrder([]byte(data), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel, err := Validate(load(t, data), "", "amd64", order, Capabilities{NonCoreTaps: true})
+	sel, err := Validate(load(t, data), "", "amd64", Capabilities{NonCoreTaps: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,11 +285,7 @@ func TestRuntimeRootLimitsRejectRawAndDecodedSpecs(t *testing.T) {
 				}
 			})
 			t.Run("decoded spec", func(t *testing.T) {
-				order, err := RuntimeDependencyOrder([]byte(data), "")
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := Validate(load(t, data), "", "amd64", order, caps); err == nil || !strings.Contains(err.Error(), test.want) {
+				if _, err := Validate(load(t, data), "", "amd64", caps); err == nil || !strings.Contains(err.Error(), test.want) {
 					t.Fatalf("Validate() error = %v, want %q", err, test.want)
 				}
 			})
@@ -326,11 +308,7 @@ func TestRuntimeRootLimitBoundariesAccepted(t *testing.T) {
 			if err := PreflightFormulaNames([]byte(data), "", caps); err != nil {
 				t.Fatalf("PreflightFormulaNames() error = %v", err)
 			}
-			order, err := RuntimeDependencyOrder([]byte(data), "")
-			if err != nil {
-				t.Fatal(err)
-			}
-			selection, err := Validate(load(t, data), "", "amd64", order, caps)
+			selection, err := Validate(load(t, data), "", "amd64", caps)
 			if err != nil {
 				t.Fatalf("Validate() error = %v", err)
 			}
@@ -369,6 +347,10 @@ func runtimeRootsSpec(roots []string) string {
 
 func forwardedSpec(frontendRef, cmdline string) string {
 	var result strings.Builder
+	result.WriteString("x-dalec-homebrew:\n")
+	fmt.Fprintf(&result, "  schema_version: %s\n", ForwardingExtensionSchemaVersion)
+	result.WriteString("  target: homebrew\n")
+	result.WriteString("  runtime_dependency_order: [hello]\n")
 	result.WriteString("dependencies:\n  runtime:\n    hello: {}\n")
 	result.WriteString("image:\n  entrypoint: hello\n")
 	result.WriteString("targets:\n  homebrew:\n    frontend:\n")

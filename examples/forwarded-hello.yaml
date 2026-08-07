@@ -6,6 +6,11 @@ description: Minimal Homebrew runtime built through upstream Dalec forwarding
 website: https://brew.sh/
 license: Apache-2.0
 
+x-dalec-homebrew:
+  schema_version: dalec-homebrew-forwarding/v1
+  target: homebrew
+  runtime_dependency_order: [hello]
+
 dependencies:
   runtime:
     hello: {}

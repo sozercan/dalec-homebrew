@@ -40,27 +40,41 @@ func TestMarshalEffectiveSpecPreservesFrontendMetadata(t *testing.T) {
 		"homebrew": {Frontend: &dalec.Frontend{Image: frontendRef}},
 	}}
 
-	effective, err := marshalEffectiveSpec(spec)
+	effective, err := marshalEffectiveSpec(spec, []string{"hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var decoded dalec.Spec
+	var decoded struct {
+		SchemaVersion          string     `json:"schema_version"`
+		DalecSpec              dalec.Spec `json:"dalec_spec"`
+		RuntimeDependencyOrder []string   `json:"runtime_dependency_order"`
+	}
 	if err := json.Unmarshal(effective, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if got := decoded.Targets["homebrew"].Frontend; got == nil || got.Image != frontendRef {
+	if decoded.SchemaVersion != "dalec-homebrew-effective-input/v1" || strings.Join(decoded.RuntimeDependencyOrder, ",") != "hello" {
+		t.Fatalf("effective envelope=%+v", decoded)
+	}
+	if got := decoded.DalecSpec.Targets["homebrew"].Frontend; got == nil || got.Image != frontendRef {
 		t.Fatalf("frontend metadata=%+v, want image %q", got, frontendRef)
 	}
 
 	target := spec.Targets["homebrew"]
 	target.Frontend = nil
 	spec.Targets["homebrew"] = target
-	withoutFrontend, err := marshalEffectiveSpec(spec)
+	withoutFrontend, err := marshalEffectiveSpec(spec, []string{"hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sha256Hex(effective) == sha256Hex(withoutFrontend) {
 		t.Fatal("effective spec digest did not bind frontend routing metadata")
+	}
+	otherOrder, err := marshalEffectiveSpec(spec, []string{"jq", "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha256Hex(withoutFrontend) == sha256Hex(otherOrder) {
+		t.Fatal("effective spec digest did not bind runtime dependency order")
 	}
 }
 

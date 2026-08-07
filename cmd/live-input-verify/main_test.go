@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -103,7 +104,7 @@ func TestDalecFrontendPin(t *testing.T) {
 			t.Fatalf("decode stdout: %v", err)
 		}
 		want := dalecFrontendSelection{Index: valid.Index, Route: valid.Route}
-		if got != want {
+		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("selection = %+v, want %+v", got, want)
 		}
 	})
@@ -161,6 +162,26 @@ func TestDalecFrontendPin(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("base spec order", func(t *testing.T) {
+		pinPath := writePin(t, valid)
+		specPath := filepath.Join(t.TempDir(), "spec.yaml")
+		specData := "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime:\n    zlib: {}\n    hello: {}\n"
+		if err := os.WriteFile(specPath, []byte(specData), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var stdout bytes.Buffer
+		if err := run([]string{"--dalec-frontend-file", pinPath, "--base-spec-file", specPath}, &stdout, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		var got dalecFrontendSelection
+		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got.RuntimeDependencyOrder, []string{"zlib", "hello"}) {
+			t.Fatalf("runtime order=%v", got.RuntimeDependencyOrder)
+		}
+	})
 
 	t.Run("unknown field", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "dalec-frontend.json")

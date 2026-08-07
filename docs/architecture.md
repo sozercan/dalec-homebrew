@@ -21,8 +21,12 @@ frontend's advertised routes, and forwards `homebrew/image` as child target
 Before any metadata or registry access, `dalec-homebrew` requires the selected
 spec target to be exactly `homebrew`, the child route to be exactly `image`, the
 target's frontend image to equal its gateway `source`, and both target and
-invocation `cmdline` values to be empty. These routing checks complete before
-metadata or registry access.
+invocation `cmdline` values to be empty. It also strictly validates the
+versioned top-level `x-dalec-homebrew` extension and requires its ordered root
+sequence to be an exact permutation of the selected runtime dependency keys.
+Dalec preserves top-level extension sequences while reserializing typed specs,
+so this carries user order across the otherwise unordered dependency map. These
+routing checks complete before metadata or registry access.
 
 The child can authenticate only its own gateway source. BuildKit does not give
 the child an authenticated identity for the parent that initiated the nested
@@ -97,6 +101,7 @@ Command entrypoints live under `cmd/`; component image recipes live in [`../Dock
 A resolution record binds:
 
 - the effective Dalec input digest and target platform
+- requested roots in the explicit extension order preserved across upstream map serialization
 - Formula and migration payload and envelope digests, freshness sources, timestamps, URLs, and recorded signature-verification evidence
 - exact OCI index, manifest, config, and layer descriptor identities plus selected annotations
 - requested roots and the resolved dependency closure

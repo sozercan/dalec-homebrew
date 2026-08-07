@@ -77,10 +77,6 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 	if err := speccontract.PreflightFormulaNames([]byte(rawSpec), targetKey, nonCoreCapability); err != nil {
 		return nil, err
 	}
-	declarationOrder, err := speccontract.RuntimeDependencyOrder([]byte(rawSpec), targetKey)
-	if err != nil {
-		return nil, err
-	}
 	targets := append([]ocispec.Platform(nil), dc.TargetPlatforms...)
 	if len(targets) == 0 {
 		targets = []ocispec.Platform{platforms.DefaultSpec()}
@@ -98,14 +94,14 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		if err != nil {
 			return nil, err
 		}
-		selection, err := speccontract.ValidateForwarded(dalecSpec, targetKey, p.Architecture, declarationOrder, speccontract.Forwarding{
+		selection, err := speccontract.ValidateForwarded(dalecSpec, targetKey, p.Architecture, speccontract.Forwarding{
 			Source:  opts["source"],
 			CmdLine: opts["cmdline"],
 		}, nonCoreCapability)
 		if err != nil {
 			return nil, err
 		}
-		effective, err := marshalEffectiveSpec(dalecSpec)
+		effective, err := marshalEffectiveSpec(dalecSpec, selection.RuntimeDependencyOrder)
 		if err != nil {
 			return nil, err
 		}
@@ -239,8 +235,16 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 	return rb.Finalize()
 }
 
-func marshalEffectiveSpec(spec *dalec.Spec) ([]byte, error) {
-	effective, err := json.Marshal(spec)
+func marshalEffectiveSpec(spec *dalec.Spec, runtimeDependencyOrder []string) ([]byte, error) {
+	effective, err := json.Marshal(struct {
+		SchemaVersion          string      `json:"schema_version"`
+		DalecSpec              *dalec.Spec `json:"dalec_spec"`
+		RuntimeDependencyOrder []string    `json:"runtime_dependency_order"`
+	}{
+		SchemaVersion:          "dalec-homebrew-effective-input/v1",
+		DalecSpec:              spec,
+		RuntimeDependencyOrder: runtimeDependencyOrder,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal effective Dalec spec: %w", err)
 	}

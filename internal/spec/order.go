@@ -3,13 +3,14 @@ package spec
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/sozercan/dalec-homebrew/internal/homebrew/formulaid"
 	"gopkg.in/yaml.v3"
 )
 
-// RuntimeDependencyOrder extracts declaration order without replacing Dalec's
-// authoritative decoder. Runtime dependencies must use map form.
+// RuntimeDependencyOrder extracts dependency declaration order from original,
+// pre-forward input. Never use it on a spec reserialized by upstream Dalec.
 func RuntimeDependencyOrder(data []byte, targetKey string) ([]string, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
@@ -27,12 +28,21 @@ func RuntimeDependencyOrder(data []byte, targetKey string) ([]string, error) {
 	return namesFromNode(global)
 }
 
+func RuntimeDependencyNames(data []byte, targetKey string) ([]string, error) {
+	names, err := RuntimeDependencyOrder(data, targetKey)
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(names)
+	return names, nil
+}
+
 func PreflightFormulaNames(data []byte, targetKey string, capability ...Capabilities) error {
-	order, err := RuntimeDependencyOrder(data, targetKey)
+	names, err := RuntimeDependencyOrder(data, targetKey)
 	if err != nil {
 		return err
 	}
-	ids, err := formulaid.ParseRoots(order)
+	ids, err := formulaid.ParseRoots(names)
 	if err != nil {
 		return fmt.Errorf("runtime roots: %w", err)
 	}
@@ -42,7 +52,7 @@ func PreflightFormulaNames(data []byte, targetKey string, capability ...Capabili
 	caps := effectiveCapabilities(capability)
 	for i, id := range ids {
 		if !caps.NonCoreTaps && !isCoreFormula(id) {
-			return fmt.Errorf("runtime dependency %q requires release-bound non-core capability bindings", order[i])
+			return fmt.Errorf("runtime dependency %q requires release-bound non-core capability bindings", names[i])
 		}
 	}
 	return nil

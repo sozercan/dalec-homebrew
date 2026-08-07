@@ -46,26 +46,31 @@ type Forwarding struct {
 }
 
 type Selection struct {
-	Roots []Root
-	Tests []*dalec.TestSpec
-	Image *dalec.ImageConfig
+	Roots                  []Root
+	Tests                  []*dalec.TestSpec
+	Image                  *dalec.ImageConfig
+	RuntimeDependencyOrder []string
 }
 
 // Validate validates the Homebrew runtime contract without gateway-routing
 // checks. Frontend builds use ValidateForwarded so routing metadata is always
 // authenticated against the executing child gateway source.
-func Validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string, capability ...Capabilities) (*Selection, error) {
-	return validate(s, targetKey, arch, declarationOrder, nil, capability...)
+func Validate(s *dalec.Spec, targetKey, arch string, capability ...Capabilities) (*Selection, error) {
+	return validate(s, targetKey, arch, nil, nil, capability...)
 }
 
 // ValidateForwarded validates the supported contract for a spec target routed
 // through an upstream Dalec frontend. The target's frontend block is routing
 // metadata and must identify this exact gateway invocation.
-func ValidateForwarded(s *dalec.Spec, targetKey, arch string, declarationOrder []string, forwarding Forwarding, capability ...Capabilities) (*Selection, error) {
-	return validate(s, targetKey, arch, declarationOrder, &forwarding, capability...)
+func ValidateForwarded(s *dalec.Spec, targetKey, arch string, forwarding Forwarding, capability ...Capabilities) (*Selection, error) {
+	order, err := ForwardingOrder(s, targetKey)
+	if err != nil {
+		return nil, fmt.Errorf("validate forwarding order: %w", err)
+	}
+	return validate(s, targetKey, arch, order, &forwarding, capability...)
 }
 
-func validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string, forwarding *Forwarding, capability ...Capabilities) (*Selection, error) {
+func validate(s *dalec.Spec, targetKey, arch string, preferredOrder []string, forwarding *Forwarding, capability ...Capabilities) (*Selection, error) {
 	caps := effectiveCapabilities(capability)
 	if s == nil {
 		return nil, errors.New("nil Dalec spec")
@@ -208,7 +213,7 @@ func validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string, 
 	}
 
 	deps := s.GetPackageDeps(targetKey).GetRuntime()
-	order := orderedNames(deps, declarationOrder)
+	order := orderedNames(deps, preferredOrder)
 	orderedIDs, err := formulaid.ParseRoots(order)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("runtime roots: %w", err))
@@ -241,7 +246,7 @@ func validate(s *dalec.Spec, targetKey, arch string, declarationOrder []string, 
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
-	return &Selection{Roots: roots, Tests: tests, Image: dalec.MergeSpecImage(s, targetKey)}, nil
+	return &Selection{Roots: roots, Tests: tests, Image: dalec.MergeSpecImage(s, targetKey), RuntimeDependencyOrder: slices.Clone(order)}, nil
 }
 
 func ValidateFormulaName(name string) error {
@@ -304,26 +309,15 @@ func ValidateImage(scope string, img *dalec.ImageConfig) error {
 }
 
 func orderedNames(deps dalec.PackageDependencyList, preferred []string) []string {
-	seen := make(map[string]struct{}, len(deps))
+	if len(preferred) > 0 {
+		return slices.Clone(preferred)
+	}
 	out := make([]string, 0, len(deps))
-	for _, name := range preferred {
-		if _, ok := deps[name]; !ok {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
+	for name := range deps {
 		out = append(out, name)
 	}
-	var rest []string
-	for name := range deps {
-		if _, ok := seen[name]; !ok {
-			rest = append(rest, name)
-		}
-	}
-	slices.Sort(rest)
-	return append(out, rest...)
+	slices.Sort(out)
+	return out
 }
 
 func appliesTo(arches []string, arch string) bool {

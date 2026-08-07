@@ -16,6 +16,7 @@ import (
 	"github.com/goccy/go-yaml"
 	"github.com/project-dalec/dalec"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
+	speccontract "github.com/sozercan/dalec-homebrew/internal/spec"
 )
 
 const (
@@ -78,8 +79,9 @@ type dalecModule struct {
 }
 
 type dalecFrontendSelection struct {
-	Index string `json:"index"`
-	Route string `json:"route"`
+	Index                  string   `json:"index"`
+	Route                  string   `json:"route"`
+	RuntimeDependencyOrder []string `json:"runtime_dependency_order,omitempty"`
 }
 
 func main() {
@@ -163,8 +165,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 		selection = &selected
 	}
 	if opts.baseSpecFile != "" {
-		if err := validateBaseSpec(opts.baseSpecFile); err != nil {
+		order, err := validateBaseSpec(opts.baseSpecFile)
+		if err != nil {
 			return fmt.Errorf("DALEC_HOMEBREW_LIVE_SPEC: %w", err)
+		}
+		if selection != nil {
+			selection.RuntimeDependencyOrder = order
 		}
 	}
 	if selection != nil {
@@ -175,19 +181,19 @@ func run(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func validateBaseSpec(path string) error {
+func validateBaseSpec(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("open %q: %w", path, err)
+		return nil, fmt.Errorf("open %q: %w", path, err)
 	}
 	defer f.Close()
 
 	data, err := io.ReadAll(io.LimitReader(f, maxLiveSpecBytes+1))
 	if err != nil {
-		return fmt.Errorf("read %q: %w", path, err)
+		return nil, fmt.Errorf("read %q: %w", path, err)
 	}
 	if len(data) > maxLiveSpecBytes {
-		return fmt.Errorf("%q exceeds %d bytes", path, maxLiveSpecBytes)
+		return nil, fmt.Errorf("%q exceeds %d bytes", path, maxLiveSpecBytes)
 	}
 	firstLine := data
 	if idx := bytes.IndexByte(firstLine, '\n'); idx >= 0 {
@@ -195,30 +201,34 @@ func validateBaseSpec(path string) error {
 	}
 	firstLine = bytes.TrimSuffix(firstLine, []byte("\r"))
 	if !bytes.HasPrefix(firstLine, []byte("# syntax=")) {
-		return errors.New("must start with a # syntax= directive")
+		return nil, errors.New("must start with a # syntax= directive")
 	}
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("decode %q routing shape: %w", path, err)
+		return nil, fmt.Errorf("decode %q routing shape: %w", path, err)
 	}
 	if _, ok := raw["targets"]; ok {
-		return errors.New("must not define top-level targets; the live helper reserves targets.homebrew for forwarding")
+		return nil, errors.New("must not define top-level targets; the live helper reserves targets.homebrew for forwarding")
 	}
 	dependencies, ok := raw["dependencies"].(map[string]any)
 	if !ok {
-		return errors.New("dependencies.runtime must use map form")
+		return nil, errors.New("dependencies.runtime must use map form")
 	}
 	if _, ok := dependencies["runtime"].(map[string]any); !ok {
-		return errors.New("dependencies.runtime must use map form")
+		return nil, errors.New("dependencies.runtime must use map form")
 	}
 	spec, err := dalec.LoadSpec(data)
 	if err != nil {
-		return fmt.Errorf("decode %q: %w", path, err)
+		return nil, fmt.Errorf("decode %q: %w", path, err)
 	}
 	if len(spec.Targets) != 0 {
-		return errors.New("must not define top-level targets; the live helper reserves targets.homebrew for forwarding")
+		return nil, errors.New("must not define top-level targets; the live helper reserves targets.homebrew for forwarding")
 	}
-	return nil
+	order, err := speccontract.RuntimeDependencyOrder(data, "")
+	if err != nil {
+		return nil, err
+	}
+	return order, nil
 }
 
 func loadDalecFrontendPin(path string) (*dalecFrontendPin, error) {

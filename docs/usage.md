@@ -26,6 +26,11 @@ selects `dalec-homebrew` through the `homebrew` target:
 ```yaml
 # syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
 
+x-dalec-homebrew:
+  schema_version: dalec-homebrew-forwarding/v1
+  target: homebrew
+  runtime_dependency_order: [hello]
+
 dependencies:
   runtime:
     hello: {}
@@ -59,7 +64,12 @@ such as `linux/amd64/v1` and `linux/arm64/v8` are equivalent; non-default
 variants and other operating systems or architectures are unsupported.
 
 `homebrew` is the selected Dalec spec target and `image` is the only route
-advertised by the provider. `targets.homebrew.frontend.image` must exactly match
+advertised by the provider. The top-level `x-dalec-homebrew` extension is
+required because upstream Dalec represents dependencies as a map; its
+`runtime_dependency_order` sequence must contain every selected runtime key
+exactly once and preserves user order across forwarding. The extension schema
+and target are fixed, and unknown or mismatched fields fail before network
+access. `targets.homebrew.frontend.image` must exactly match
 the digest-pinned gateway source used for the child solve, and `cmdline` must be
 omitted or empty. Bare `--target homebrew`, unknown child routes, nested routes,
 and mutable or mismatched provider references fail closed before Homebrew
@@ -93,13 +103,19 @@ Dependency rules:
 - `arch` may contain `amd64`, `arm64`, or both. Duplicate or unsupported entries are rejected. A root omitted by `arch` is not part of that platform's closure.
 - A non-empty selected-target `dependencies.runtime` map replaces the global runtime map as a group; it is not merged per Formula. If the target omits runtime dependencies, the global map is inherited. Both scopes are still validated fail-closed.
 - Every selected platform must have at least one applicable runtime root.
-- Root declaration order is preserved for resolution records and the default generated `PATH`. Requested Formulae that expose the same executable basename fail instead of silently shadowing one another.
+- The required `x-dalec-homebrew.runtime_dependency_order` sequence preserves requested-root declaration order across upstream forwarding. It must be an exact permutation of the selected runtime dependency keys; that order is recorded in resolution evidence and drives the default generated `PATH`. Requested Formulae that expose the same executable basename fail instead of silently shadowing one another.
 - A multi-platform build fails if the same canonical requested root resolves to different package versions on different platforms. Architecture-filtered roots that appear on only one platform are independent.
 
 Target-specific dependencies, image settings, and tests belong to the fixed
-`homebrew` target alongside its routing metadata:
+`homebrew` target alongside its routing metadata. The order extension still
+lists the effective selected target keys:
 
 ```yaml
+x-dalec-homebrew:
+  schema_version: dalec-homebrew-forwarding/v1
+  target: homebrew
+  runtime_dependency_order: [hello]
+
 targets:
   homebrew:
     frontend:

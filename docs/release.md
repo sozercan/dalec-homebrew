@@ -59,6 +59,11 @@ keeps the dispatcher release version distinct from the Dalec Go module compiled
 into `dalec-homebrew`. Release inputs use schema `dalec-homebrew-release-inputs/v2` and embed the
 complete external binding.
 
+Release integration also derives the required `x-dalec-homebrew` root-order
+sequence from each reviewed base fixture before forwarding. The child validates
+that sequence against the selected dependency map and commits it to the
+versioned effective-input digest used by the resolution record.
+
 The `dalec-homebrew` child can authenticate its own gateway `source`, but the
 BuildKit forwarding protocol does not give it an authenticated identity for the
 parent dispatcher. Release CI therefore validates the upstream index-to-child
