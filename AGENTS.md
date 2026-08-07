@@ -40,7 +40,8 @@ reset, discard, or rewrite them.
 
 ## Architecture map
 
-- `internal/spec`: dependency-order extraction and the supported Dalec contract.
+- `internal/spec`: runtime-dependency shape/name preflight, canonical root
+  ordering, and the supported Dalec contract.
 - `internal/config` and `internal/runtime`: release-bound build options, final
   image configuration, generated `PATH`, and runtime identity validation.
 - `internal/homebrew/metadata`: bounded fetches, JWS verification, freshness,

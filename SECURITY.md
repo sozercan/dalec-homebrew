@@ -20,15 +20,16 @@ The V1 implementation is expected to preserve these properties:
 14. Creating a `v*.*.*` release tag is a trusted release-operator action. Repository access must restrict tag creation to those operators, and tag rules should prevent update or deletion. The checked-in tag workflow rejects tag updates and deletions, dispatches only the privileged release workflow on `main`, and binds the initially pushed commit; a new build requires that commit to equal the trusted workflow commit before any registry or signing job runs.
 
 Production builds require the upstream Dalec target to be
-exactly `homebrew`, the child route to be exactly `image`, an empty frontend
-`cmdline`, and exact equality between `targets.homebrew.frontend.image` and the
-child gateway `source`. The child gateway source and all release component
-references must be SHA-256 digest-pinned. The versioned top-level
-`x-dalec-homebrew` extension is mandatory and its root-order sequence must
-exactly match the selected runtime
-dependency keys; unknown, missing, duplicate, additional, or omitted entries
-fail before network access. Target frontend metadata is accepted only as
-routing metadata for this exact chain; nested forwarding remains rejected.
+exactly `homebrew`, the child route to be exactly `image`, target and invocation
+`cmdline` values to be empty, and `targets.homebrew.frontend.image` to exactly
+equal the child gateway `source`. The child gateway source and all release
+component references must be SHA-256 digest-pinned. `dependencies.runtime` is
+an unordered map with no caller-controlled precedence semantics. For each
+platform, applicable roots are sorted lexicographically by canonical requested
+Formula ID. That order is bound into resolution evidence and the generated
+`PATH`; installation uses a separately computed deterministic topological
+order. Target frontend metadata is accepted only as routing metadata for this
+exact chain; nested forwarding remains rejected.
 
 The forwarded child does **not** receive an authenticated identity for the
 upstream Dalec parent. In the child solve, `source` identifies

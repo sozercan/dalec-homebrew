@@ -240,18 +240,14 @@ EXPECTED_SPEC="$TEST_ROOT/expected-published-spec.yaml"
 {
   printf '# syntax=%s\n' "$DALEC_FRONTEND_REF"
   tail -n +2 "$ROOT/examples/live-test.yaml"
-  printf '\nx-dalec-homebrew:\n'
-  printf '  schema_version: dalec-homebrew-forwarding/v1\n'
-  printf '  target: homebrew\n'
-  printf '  runtime_dependency_order:\n'
-  printf '    - \"hello\"\n'
-  printf '    - \"jq\"\n'
-  printf 'targets:\n'
+  printf '\ntargets:\n'
   printf '  homebrew:\n'
   printf '    frontend:\n'
   printf '      image: %s\n' "$FRONTEND_REF"
 } > "$EXPECTED_SPEC"
 diff -u "$EXPECTED_SPEC" "$CAPTURED_SPEC"
+assert_not_contains "$CAPTURED_SPEC" "x-dalec-homebrew"
+assert_not_contains "$CAPTURED_SPEC" "runtime_dependency_order"
 for result in \
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
   "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \

@@ -49,16 +49,6 @@ func TestMapFormCanonicalNames(t *testing.T) {
 	}
 }
 
-func TestRuntimeDependencyOrderPreservesOriginalInput(t *testing.T) {
-	order, err := RuntimeDependencyOrder([]byte(baseSpec), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(order, ",") != "jq,hello" {
-		t.Fatalf("order=%v", order)
-	}
-}
-
 func TestRuntimeDependencyNamesRejectsListShorthand(t *testing.T) {
 	data := "dependencies:\n  runtime: [hello, jq]\n"
 	_, err := RuntimeDependencyNames([]byte(data), "")
@@ -67,7 +57,7 @@ func TestRuntimeDependencyNamesRejectsListShorthand(t *testing.T) {
 	}
 }
 
-func TestRuntimeDependencyOrderValidatesGlobalAndSelectedShapes(t *testing.T) {
+func TestRuntimeDependencyNamesValidatesGlobalAndSelectedShapes(t *testing.T) {
 	tests := []struct {
 		name string
 		data string
@@ -112,7 +102,7 @@ targets:
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := RuntimeDependencyOrder([]byte(tt.data), "homebrew")
+			_, err := RuntimeDependencyNames([]byte(tt.data), "homebrew")
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error=%v, want %q", err, tt.want)
 			}
@@ -400,10 +390,6 @@ func runtimeRootsSpec(roots []string) string {
 
 func forwardedSpec(frontendRef, cmdline string) string {
 	var result strings.Builder
-	result.WriteString("x-dalec-homebrew:\n")
-	fmt.Fprintf(&result, "  schema_version: %s\n", ForwardingExtensionSchemaVersion)
-	result.WriteString("  target: homebrew\n")
-	result.WriteString("  runtime_dependency_order: [hello]\n")
 	result.WriteString("dependencies:\n  runtime:\n    hello: {}\n")
 	result.WriteString("image:\n  entrypoint: hello\n")
 	result.WriteString("targets:\n  homebrew:\n    frontend:\n")

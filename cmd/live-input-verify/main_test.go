@@ -170,7 +170,7 @@ func TestDalecFrontendPin(t *testing.T) {
 		})
 	}
 
-	t.Run("base spec order", func(t *testing.T) {
+	t.Run("base spec does not alter selection", func(t *testing.T) {
 		pinPath := writePin(t, valid)
 		specPath := filepath.Join(t.TempDir(), "spec.yaml")
 		specData := "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime:\n    zlib: {}\n    hello: {}\n"
@@ -181,12 +181,9 @@ func TestDalecFrontendPin(t *testing.T) {
 		if err := run([]string{"--dalec-frontend-file", pinPath, "--base-spec-file", specPath}, &stdout, io.Discard); err != nil {
 			t.Fatal(err)
 		}
-		var got releasecontract.DalecFrontendSelection
-		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(got.RuntimeDependencyOrder, []string{"zlib", "hello"}) {
-			t.Fatalf("runtime order=%v", got.RuntimeDependencyOrder)
+		want := `{"index":"` + valid.Index + `","route":"` + valid.Route + `"}` + "\n"
+		if stdout.String() != want {
+			t.Fatalf("selection JSON = %q, want %q", stdout.String(), want)
 		}
 	})
 
@@ -278,6 +275,11 @@ func TestBaseSpecValidation(t *testing.T) {
 			want: "dependencies.runtime must use map form",
 		},
 		{
+			name: "empty runtime map",
+			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime: {}\n",
+			want: "dependencies.runtime must contain at least one entry",
+		},
+		{
 			name: "missing dependencies",
 			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\nname: example\n",
 			want: "dependencies.runtime must use map form",
@@ -310,12 +312,12 @@ func TestBaseSpecValidation(t *testing.T) {
 		{
 			name: "forwarding metadata",
 			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime:\n    hello: {}\nx-dalec-homebrew: {}\n",
-			want: "must not define top-level x-dalec-homebrew",
+			want: "top-level x-dalec-homebrew is unsupported",
 		},
 		{
 			name: "quoted forwarding metadata",
 			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime:\n    hello: {}\n\"x-dalec-homebrew\": {}\n",
-			want: "must not define top-level x-dalec-homebrew",
+			want: "top-level x-dalec-homebrew is unsupported",
 		},
 	}
 

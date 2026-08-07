@@ -56,17 +56,18 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 		`DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN="$DALEC_FRONTEND_PIN"`,
 		"DALEC_HOMEBREW_E2E_DALEC_ROUTE=$DALEC_ROUTE",
 		"upstream Dalec accepted unsupported list-form runtime dependencies",
-		"extension runtime_dependency_order has 1 entries; selected runtime dependencies have 0",
+		`target $PLATFORM has no applicable runtime roots`,
 		`--catalog-extractor-ref "$EXTRACTOR_REF"`,
 		`--build-arg "CATALOG_EXTRACTOR_REF=$EXTRACTOR_REF"`,
 		"docker run --rm --network none",
 		".components.catalog_extractor_ref as $extractor",
 		".extraction.policy_version == \"build-local-tap-extraction-v1\"",
 		".extraction.extractor_ref == $extractor",
-		"(.requested | map(.requested)) == [",
-		`"svt/avtools/libdf"`,
-		`"sozercan/repo/a365"`,
-		`"hello"`,
+		`(.requested | map(.requested)) == [
+    "hello",
+    "sozercan/repo/a365",
+    "svt/avtools/libdf"
+  ]`,
 		".requested == $id and .id == $id",
 		".tap == $tap",
 		".bottle.transport.https.fetch_policy_version == \"homebrew-bottle-fetch-v1\"",
@@ -96,9 +97,11 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 		"INGESTION_JWS",
 		"catalog-worker",
 		"--buildkit-address",
+		"x-dalec-homebrew",
+		"runtime_dependency_order",
 	} {
 		if strings.Contains(text, forbidden) {
-			t.Fatalf("non-core E2E contains forbidden release/CI tap control %q", forbidden)
+			t.Fatalf("non-core E2E contains forbidden marker %q", forbidden)
 		}
 	}
 }
@@ -120,6 +123,12 @@ func TestNonCoreE2ESpecContainsQualifiedAndCoreRoots(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("non-core E2E spec is missing %q", want)
 		}
+	}
+	const nonCanonicalDeclarationOrder = `    svt/avtools/libdf: {}
+    sozercan/repo/a365: {}
+    hello: {}`
+	if !strings.Contains(text, nonCanonicalDeclarationOrder) {
+		t.Fatal("non-core E2E fixture must retain noncanonical YAML declaration order")
 	}
 	decoded, err := dalec.LoadSpec(spec)
 	if err != nil {

@@ -39,11 +39,6 @@ DALEC_FRONTEND=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-diges
 DALEC_HOMEBREW_CHILD=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-digest>
 
 jq -nc --arg child_frontend "$DALEC_HOMEBREW_CHILD" '{
-  "x-dalec-homebrew": {
-    schema_version: "dalec-homebrew-forwarding/v1",
-    target: "homebrew",
-    runtime_dependency_order: ["hello"]
-  },
   dependencies: {runtime: {hello: {}}},
   image: {entrypoint: "/home/linuxbrew/.linuxbrew/bin/hello"},
   targets: {homebrew: {frontend: {image: $child_frontend}}}
@@ -65,11 +60,6 @@ Save this as `hello.yaml`, replacing both placeholders with immutable digests:
 
 ```yaml
 # syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
-
-x-dalec-homebrew:
-  schema_version: dalec-homebrew-forwarding/v1
-  target: homebrew
-  runtime_dependency_order: [hello]
 
 dependencies:
   runtime:
@@ -105,10 +95,19 @@ Hello, world!
 ```
 
 The upstream frontend forwards the effective Dalec spec to the exact
-`targets.homebrew.frontend.image`. Inside the child solve, `source` identifies
-`dalec-homebrew`, so the child can authenticate its own digest but cannot prove
-which parent frontend invoked it. Trusted releases bind the upstream Dalec
-index and children externally through the release pin and signed provenance.
+`targets.homebrew.frontend.image`. The child requires the selected spec target
+to be `homebrew`, the child route to be `image`, target and invocation `cmdline`
+values to be empty, and the target frontend image to equal the child gateway
+`source`. Inside the child solve, `source` identifies `dalec-homebrew`, so the
+child can authenticate its own digest but cannot prove which parent frontend
+invoked it. Trusted releases bind the upstream Dalec index and children
+externally through the release pin and signed provenance.
+
+The `dependencies.runtime` mapping is unordered. For each platform, applicable
+roots are sorted lexicographically by canonical requested Formula ID. This
+canonical order is recorded in resolution evidence and drives the default
+generated `PATH`; installation uses a separate deterministic topological order
+so dependencies precede dependents.
 
 See the [usage reference](docs/usage.md) for image settings, tests, dependency rules, and the complete supported contract.
 
@@ -140,7 +139,13 @@ The example identity above is illustrative; use a Formula present in the public 
 
 ## Examples
 
-Start with the standalone [forwarded hello](examples/forwarded-hello.yaml). The [multi-package toolchain](examples/live-toolchain.yaml), [Python](examples/live-python.yaml), [Redis](examples/live-redis.yaml), [Graphviz](examples/live-graphviz.yaml), and [glibc](examples/live-glibc.yaml) files are base fixtures for `scripts/live-test.sh`; the helper validates them and injects the release-bound forwarding extension and target before building.
+Start with the standalone [forwarded hello](examples/forwarded-hello.yaml). The
+[multi-package toolchain](examples/live-toolchain.yaml),
+[Python](examples/live-python.yaml), [Redis](examples/live-redis.yaml),
+[Graphviz](examples/live-graphviz.yaml), and [glibc](examples/live-glibc.yaml)
+files are base fixtures for `scripts/live-test.sh`; the helper validates them,
+injects the release-bound `targets.homebrew.frontend.image` child mapping, and
+builds through upstream Dalec's `homebrew/image` target.
 
 ## Learn more
 

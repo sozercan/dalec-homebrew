@@ -49,13 +49,6 @@ DALEC_FRONTEND_REF=$(jq -er '.index | select(type == "string" and length > 0)' <
   fail_usage "validated upstream Dalec frontend pin did not contain an index"
 DALEC_ROUTE=$(jq -er '.route | select(type == "string" and length > 0)' <<<"$DALEC_SELECTION") ||
   fail_usage "validated upstream Dalec frontend pin did not contain a route"
-RUNTIME_DEPENDENCY_ORDER=()
-while IFS= read -r root; do
-  RUNTIME_DEPENDENCY_ORDER+=("$root")
-done < <(jq -er '.runtime_dependency_order[] | select(type == "string" and length > 0)' <<<"$DALEC_SELECTION")
-(( ${#RUNTIME_DEPENDENCY_ORDER[@]} > 0 )) ||
-  fail_usage "validated base spec did not contain runtime dependency order"
-
 if [[ -z "$BUILDER" || -z "$PLATFORM" || ( "$USE_PUBLISHED_COMPONENTS" -eq 0 && -z "$REGISTRY" ) ]]; then
   cat >&2 <<'USAGE'
 usage: rebuild components:
@@ -180,14 +173,7 @@ fi
 {
   printf '# syntax=%s\n' "$DALEC_FRONTEND_REF"
   tail -n +2 "$SPEC"
-  printf '\nx-dalec-homebrew:\n'
-  printf '  schema_version: dalec-homebrew-forwarding/v1\n'
-  printf '  target: homebrew\n'
-  printf '  runtime_dependency_order:\n'
-  for root in "${RUNTIME_DEPENDENCY_ORDER[@]}"; do
-    printf '    - %s\n' "$(jq -Rn --arg value "$root" '$value')"
-  done
-  printf 'targets:\n'
+  printf '\ntargets:\n'
   printf '  homebrew:\n'
   printf '    frontend:\n'
   printf '      image: %s\n' "$FRONTEND_REF"

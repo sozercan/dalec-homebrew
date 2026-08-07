@@ -43,12 +43,10 @@ type DalecModule struct {
 }
 
 // DalecFrontendSelection is the validated upstream Dalec frontend reference
-// and route selected for one invocation. RuntimeDependencyOrder may be added by
-// callers that also validate forwarding metadata.
+// and route selected for one invocation.
 type DalecFrontendSelection struct {
-	Index                  string   `json:"index"`
-	Route                  string   `json:"route"`
-	RuntimeDependencyOrder []string `json:"runtime_dependency_order,omitempty"`
+	Index string `json:"index"`
+	Route string `json:"route"`
 }
 
 // LoadDalecFrontendPin reads, strictly decodes, and validates a release-bound

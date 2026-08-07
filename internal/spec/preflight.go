@@ -9,12 +9,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// RuntimeDependencyOrder extracts dependency declaration order from original,
-// pre-forward input. Never use it on a spec reserialized by upstream Dalec.
-func RuntimeDependencyOrder(data []byte, targetKey string) ([]string, error) {
+// RuntimeDependencyNames validates the raw dependency shape and returns the
+// selected runtime dependency keys in deterministic lexical order. YAML map
+// declaration order is not part of the supported contract.
+func RuntimeDependencyNames(data []byte, targetKey string) ([]string, error) {
+	names, err := runtimeDependencyNames(data, targetKey)
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(names)
+	return names, nil
+}
+
+func runtimeDependencyNames(data []byte, targetKey string) ([]string, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("parse dependency order: %w", err)
+		return nil, fmt.Errorf("parse runtime dependencies: %w", err)
 	}
 	if len(doc.Content) == 0 {
 		return nil, nil
@@ -36,17 +46,8 @@ func RuntimeDependencyOrder(data []byte, targetKey string) ([]string, error) {
 	return namesFromNode(global)
 }
 
-func RuntimeDependencyNames(data []byte, targetKey string) ([]string, error) {
-	names, err := RuntimeDependencyOrder(data, targetKey)
-	if err != nil {
-		return nil, err
-	}
-	slices.Sort(names)
-	return names, nil
-}
-
 func PreflightFormulaNames(data []byte, targetKey string, capability ...Capabilities) error {
-	names, err := RuntimeDependencyOrder(data, targetKey)
+	names, err := RuntimeDependencyNames(data, targetKey)
 	if err != nil {
 		return err
 	}

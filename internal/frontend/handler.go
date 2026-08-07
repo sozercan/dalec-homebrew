@@ -101,7 +101,7 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		if err != nil {
 			return nil, err
 		}
-		effective, err := marshalEffectiveSpec(dalecSpec, selection.RuntimeDependencyOrder)
+		effective, err := marshalEffectiveSpec(dalecSpec)
 		if err != nil {
 			return nil, err
 		}
@@ -235,15 +235,13 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 	return rb.Finalize()
 }
 
-func marshalEffectiveSpec(spec *dalec.Spec, runtimeDependencyOrder []string) ([]byte, error) {
+func marshalEffectiveSpec(spec *dalec.Spec) ([]byte, error) {
 	effective, err := json.Marshal(struct {
-		SchemaVersion          string      `json:"schema_version"`
-		DalecSpec              *dalec.Spec `json:"dalec_spec"`
-		RuntimeDependencyOrder []string    `json:"runtime_dependency_order"`
+		SchemaVersion string      `json:"schema_version"`
+		DalecSpec     *dalec.Spec `json:"dalec_spec"`
 	}{
-		SchemaVersion:          "dalec-homebrew-effective-input/v1",
-		DalecSpec:              spec,
-		RuntimeDependencyOrder: runtimeDependencyOrder,
+		SchemaVersion: "dalec-homebrew-effective-input/v1",
+		DalecSpec:     spec,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal effective Dalec spec: %w", err)

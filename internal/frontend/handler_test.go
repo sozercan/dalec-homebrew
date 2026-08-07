@@ -40,19 +40,18 @@ func TestMarshalEffectiveSpecPreservesFrontendMetadata(t *testing.T) {
 		"homebrew": {Frontend: &dalec.Frontend{Image: frontendRef}},
 	}}
 
-	effective, err := marshalEffectiveSpec(spec, []string{"hello"})
+	effective, err := marshalEffectiveSpec(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var decoded struct {
-		SchemaVersion          string     `json:"schema_version"`
-		DalecSpec              dalec.Spec `json:"dalec_spec"`
-		RuntimeDependencyOrder []string   `json:"runtime_dependency_order"`
+		SchemaVersion string     `json:"schema_version"`
+		DalecSpec     dalec.Spec `json:"dalec_spec"`
 	}
 	if err := json.Unmarshal(effective, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.SchemaVersion != "dalec-homebrew-effective-input/v1" || strings.Join(decoded.RuntimeDependencyOrder, ",") != "hello" {
+	if decoded.SchemaVersion != "dalec-homebrew-effective-input/v1" {
 		t.Fatalf("effective envelope=%+v", decoded)
 	}
 	if got := decoded.DalecSpec.Targets["homebrew"].Frontend; got == nil || got.Image != frontendRef {
@@ -62,19 +61,29 @@ func TestMarshalEffectiveSpecPreservesFrontendMetadata(t *testing.T) {
 	target := spec.Targets["homebrew"]
 	target.Frontend = nil
 	spec.Targets["homebrew"] = target
-	withoutFrontend, err := marshalEffectiveSpec(spec, []string{"hello"})
+	withoutFrontend, err := marshalEffectiveSpec(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sha256Hex(effective) == sha256Hex(withoutFrontend) {
 		t.Fatal("effective spec digest did not bind frontend routing metadata")
 	}
-	otherOrder, err := marshalEffectiveSpec(spec, []string{"jq", "hello"})
+	firstOrder, err := marshalEffectiveSpec(&dalec.Spec{Dependencies: &dalec.PackageDependencies{Runtime: dalec.PackageDependencyList{
+		"zlib":  {},
+		"hello": {},
+	}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sha256Hex(withoutFrontend) == sha256Hex(otherOrder) {
-		t.Fatal("effective spec digest did not bind runtime dependency order")
+	secondOrder, err := marshalEffectiveSpec(&dalec.Spec{Dependencies: &dalec.PackageDependencies{Runtime: dalec.PackageDependencyList{
+		"hello": {},
+		"zlib":  {},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha256Hex(firstOrder) != sha256Hex(secondOrder) {
+		t.Fatal("effective spec digest depends on Go map insertion order")
 	}
 }
 

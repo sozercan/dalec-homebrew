@@ -221,15 +221,14 @@ func TestSelectDalecFrontendRejectsInvalidSelection(t *testing.T) {
 
 func TestDalecFrontendSelectionJSON(t *testing.T) {
 	selection := DalecFrontendSelection{
-		Index:                  dalecFrontendRef("b"),
-		Route:                  DalecHomebrewRoute,
-		RuntimeDependencyOrder: []string{"zlib", "hello"},
+		Index: dalecFrontendRef("b"),
+		Route: DalecHomebrewRoute,
 	}
 	got, err := json.Marshal(selection)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"index":"` + selection.Index + `","route":"` + DalecHomebrewRoute + `","runtime_dependency_order":["zlib","hello"]}`
+	want := `{"index":"` + selection.Index + `","route":"` + DalecHomebrewRoute + `"}`
 	if string(got) != want {
 		t.Fatalf("JSON = %s, want %s", got, want)
 	}

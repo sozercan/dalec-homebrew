@@ -46,34 +46,32 @@ type Forwarding struct {
 }
 
 type Selection struct {
-	Roots                  []Root
-	Tests                  []*dalec.TestSpec
-	Image                  *dalec.ImageConfig
-	RuntimeDependencyOrder []string
+	Roots []Root
+	Tests []*dalec.TestSpec
+	Image *dalec.ImageConfig
 }
 
 // Validate validates the Homebrew runtime contract without gateway-routing
 // checks. Frontend builds use ValidateForwarded so routing metadata is always
 // authenticated against the executing child gateway source.
 func Validate(s *dalec.Spec, targetKey, arch string, capability ...Capabilities) (*Selection, error) {
-	return validate(s, targetKey, arch, nil, nil, capability...)
+	return validate(s, targetKey, arch, nil, capability...)
 }
 
 // ValidateForwarded validates the supported contract for a spec target routed
 // through an upstream Dalec frontend. The target's frontend block is routing
 // metadata and must identify this exact gateway invocation.
 func ValidateForwarded(s *dalec.Spec, targetKey, arch string, forwarding Forwarding, capability ...Capabilities) (*Selection, error) {
-	order, err := ForwardingOrder(s, targetKey)
-	if err != nil {
-		return nil, fmt.Errorf("validate forwarding order: %w", err)
-	}
-	return validate(s, targetKey, arch, order, &forwarding, capability...)
+	return validate(s, targetKey, arch, &forwarding, capability...)
 }
 
-func validate(s *dalec.Spec, targetKey, arch string, preferredOrder []string, forwarding *Forwarding, capability ...Capabilities) (*Selection, error) {
+func validate(s *dalec.Spec, targetKey, arch string, forwarding *Forwarding, capability ...Capabilities) (*Selection, error) {
 	caps := effectiveCapabilities(capability)
 	if s == nil {
 		return nil, errors.New("nil Dalec spec")
+	}
+	if err := rejectObsoleteForwardingExtension(s); err != nil {
+		return nil, err
 	}
 	if _, ok := supportedArches[arch]; !ok {
 		return nil, fmt.Errorf("unsupported target architecture %q; V1 supports amd64 and arm64", arch)
@@ -125,7 +123,8 @@ func validate(s *dalec.Spec, targetKey, arch string, preferredOrder []string, fo
 		if len(deps.ExtraRepos) > 0 {
 			errs = append(errs, fmt.Errorf("%s extra package repositories are not supported", scope))
 		}
-		for name, constraint := range deps.Runtime {
+		for _, name := range sortedDependencyNames(deps.Runtime) {
+			constraint := deps.Runtime[name]
 			id, err := formulaid.Parse(name)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("%s runtime dependency: %w", scope, err))
@@ -213,21 +212,21 @@ func validate(s *dalec.Spec, targetKey, arch string, preferredOrder []string, fo
 	}
 
 	deps := s.GetPackageDeps(targetKey).GetRuntime()
-	order := orderedNames(deps, preferredOrder)
-	orderedIDs, err := formulaid.ParseRoots(order)
+	names := sortedDependencyNames(deps)
+	ids, err := formulaid.ParseRoots(names)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("runtime roots: %w", err))
-	} else if err := validateRuntimeRootLimits(orderedIDs); err != nil {
+	} else if err := validateRuntimeRootLimits(ids); err != nil {
 		errs = append(errs, fmt.Errorf("runtime roots: %w", err))
 	}
-	roots := make([]Root, 0, len(order))
+	roots := make([]Root, 0, len(names))
 	if err == nil {
-		for i, name := range order {
+		for i, name := range names {
 			constraint, ok := deps[name]
 			if !ok {
 				continue
 			}
-			id := orderedIDs[i]
+			id := ids[i]
 			if !caps.NonCoreTaps && !isCoreFormula(id) {
 				continue
 			}
@@ -239,6 +238,9 @@ func validate(s *dalec.Spec, targetKey, arch string, preferredOrder []string, fo
 				roots = append(roots, Root{Name: lookup, Requested: name, ID: id})
 			}
 		}
+		slices.SortFunc(roots, func(a, b Root) int {
+			return strings.Compare(a.ID.String(), b.ID.String())
+		})
 	}
 	if len(roots) == 0 {
 		errs = append(errs, fmt.Errorf("target linux/%s has no applicable runtime roots", arch))
@@ -246,7 +248,7 @@ func validate(s *dalec.Spec, targetKey, arch string, preferredOrder []string, fo
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
-	return &Selection{Roots: roots, Tests: tests, Image: dalec.MergeSpecImage(s, targetKey), RuntimeDependencyOrder: slices.Clone(order)}, nil
+	return &Selection{Roots: roots, Tests: tests, Image: dalec.MergeSpecImage(s, targetKey)}, nil
 }
 
 func ValidateFormulaName(name string) error {
@@ -308,16 +310,27 @@ func ValidateImage(scope string, img *dalec.ImageConfig) error {
 	return errors.Join(errs...)
 }
 
-func orderedNames(deps dalec.PackageDependencyList, preferred []string) []string {
-	if len(preferred) > 0 {
-		return slices.Clone(preferred)
-	}
+func sortedDependencyNames(deps dalec.PackageDependencyList) []string {
 	out := make([]string, 0, len(deps))
 	for name := range deps {
 		out = append(out, name)
 	}
 	slices.Sort(out)
 	return out
+}
+
+const obsoleteForwardingExtensionKey = "x-dalec-homebrew"
+
+func rejectObsoleteForwardingExtension(s *dalec.Spec) error {
+	var value any
+	err := s.Ext(obsoleteForwardingExtensionKey, &value, func(*dalec.ExtDecodeConfig) {})
+	if errors.Is(err, dalec.ErrNodeNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("decode unsupported extension %q: %w", obsoleteForwardingExtensionKey, err)
+	}
+	return fmt.Errorf("top-level extension %q is unsupported", obsoleteForwardingExtensionKey)
 }
 
 func appliesTo(arches []string, arch string) bool {

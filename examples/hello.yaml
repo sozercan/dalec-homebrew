@@ -6,11 +6,6 @@ version: 0.1.0
 revision: 1
 license: Apache-2.0
 
-x-dalec-homebrew:
-  schema_version: dalec-homebrew-forwarding/v1
-  target: homebrew
-  runtime_dependency_order: [hello]
-
 dependencies:
   runtime:
     hello: {}

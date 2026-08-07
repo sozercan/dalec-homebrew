@@ -27,12 +27,12 @@ frontend's advertised routes, and forwards `homebrew/image` as child target
 Before any metadata or registry access, `dalec-homebrew` requires the selected
 spec target to be exactly `homebrew`, the child route to be exactly `image`, the
 target's frontend image to equal its gateway `source`, and both target and
-invocation `cmdline` values to be empty. It also strictly validates the
-versioned top-level `x-dalec-homebrew` extension and requires its ordered root
-sequence to be an exact permutation of the selected runtime dependency keys.
-Dalec preserves top-level extension sequences while reserializing typed specs,
-so this carries user order across the otherwise unordered dependency map. These
-routing checks complete before metadata or registry access.
+invocation `cmdline` values to be empty. These routing checks complete before
+metadata or registry access. Runtime dependency maps carry no declaration-order
+semantics. Applicable roots for each platform are sorted lexicographically by
+canonical requested Formula ID for resolution evidence and the default
+generated `PATH`; installation uses a separate
+deterministic topological order.
 
 The child can authenticate only its own gateway source. BuildKit does not give
 the child an authenticated identity for the parent that initiated the nested
@@ -74,7 +74,8 @@ See [`../SECURITY.md`](../SECURITY.md) for the properties enforced at each bound
 
 ## Package layout
 
-- `internal/spec`: raw dependency-order extraction and typed V1 Dalec validation.
+- `internal/spec`: runtime-dependency shape and name preflight plus typed V1
+  Dalec validation.
 - `internal/config`: gateway build-option parsing, immutable component bindings,
   and release-bound metadata policy.
 - `internal/homebrew/metadata`: bounded HTTP fetch, RFC 7797/PS512 JWS verification, freshness and rollback policy, and canonical alias, rename, and migration lookup.
@@ -109,13 +110,19 @@ Command entrypoints live under `cmd/`; component image recipes live in [`../Dock
 A resolution record binds:
 
 - the effective Dalec input digest and target platform
-- requested roots in the explicit extension order preserved across upstream map serialization
+- requested roots sorted lexicographically by canonical requested Formula ID,
+  independent of YAML map ordering
 - Formula and migration payload and envelope digests, freshness sources, timestamps, URLs, and recorded signature-verification evidence
 - exact OCI index, manifest, config, and layer descriptor identities plus selected annotations
-- requested roots and the resolved dependency closure
-- deterministic installation order
+- the resolved dependency closure
+- a separately computed deterministic topological installation order
 - frontend, runtime-base, and materializer component identities
 - runtime, attestation-waiver, and pruning-policy inputs
+
+Requested-root order and installation order are distinct. Canonical root order
+is reflected in resolution evidence and the generated default `PATH`, while the
+topological installation order ensures dependencies are installed before their
+dependents.
 
 Here `frontend` means the executing `dalec-homebrew` child frontend. Upstream
 Dalec is an externally authenticated release input and provenance material; it

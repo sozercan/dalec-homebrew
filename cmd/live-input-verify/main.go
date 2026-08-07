@@ -20,7 +20,10 @@ import (
 	speccontract "github.com/sozercan/dalec-homebrew/internal/spec"
 )
 
-const maxLiveSpecBytes = 16 << 20
+const (
+	maxLiveSpecBytes               = 16 << 20
+	obsoleteForwardingExtensionKey = "x-dalec-homebrew"
+)
 
 type namedPinnedRef struct {
 	name  string
@@ -82,7 +85,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	flags.StringVar(&opts.dalecFrontendRef, "dalec-frontend-ref", "", "explicit digest-pinned upstream Dalec frontend index or platform child")
 	flags.StringVar(&opts.dalecRoute, "dalec-route", "", "explicit upstream Dalec forwarding route")
 	flags.StringVar(&opts.platform, "platform", "", "target platform for an explicit upstream Dalec frontend child")
-	flags.StringVar(&opts.baseSpecFile, "base-spec-file", "", "base Dalec spec to validate before forwarding metadata is injected")
+	flags.StringVar(&opts.baseSpecFile, "base-spec-file", "", "base Dalec spec to validate before child routing metadata is injected")
 	flags.Var(&opts.pinnedRefs, "pinned-ref", "additional digest-pinned NAME=REFERENCE to validate (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -141,12 +144,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		selection = &selected
 	}
 	if opts.baseSpecFile != "" {
-		order, err := validateBaseSpec(opts.baseSpecFile)
-		if err != nil {
+		if err := validateBaseSpec(opts.baseSpecFile); err != nil {
 			return fmt.Errorf("DALEC_HOMEBREW_LIVE_SPEC: %w", err)
-		}
-		if selection != nil {
-			selection.RuntimeDependencyOrder = order
 		}
 	}
 	if selection != nil {
@@ -157,19 +156,19 @@ func run(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func validateBaseSpec(path string) ([]string, error) {
+func validateBaseSpec(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("open %q: %w", path, err)
+		return fmt.Errorf("open %q: %w", path, err)
 	}
 	defer f.Close()
 
 	data, err := io.ReadAll(io.LimitReader(f, maxLiveSpecBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read %q: %w", path, err)
+		return fmt.Errorf("read %q: %w", path, err)
 	}
 	if len(data) > maxLiveSpecBytes {
-		return nil, fmt.Errorf("%q exceeds %d bytes", path, maxLiveSpecBytes)
+		return fmt.Errorf("%q exceeds %d bytes", path, maxLiveSpecBytes)
 	}
 	firstLine := data
 	if idx := bytes.IndexByte(firstLine, '\n'); idx >= 0 {
@@ -177,40 +176,40 @@ func validateBaseSpec(path string) ([]string, error) {
 	}
 	firstLine = bytes.TrimSuffix(firstLine, []byte("\r"))
 	if !bytes.HasPrefix(firstLine, []byte("# syntax=")) {
-		return nil, errors.New("must start with a # syntax= directive")
+		return errors.New("must start with a # syntax= directive")
 	}
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("decode %q routing shape: %w", path, err)
+		return fmt.Errorf("decode %q routing shape: %w", path, err)
 	}
 	if _, ok := raw["targets"]; ok {
-		return nil, errors.New("must not define top-level targets; the live helper reserves targets.homebrew for forwarding")
+		return errors.New("must not define top-level targets; the live helper reserves targets.homebrew for forwarding")
 	}
-	if _, ok := raw[speccontract.ForwardingExtensionKey]; ok {
-		return nil, fmt.Errorf("must not define top-level %s; the live helper reserves it for forwarding metadata", speccontract.ForwardingExtensionKey)
+	if _, ok := raw[obsoleteForwardingExtensionKey]; ok {
+		return fmt.Errorf("top-level %s is unsupported", obsoleteForwardingExtensionKey)
 	}
 	dependencies, ok := raw["dependencies"].(map[string]any)
 	if !ok {
-		return nil, errors.New("dependencies.runtime must use map form")
+		return errors.New("dependencies.runtime must use map form")
 	}
-	if _, ok := dependencies["runtime"].(map[string]any); !ok {
-		return nil, errors.New("dependencies.runtime must use map form")
+	runtime, ok := dependencies["runtime"].(map[string]any)
+	if !ok {
+		return errors.New("dependencies.runtime must use map form")
+	}
+	if len(runtime) == 0 {
+		return errors.New("dependencies.runtime must contain at least one entry")
 	}
 	spec, err := dalec.LoadSpec(data)
 	if err != nil {
-		return nil, fmt.Errorf("decode %q: %w", path, err)
+		return fmt.Errorf("decode %q: %w", path, err)
 	}
 	if len(spec.Targets) != 0 {
-		return nil, errors.New("must not define top-level targets; the live helper reserves targets.homebrew for forwarding")
+		return errors.New("must not define top-level targets; the live helper reserves targets.homebrew for forwarding")
 	}
 	if err := speccontract.PreflightFormulaNames(data, "", speccontract.Capabilities{NonCoreTaps: true}); err != nil {
-		return nil, fmt.Errorf("validate runtime roots: %w", err)
+		return fmt.Errorf("validate runtime roots: %w", err)
 	}
-	order, err := speccontract.RuntimeDependencyOrder(data, "")
-	if err != nil {
-		return nil, err
-	}
-	return order, nil
+	return nil
 }
 
 func validatePinnedReference(ref namedPinnedRef) error {

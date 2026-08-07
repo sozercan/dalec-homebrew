@@ -1,5 +1,6 @@
 # syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
-# Base fixture: the integration helper injects the dalec-homebrew child mapping before building.
+# Base fixture: the integration helper injects targets.homebrew.frontend.image
+# before building homebrew/image.
 
 name: homebrew-live-runtime
 description: Live integration image with GNU hello and jq from verified Homebrew bottles

@@ -164,10 +164,6 @@ FRONTEND_REF=$(build_component "V2 frontend" frontend dalec-homebrew \
 
 cat > "$WORK/list-form-spec.yaml" <<EOF_LIST_SPEC
 # syntax=$DALEC_FRONTEND_REF
-x-dalec-homebrew:
-  schema_version: dalec-homebrew-forwarding/v1
-  target: homebrew
-  runtime_dependency_order: [hello]
 dependencies:
   runtime: [hello]
 targets:
@@ -185,10 +181,10 @@ if docker buildx build \
   echo "upstream Dalec accepted unsupported list-form runtime dependencies" >&2
   exit 1
 fi
-grep -F 'extension runtime_dependency_order has 1 entries; selected runtime dependencies have 0' \
+grep -F "target $PLATFORM has no applicable runtime roots" \
   "$WORK/list-form.log" >/dev/null || {
     cat "$WORK/list-form.log" >&2
-    echo "list-form rejection did not fail at the expected forwarding-order boundary" >&2
+    echo "list-form rejection did not fail at the expected empty-root boundary" >&2
     exit 1
   }
 
@@ -219,9 +215,9 @@ done
 
 jq -e '
   (.requested | map(.requested)) == [
-    "svt/avtools/libdf",
+    "hello",
     "sozercan/repo/a365",
-    "hello"
+    "svt/avtools/libdf"
   ]
 ' "$WORK/resolution.json" >/dev/null
 

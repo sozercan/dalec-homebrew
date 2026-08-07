@@ -28,11 +28,6 @@ selects `dalec-homebrew` through the `homebrew` target:
 ```yaml
 # syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
 
-x-dalec-homebrew:
-  schema_version: dalec-homebrew-forwarding/v1
-  target: homebrew
-  runtime_dependency_order: [hello]
-
 dependencies:
   runtime:
     hello: {}
@@ -69,16 +64,11 @@ variants and other operating systems or architectures are unsupported.
 `/image` suffix to the child as target `image`, the only route advertised by
 the `dalec-homebrew` child frontend. Advertising that child route does not make
 direct invocation supported: an `image` solve without the forwarded `homebrew`
-target context is rejected. The top-level `x-dalec-homebrew` extension is
-required because upstream Dalec represents dependencies as a map; its
-`runtime_dependency_order` sequence must contain every selected runtime key
-exactly once and preserves user order across forwarding. The extension schema
-and target are fixed, and unknown or mismatched fields fail before network
-access. `targets.homebrew.frontend.image` must exactly match
-the digest-pinned gateway source used for the child solve, and `cmdline` must be
-omitted or empty. Bare `--target homebrew`, unknown child routes, nested routes,
-and mutable or mismatched child-frontend references fail closed before Homebrew
-metadata access.
+target context is rejected. `targets.homebrew.frontend.image` must exactly match
+the digest-pinned gateway source used for the child solve, and target and
+invocation `cmdline` values must be omitted or empty. Bare `--target homebrew`,
+unknown child routes, nested routes, and mutable or mismatched child-frontend
+references fail closed before Homebrew metadata access.
 
 ## Declare runtime dependencies
 
@@ -108,19 +98,13 @@ Dependency rules:
 - `arch` may contain `amd64`, `arm64`, or both. Duplicate or unsupported entries are rejected. A root omitted by `arch` is not part of that platform's closure.
 - A non-empty selected-target `dependencies.runtime` map replaces the global runtime map as a group; it is not merged per Formula. If the target omits runtime dependencies, the global map is inherited. Both scopes are still validated fail-closed.
 - Every selected platform must have at least one applicable runtime root.
-- The required `x-dalec-homebrew.runtime_dependency_order` sequence preserves requested-root declaration order across upstream forwarding. It must be an exact permutation of the selected runtime dependency keys; that order is recorded in resolution evidence and drives the default generated `PATH`. Requested Formulae that expose the same executable basename fail instead of silently shadowing one another.
+- `dependencies.runtime` has no declaration-order semantics. For each platform, applicable roots are sorted lexicographically by canonical requested Formula ID. This canonical order is recorded in resolution evidence and drives the default generated `PATH`; installation uses a separate deterministic topological order so dependencies precede dependents. Requested Formulae that expose the same executable basename fail instead of silently shadowing one another.
 - A multi-platform build fails if the same canonical requested root resolves to different package versions on different platforms. Architecture-filtered roots that appear on only one platform are independent.
 
 Target-specific dependencies, image settings, and tests belong to the fixed
-`homebrew` target alongside its routing metadata. The order extension still
-lists the effective selected target keys:
+`homebrew` target alongside its child-routing metadata:
 
 ```yaml
-x-dalec-homebrew:
-  schema_version: dalec-homebrew-forwarding/v1
-  target: homebrew
-  runtime_dependency_order: [hello]
-
 targets:
   homebrew:
     frontend:
@@ -231,7 +215,7 @@ V1 behavior is limited to core-only global and selected-target `dependencies.run
 - casks, private or authenticated taps, arbitrary Git remotes, general source builds, user-defined archive recipes, historical versions, version ranges, and bottles whose embedded Formula requires unstaged tap-local Ruby helper files
 - test mounts or networked tests
 
-Unsupported or malformed Dalec document fields and invalid forwarding metadata are rejected before Homebrew metadata or bottle registry access. The child authenticates the `dalec-homebrew` gateway source, not the identity of the upstream dispatcher; trusted releases bind the parent externally through the checked-in pin and signed provenance.
+Unsupported or malformed Dalec document fields and invalid target or child-routing metadata are rejected before Homebrew metadata or bottle registry access. The child authenticates the `dalec-homebrew` gateway source, not the identity of the upstream dispatcher; trusted releases bind the parent externally through the checked-in pin and signed provenance.
 
 ## Runtime contents and evidence
 

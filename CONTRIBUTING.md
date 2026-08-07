@@ -98,8 +98,11 @@ Leave all three component reference variables unset to rebuild, or set
 all three to replay a published tuple. The input fixture must start with a
 `# syntax=` directive, define `dependencies.runtime` in map form, and not already
 define a top-level `targets` mapping. The helper replaces the directive with
-upstream Dalec, injects the versioned `x-dalec-homebrew` order extension and
-exact `targets.homebrew.frontend.image`, and builds `--target homebrew/image`.
+upstream Dalec, injects the exact `targets.homebrew.frontend.image` mapping, and
+builds `--target homebrew/image`. The runtime dependency map is unordered. For
+each platform, the child sorts applicable roots lexicographically by canonical
+requested Formula ID for resolution evidence and the default generated `PATH`;
+installation uses a separate deterministic topological order.
 
 Example component rebuild:
 
@@ -128,7 +131,7 @@ Common optional variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DALEC_HOMEBREW_LIVE_SPEC` | `examples/live-test.yaml` | Base Dalec fixture validated and completed with release-bound forwarding metadata |
+| `DALEC_HOMEBREW_LIVE_SPEC` | `examples/live-test.yaml` | Base Dalec fixture validated and completed with the release-bound child-frontend mapping |
 | `DALEC_HOMEBREW_LIVE_IMAGE` | `dalec-homebrew-live:dev` | Final local or registry tag |
 | `DALEC_HOMEBREW_LIVE_OUTPUT` | `load` | `load` the final image or `push` it |
 | `DALEC_HOMEBREW_LIVE_PROGRESS` | `plain` | Buildx progress output |
