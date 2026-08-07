@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"path"
 	"regexp"
@@ -47,7 +49,7 @@ func (b *ProductionArtifactBuilder) provenanceForHTTPS(ctx context.Context, bott
 	if err != nil {
 		return catalog.Provenance{}, err
 	}
-	verified, err := verifySigstoreBundle(payload.Bytes(), sourceRepository, artifactDigest)
+	verified, err := b.verifySigstoreBundleForRepository(ctx, payload.Bytes(), sourceRepository, artifactDigest)
 	if err != nil {
 		return catalog.Provenance{}, err
 	}
@@ -56,9 +58,10 @@ func (b *ProductionArtifactBuilder) provenanceForHTTPS(ctx context.Context, bott
 }
 
 const (
-	annotationSigstoreBundleURL          = "dev.sigstore.bundle.url"
-	annotationSigstoreBundleDigest       = "dev.sigstore.bundle.digest"
-	maxSigstoreBundleBytes         int64 = 4 << 20
+	annotationSigstoreBundleURL            = "dev.sigstore.bundle.url"
+	annotationSigstoreBundleDigest         = "dev.sigstore.bundle.digest"
+	maxSigstoreBundleBytes           int64 = 4 << 20
+	maxGitHubRepositoryMetadataBytes int64 = 1 << 20
 )
 
 func (b *ProductionArtifactBuilder) provenanceForOCI(ctx context.Context, ociRepository, sourceRepository string, layer ocispec.Descriptor, index, manifest ocispec.Descriptor, manifestBodyAnnotations map[string]string) (catalog.Provenance, error) {
@@ -74,7 +77,7 @@ func (b *ProductionArtifactBuilder) provenanceForOCI(ctx context.Context, ociRep
 		if !found {
 			return catalog.Provenance{Waiver: &catalog.ProvenanceWaiver{Policy: catalog.ChecksumProvenanceWaiver}}, nil
 		}
-		verified, err := verifySigstoreBundle(data, sourceRepository, layer.Digest)
+		verified, err := b.verifySigstoreBundleForRepository(ctx, data, sourceRepository, layer.Digest)
 		if err != nil {
 			return catalog.Provenance{}, err
 		}
@@ -101,7 +104,7 @@ func (b *ProductionArtifactBuilder) provenanceForOCI(ctx context.Context, ociRep
 	if actualBundleDigest != parsedDigest.String() {
 		return catalog.Provenance{}, fmt.Errorf("Sigstore bundle digest %s does not match annotation %s", actualBundleDigest, parsedDigest)
 	}
-	verified, err := verifySigstoreBundle(payload.Bytes(), sourceRepository, layer.Digest)
+	verified, err := b.verifySigstoreBundleForRepository(ctx, payload.Bytes(), sourceRepository, layer.Digest)
 	if err != nil {
 		return catalog.Provenance{}, err
 	}
@@ -136,7 +139,95 @@ func provenanceAnnotations(annotationSets ...map[string]string) (string, string,
 	return selectedURL, selectedDigest, present, nil
 }
 
-func verifySigstoreBundle(data []byte, sourceRepository string, artifactDigest digest.Digest) (*catalog.VerifiedProvenance, error) {
+func (b *ProductionArtifactBuilder) verifySigstoreBundleForRepository(ctx context.Context, data []byte, sourceRepository string, artifactDigest digest.Digest) (*catalog.VerifiedProvenance, error) {
+	defaultBranch, err := b.githubDefaultBranch(ctx, sourceRepository)
+	if err != nil {
+		return nil, fmt.Errorf("resolve GitHub default branch for Sigstore identity: %w", err)
+	}
+	return verifySigstoreBundle(data, sourceRepository, defaultBranch, artifactDigest)
+}
+
+func (b *ProductionArtifactBuilder) githubDefaultBranch(ctx context.Context, sourceRepository string) (string, error) {
+	if b == nil || b.fetcher == nil {
+		return "", errors.New("artifact fetcher is unavailable")
+	}
+	metadataURL, err := githubRepositoryMetadataURL(sourceRepository)
+	if err != nil {
+		return "", err
+	}
+	probe, err := b.fetcher.Probe(ctx, metadataURL)
+	if err != nil {
+		return "", fmt.Errorf("probe GitHub repository metadata: %w", err)
+	}
+	if probe.Size <= 0 || probe.Size > maxGitHubRepositoryMetadataBytes {
+		return "", fmt.Errorf("GitHub repository metadata size %d is outside 1..%d bytes", probe.Size, maxGitHubRepositoryMetadataBytes)
+	}
+	var payload bytes.Buffer
+	if _, err := b.fetcher.FetchObserved(ctx, metadataURL, probe.Size, "github-repository.json", uniqueSorted(probe.RedirectHostSequence), &payload); err != nil {
+		return "", fmt.Errorf("fetch GitHub repository metadata: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload.Bytes()))
+	var metadata struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if err := decoder.Decode(&metadata); err != nil {
+		return "", fmt.Errorf("decode GitHub repository metadata: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return "", errors.New("GitHub repository metadata contains multiple JSON values")
+		}
+		return "", fmt.Errorf("decode trailing GitHub repository metadata: %w", err)
+	}
+	if err := validateDefaultBranch(metadata.DefaultBranch); err != nil {
+		return "", err
+	}
+	return metadata.DefaultBranch, nil
+}
+
+func githubRepositoryMetadataURL(sourceRepository string) (string, error) {
+	parsed, err := url.Parse(sourceRepository)
+	if err != nil {
+		return "", errors.New("source repository URL is invalid")
+	}
+	if parsed.Scheme != "https" || parsed.Host != "github.com" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.RawPath != "" {
+		return "", errors.New("source repository must be a canonical public GitHub HTTPS URL")
+	}
+	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || parsed.Path != "/"+parts[0]+"/"+parts[1] {
+		return "", errors.New("source repository must identify exactly one GitHub repository")
+	}
+	return (&url.URL{Scheme: "https", Host: "api.github.com", Path: "/repos/" + parts[0] + "/" + parts[1]}).String(), nil
+}
+
+func validateDefaultBranch(branch string) error {
+	if branch == "" || len(branch) > 1024 || strings.TrimSpace(branch) != branch {
+		return errors.New("GitHub repository metadata has an invalid default branch")
+	}
+	for _, r := range branch {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("GitHub repository metadata has an invalid default branch")
+		}
+	}
+	return nil
+}
+
+func sigstoreCertificateIdentity(policy *policyv2.TapPolicy, sourceRepository, defaultBranch string) (verify.CertificateIdentity, error) {
+	if policy == nil || !policy.DefaultBranchOnly {
+		return verify.CertificateIdentity{}, errors.New("Sigstore policy does not require default-branch provenance")
+	}
+	if _, err := githubRepositoryMetadataURL(sourceRepository); err != nil {
+		return verify.CertificateIdentity{}, err
+	}
+	if err := validateDefaultBranch(defaultBranch); err != nil {
+		return verify.CertificateIdentity{}, err
+	}
+	identityRegex := "^" + regexp.QuoteMeta(sourceRepository) + `/\.github/workflows/[^@\r\n]+@refs/heads/` + regexp.QuoteMeta(defaultBranch) + "$"
+	return verify.NewShortCertificateIdentity(policy.SigstoreIssuer, "", "", identityRegex)
+}
+
+func verifySigstoreBundle(data []byte, sourceRepository, defaultBranch string, artifactDigest digest.Digest) (*catalog.VerifiedProvenance, error) {
 	if int64(len(data)) == 0 || int64(len(data)) > maxSigstoreBundleBytes {
 		return nil, errors.New("Sigstore bundle size is invalid")
 	}
@@ -160,8 +251,7 @@ func verifySigstoreBundle(data []byte, sourceRepository string, artifactDigest d
 	if err != nil {
 		return nil, err
 	}
-	identityRegex := "^" + regexp.QuoteMeta(sourceRepository) + "/"
-	certificateIdentity, err := verify.NewShortCertificateIdentity(policy.SigstoreIssuer, "", "", identityRegex)
+	certificateIdentity, err := sigstoreCertificateIdentity(policy, sourceRepository, defaultBranch)
 	if err != nil {
 		return nil, err
 	}

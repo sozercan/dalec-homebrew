@@ -9,6 +9,7 @@ import (
 
 	"github.com/sozercan/dalec-homebrew/internal/release"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
+	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
 func TestRunWritesCanonicalManifestToStdout(t *testing.T) {
@@ -44,6 +45,32 @@ func TestRunWritesCanonicalManifestToStdout(t *testing.T) {
 	}
 }
 
+func TestRunWritesCanonicalV2ManifestToStdout(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := run(validV2Args(t), &stdout, &stderr); err != nil {
+		t.Fatalf("run: %v\nstderr: %s", err, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+
+	want := canonicalV2Manifest(t)
+	if !bytes.Equal(stdout.Bytes(), want) {
+		t.Fatalf("stdout mismatch\n got: %s\nwant: %s", stdout.Bytes(), want)
+	}
+	manifest, err := release.Decode(bytes.NewReader(stdout.Bytes()))
+	if err != nil {
+		t.Fatalf("decode generated V2 manifest: %v", err)
+	}
+	if !manifest.SupportsNonCoreTaps() || manifest.BottleFetcher == nil || manifest.CatalogExtractor == nil {
+		t.Fatalf("generated manifest is not a complete service-free V2 tuple: %+v", manifest)
+	}
+	if manifest.CatalogServiceOrigin != "" || manifest.IngestionJWSKeyPolicyDigest != "" {
+		t.Fatalf("generated V2 manifest retained hosted-service bindings: %+v", manifest)
+	}
+}
+
 func TestRunWritesCanonicalManifestToFile(t *testing.T) {
 	output := filepath.Join(t.TempDir(), "components.json")
 	args := append(validArgs(), "--output", output)
@@ -66,6 +93,45 @@ func TestRunWritesCanonicalManifestToFile(t *testing.T) {
 	want := canonicalManifest(t)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("file mismatch\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestRunRejectsV2InputsWithoutV2Schema(t *testing.T) {
+	args := append(validArgs(), "--bottle-fetcher-index", pinned("ghcr.io/example/bottle-fetcher", 'a'))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run(args, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "require --schema-version=v2") {
+		t.Fatalf("err = %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunRejectsIncompleteV2Inputs(t *testing.T) {
+	args := withoutFlag(validV2Args(t), "--catalog-extractor-index")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run(args, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "catalog_extractor index") {
+		t.Fatalf("err = %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunRejectsUnsupportedSchemaVersion(t *testing.T) {
+	args := append(validArgs(), "--schema-version", "v3")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run(args, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "unsupported --schema-version") {
+		t.Fatalf("err = %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q", stdout.String())
 	}
 }
 
@@ -138,6 +204,82 @@ func validArgs() []string {
 		"--dalec-module", "v0.21.5",
 		"--buildkit-module", "v0.31.2",
 	}
+}
+
+func validV2Args(t *testing.T) []string {
+	t.Helper()
+	tapDigest, err := policyv2.TapPolicyDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeDigest, err := policyv2.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(validArgs(),
+		"--schema-version", "v2",
+		"--bottle-fetcher-index", pinned("ghcr.io/example/bottle-fetcher", 'a'),
+		"--bottle-fetcher-amd64", pinned("ghcr.io/example/bottle-fetcher", 'b'),
+		"--bottle-fetcher-arm64", pinned("ghcr.io/example/bottle-fetcher", 'c'),
+		"--catalog-extractor-index", pinned("ghcr.io/example/catalog-extractor", 'd'),
+		"--catalog-extractor-amd64", pinned("ghcr.io/example/catalog-extractor", 'e'),
+		"--catalog-extractor-arm64", pinned("ghcr.io/example/catalog-extractor", 'f'),
+		"--tap-policy-digest", tapDigest,
+		"--executable-runtime-policy-digest", runtimeDigest,
+		"--supported-catalog-policy-versions", release.CatalogPolicyVersionV1,
+		"--supported-fetch-policy-versions", release.BottleFetchPolicyVersionV1,
+		"--supported-provenance-policy-versions", strings.Join([]string{
+			release.ChecksumWaiverPolicyVersionV1,
+			release.CoreWaiverPolicyVersionV1,
+			release.HTTPSSourceWaiverPolicyVersionV1,
+			release.PrebuiltWaiverPolicyVersionV1,
+			release.SigstoreProvenancePolicyVersionV1,
+		}, ","),
+	)
+}
+
+func canonicalV2Manifest(t *testing.T) []byte {
+	t.Helper()
+	tapDigest, err := policyv2.TapPolicyDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeDigest, err := policyv2.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetcher := testComponent("ghcr.io/example/bottle-fetcher", 'a', 'b', 'c')
+	extractor := testComponent("ghcr.io/example/catalog-extractor", 'd', 'e', 'f')
+	manifest := &release.Manifest{
+		SchemaVersion:                  release.SchemaVersionV2,
+		PolicyVersion:                  release.RuntimePolicyVersionV2,
+		Frontend:                       testComponent("ghcr.io/example/frontend", '1', '2', '3'),
+		RuntimeBase:                    testComponent("ghcr.io/example/runtime-base", '4', '5', '6'),
+		Materializer:                   testComponent("ghcr.io/example/materializer", '7', '8', '9'),
+		BottleFetcher:                  &fetcher,
+		CatalogExtractor:               &extractor,
+		HomebrewCommit:                 strings.Repeat("b", 40),
+		PortableRubyVersion:            "4.0.6",
+		VerificationKeysDigest:         "sha256:" + strings.Repeat("a", 64),
+		DalecModule:                    "v0.21.5",
+		BuildKitModule:                 "v0.31.2",
+		TapPolicyDigest:                tapDigest,
+		ExecutableRuntimePolicyDigest:  runtimeDigest,
+		SupportedCatalogPolicyVersions: []string{release.CatalogPolicyVersionV1},
+		SupportedFetchPolicyVersions:   []string{release.BottleFetchPolicyVersionV1},
+		SupportedProvenancePolicyVersions: []string{
+			release.ChecksumWaiverPolicyVersionV1,
+			release.CoreWaiverPolicyVersionV1,
+			release.HTTPSSourceWaiverPolicyVersionV1,
+			release.PrebuiltWaiverPolicyVersionV1,
+			release.SigstoreProvenancePolicyVersionV1,
+		},
+	}
+	data, err := release.Canonical(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func canonicalManifest(t *testing.T) []byte {
