@@ -95,9 +95,15 @@ func (c *cachedTapExtractor) Extract(ctx context.Context, tap catalog.TapID) (*c
 }
 
 type cachedArtifactBuilder struct {
-	inner ArtifactBuilder
-	root  string
+	inner    ArtifactBuilder
+	root     string
+	mu       sync.Mutex
+	keyLocks map[string]*artifactCacheLock
+}
+
+type artifactCacheLock struct {
 	mu    sync.Mutex
+	users int
 }
 
 func newCachedArtifactBuilder(root string, inner ArtifactBuilder) (*cachedArtifactBuilder, error) {
@@ -108,7 +114,7 @@ func newCachedArtifactBuilder(root string, inner ArtifactBuilder) (*cachedArtifa
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, err
 	}
-	return &cachedArtifactBuilder{inner: inner, root: root}, nil
+	return &cachedArtifactBuilder{inner: inner, root: root, keyLocks: make(map[string]*artifactCacheLock)}, nil
 }
 
 func (c *cachedArtifactBuilder) Build(ctx context.Context, request *catalog.Request, core CoreSnapshot, catalogs map[catalog.TapID]*catalog.TapCatalog, node catalog.Node, platform catalog.Platform) (catalog.BottleArtifact, error) {
@@ -125,8 +131,8 @@ func (c *cachedArtifactBuilder) Build(ctx context.Context, request *catalog.Requ
 		return catalog.BottleArtifact{}, err
 	}
 	key := cacheKey(keyData)
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	unlock := c.lockArtifactKey(key)
+	defer unlock()
 	path := filepath.Join(c.root, key+".json")
 	if data, err := readCacheFile(path, maxCacheRecordBytes); err == nil {
 		var artifact catalog.BottleArtifact
@@ -156,6 +162,28 @@ func (c *cachedArtifactBuilder) Build(ctx context.Context, request *catalog.Requ
 		return catalog.BottleArtifact{}, err
 	}
 	return artifact, nil
+}
+
+func (c *cachedArtifactBuilder) lockArtifactKey(key string) func() {
+	c.mu.Lock()
+	lock := c.keyLocks[key]
+	if lock == nil {
+		lock = &artifactCacheLock{}
+		c.keyLocks[key] = lock
+	}
+	lock.users++
+	c.mu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		c.mu.Lock()
+		lock.users--
+		if lock.users == 0 {
+			delete(c.keyLocks, key)
+		}
+		c.mu.Unlock()
+	}
 }
 
 func artifactCacheIdentity(request *catalog.Request, core CoreSnapshot, catalogs map[catalog.TapID]*catalog.TapCatalog, node catalog.Node, platform catalog.Platform, builderBinding []byte) ([]byte, error) {

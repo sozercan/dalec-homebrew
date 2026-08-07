@@ -55,7 +55,8 @@ func ResolveNonCoreCatalogs(ctx context.Context, client catalogSetClient, core c
 			return nil, fmt.Errorf("duplicate non-core target platform %s", key)
 		}
 		seenPlatforms[key] = struct{}{}
-		roots := slices.Clone(target.ExternalRoots)
+		roots := make([]catalog.FormulaID, len(target.ExternalRoots))
+		copy(roots, target.ExternalRoots)
 		if len(roots) > 0 {
 			hasExternal = true
 		}

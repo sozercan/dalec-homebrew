@@ -63,6 +63,27 @@ func TestResolveNonCoreCatalogsBindsCoreRootsWithExternalRequest(t *testing.T) {
 	}
 }
 
+func TestResolveNonCoreCatalogsPreservesEmptyPerPlatformExternalRoots(t *testing.T) {
+	external, _ := catalog.ParseFormulaID("acme/tools/widget")
+	core, _ := catalog.ParseFormulaID("hello")
+	stop := errors.New("stop after capture")
+	client := &fakeCatalogClient{err: stop}
+	_, err := ResolveNonCoreCatalogs(t.Context(), client, emptyCore{}, []NonCoreTarget{
+		{Platform: catalog.Platform{OS: "linux", Architecture: "amd64"}, ExternalRoots: []catalog.FormulaID{external}},
+		{Platform: catalog.Platform{OS: "linux", Architecture: "arm64"}, CoreRoots: []catalog.FormulaID{core}},
+	}, "0123456789abcdef0123456789abcdef01234567", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if !errors.Is(err, stop) {
+		t.Fatalf("err=%v, want captured client error", err)
+	}
+	if client.request == nil || client.calls != 1 || len(client.request.Targets) != 2 {
+		t.Fatalf("captured request=%+v calls=%d", client.request, client.calls)
+	}
+	arm64 := client.request.Targets[1]
+	if arm64.ExternalRoots == nil || len(arm64.ExternalRoots) != 0 {
+		t.Fatalf("arm64 external roots=%v, want non-nil empty array", arm64.ExternalRoots)
+	}
+}
+
 func TestResolveNonCoreCatalogsRecomputesCanonicalRootOrder(t *testing.T) {
 	platform := catalog.Platform{OS: "linux", Architecture: "amd64"}
 	digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

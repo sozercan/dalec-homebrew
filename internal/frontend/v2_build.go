@@ -31,7 +31,10 @@ func resolveInvocationNonCore(ctx context.Context, gatewayClient gwclient.Client
 	targets := make([]NonCoreTarget, len(preflight))
 	hasExternal := false
 	for i, input := range preflight {
-		target := NonCoreTarget{Platform: catalog.Platform{OS: input.platform.OS, Architecture: input.platform.Architecture, Variant: input.platform.Variant}}
+		target := NonCoreTarget{
+			Platform:      catalog.Platform{OS: input.platform.OS, Architecture: input.platform.Architecture, Variant: input.platform.Variant},
+			ExternalRoots: make([]catalog.FormulaID, 0),
+		}
 		for _, root := range input.selection.Roots {
 			if root.ID.Tap() == formulaidCoreTap() {
 				target.CoreRoots = append(target.CoreRoots, catalog.FormulaIDFromShared(root.ID))
@@ -111,8 +114,7 @@ func buildV2(ctx context.Context, client gwclient.Client, dc *dockerui.Client, c
 		if err != nil {
 			return nil, err
 		}
-		fetcherRef, _, err := resolveImageConfig(ctx, client, cfg.BottleFetcherRef, p, dc.ImageResolveMode.String(), "bottle fetcher")
-		if err != nil {
+		if _, _, err := resolveImageConfig(ctx, client, cfg.BottleFetcherRef, p, dc.ImageResolveMode.String(), "bottle fetcher"); err != nil {
 			return nil, err
 		}
 		identity, err := runtime.ParseIdentity(imageUser(input.selection.Image))
@@ -123,16 +125,7 @@ func buildV2(ctx context.Context, client gwclient.Client, dc *dockerui.Client, c
 		if p.Architecture == "arm64" {
 			cpuBaseline = "armv8"
 		}
-		components := resolution.ComponentsV2{
-			FrontendIndexRef: invokingFrontend, FrontendRef: frontendChildRef, RuntimeBaseRef: baseRef, MaterializerRef: materializerRef, BottleFetcherRef: fetcherRef,
-			CatalogExtractorRef: cfg.CatalogExtractorRef, CatalogServiceOrigin: cfg.CatalogServiceOrigin, IngestionJWSKeyPolicyDigest: cfg.IngestionJWSKeyPolicyDigest,
-			TapPolicyDigest: cfg.TapPolicyDigest, ExecutableRuntimePolicyDigest: cfg.ExecutableRuntimePolicyDigest,
-			HomebrewCommit: cfg.HomebrewCommit, RubyRuntime: cfg.PortableRubyVersion, VerificationKeys: cfg.VerificationKeysDigest,
-			DalecModule: moduleVersion("github.com/project-dalec/dalec"), BuildKitModule: moduleVersion("github.com/moby/buildkit"),
-			SupportedCatalogPolicyVersions:    append([]string(nil), cfg.SupportedCatalogPolicyVersions...),
-			SupportedFetchPolicyVersions:      append([]string(nil), cfg.SupportedFetchPolicyVersions...),
-			SupportedProvenancePolicyVersions: append([]string(nil), cfg.SupportedProvenancePolicyVersions...),
-		}
+		components := newComponentsV2(cfg, invokingFrontend, frontendChildRef, baseRef, materializerRef)
 		var record *resolution.RecordV2
 		if nonCore != nil {
 			platformResult, ok := verifiedResults[key]
@@ -185,7 +178,7 @@ func buildV2(ctx context.Context, client gwclient.Client, dc *dockerui.Client, c
 				return nil, err
 			}
 		}
-		materialized, err := llbutil.MaterializeV2(materializerRef, fetcherRef, p, record, localBottleStates)
+		materialized, err := llbutil.MaterializeV2(materializerRef, record.Components.BottleFetcherRef, p, record, localBottleStates)
 		if err != nil {
 			return nil, err
 		}
@@ -228,6 +221,19 @@ func buildV2(ctx context.Context, client gwclient.Client, dc *dockerui.Client, c
 		return nil, err
 	}
 	return rb.Finalize()
+}
+
+func newComponentsV2(cfg config.Config, invokingFrontend, frontendChildRef, baseRef, materializerRef string) resolution.ComponentsV2 {
+	return resolution.ComponentsV2{
+		FrontendIndexRef: invokingFrontend, FrontendRef: frontendChildRef, RuntimeBaseRef: baseRef, MaterializerRef: materializerRef, BottleFetcherRef: cfg.BottleFetcherRef,
+		CatalogExtractorRef: cfg.CatalogExtractorRef, CatalogServiceOrigin: cfg.CatalogServiceOrigin, IngestionJWSKeyPolicyDigest: cfg.IngestionJWSKeyPolicyDigest,
+		TapPolicyDigest: cfg.TapPolicyDigest, ExecutableRuntimePolicyDigest: cfg.ExecutableRuntimePolicyDigest,
+		HomebrewCommit: cfg.HomebrewCommit, RubyRuntime: cfg.PortableRubyVersion, VerificationKeys: cfg.VerificationKeysDigest,
+		DalecModule: moduleVersion("github.com/project-dalec/dalec"), BuildKitModule: moduleVersion("github.com/moby/buildkit"),
+		SupportedCatalogPolicyVersions:    append([]string(nil), cfg.SupportedCatalogPolicyVersions...),
+		SupportedFetchPolicyVersions:      append([]string(nil), cfg.SupportedFetchPolicyVersions...),
+		SupportedProvenancePolicyVersions: append([]string(nil), cfg.SupportedProvenancePolicyVersions...),
+	}
 }
 
 func v2RequestedRoots(core catalogresolver.CoreCatalog, catalogs map[catalog.TapID]*catalog.TapCatalog, result catalog.PlatformResult, roots []speccontract.Root) ([]resolver.V2RequestedRoot, error) {

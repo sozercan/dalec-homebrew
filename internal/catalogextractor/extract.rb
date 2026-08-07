@@ -11,7 +11,9 @@ require "uri"
 require "utils/bottles"
 
 MAX_FORMULAE = 4096
-SUPPORTED_TAGS = %w[x86_64_linux arm64_linux].freeze
+MAX_FORMULA_BYTES = 4 * 1024 * 1024
+PLATFORM_TAGS = %w[x86_64_linux arm64_linux].freeze
+SUPPORTED_TAGS = (PLATFORM_TAGS + %w[all]).freeze
 
 def abort_with(message)
   warn "dalec-homebrew catalog extractor: #{message}"
@@ -139,12 +141,13 @@ prepared_formulae = formula_paths.map do |formula_path|
   abort_with("Formula #{relative} is not a non-symlink regular file") if stat.symlink? || !stat.file?
   resolved = formula_path.realpath
   abort_with("Formula #{relative} escapes the authenticated tap") unless resolved.to_s.start_with?(tap_prefix)
+  abort_with("Formula #{relative} exceeds #{MAX_FORMULA_BYTES} bytes") if stat.size > MAX_FORMULA_BYTES
   source = formula_path.binread
   [formula_path, relative, "sha256:#{Digest::SHA256.hexdigest(source)}"]
 end
 
 formulae = prepared_formulae.filter_map do |formula_path, relative, source_digest|
-  platforms = SUPPORTED_TAGS.filter_map { |tag| platform_formula(formula_path, tag) }
+  platforms = PLATFORM_TAGS.filter_map { |tag| platform_formula(formula_path, tag) }
   next if platforms.empty?
 
   {
