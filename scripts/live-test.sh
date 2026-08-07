@@ -185,7 +185,7 @@ fi
   printf '  target: homebrew\n'
   printf '  runtime_dependency_order:\n'
   for root in "${RUNTIME_DEPENDENCY_ORDER[@]}"; do
-    printf '    - %s\n' "$root"
+    printf '    - %s\n' "$(jq -Rn --arg value "$root" '$value')"
   done
   printf 'targets:\n'
   printf '  homebrew:\n'

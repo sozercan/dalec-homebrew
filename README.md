@@ -100,7 +100,7 @@ Hello, world!
 ```
 
 The upstream frontend forwards the effective Dalec spec to the exact
-`target.frontend.image`. Inside the child solve, `source` identifies
+`targets.homebrew.frontend.image`. Inside the child solve, `source` identifies
 `dalec-homebrew`, so the child can authenticate its own digest but cannot prove
 which parent frontend invoked it. Trusted releases bind the upstream Dalec
 index and children externally through the release pin and signed provenance.
