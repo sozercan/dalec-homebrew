@@ -1,4 +1,6 @@
-# syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
+# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
+# Base fixture: the integration helper injects the dalec-homebrew child mapping before building.
+
 name: homebrew-live-graphviz
 version: 0.1.0
 revision: 1

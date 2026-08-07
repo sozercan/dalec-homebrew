@@ -18,22 +18,27 @@
 
 The only supported production path uses two immutable gateway images:
 
-1. the upstream Dalec frontend, which selects and forwards the target; and
-2. the `dalec-homebrew` frontend, which implements the `image` provider route.
+1. the upstream Dalec syntax frontend, which selects the `homebrew` target; and
+2. the digest-pinned `dalec-homebrew` child frontend, selected through
+   `targets.homebrew.frontend.image` and invoked at child route `image`.
+
+The child advertises `image` only so upstream Dalec can discover and forward to
+that route. Direct use of `dalec-homebrew` as the syntax frontend is unsupported:
+an `image` solve without the forwarded `homebrew` target context is rejected.
 
 Use the exact digests from trusted release evidence. The repository binding in
 [`release/dalec-frontend.json`](release/dalec-frontend.json) records the upstream
 Dalec index, its Linux platform children, and the fixed `homebrew/image` route.
 
-### Build from the command line
+### Build from the command line through upstream Dalec
 
-Build directly from the command line with `jq`:
+Build from stdin through upstream Dalec with `jq`:
 
 ```console
 DALEC_FRONTEND=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
-DALEC_HOMEBREW_FRONTEND=ghcr.io/sozercan/dalec-homebrew@sha256:<provider-digest>
+DALEC_HOMEBREW_CHILD=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-digest>
 
-jq -nc --arg provider "$DALEC_HOMEBREW_FRONTEND" '{
+jq -nc --arg child_frontend "$DALEC_HOMEBREW_CHILD" '{
   "x-dalec-homebrew": {
     schema_version: "dalec-homebrew-forwarding/v1",
     target: "homebrew",
@@ -41,7 +46,7 @@ jq -nc --arg provider "$DALEC_HOMEBREW_FRONTEND" '{
   },
   dependencies: {runtime: {hello: {}}},
   image: {entrypoint: "/home/linuxbrew/.linuxbrew/bin/hello"},
-  targets: {homebrew: {frontend: {image: $provider}}}
+  targets: {homebrew: {frontend: {image: $child_frontend}}}
 }' |
   docker buildx build \
     --build-arg "BUILDKIT_SYNTAX=$DALEC_FRONTEND" \
@@ -76,7 +81,7 @@ image:
 targets:
   homebrew:
     frontend:
-      image: ghcr.io/sozercan/dalec-homebrew@sha256:<provider-digest>
+      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-digest>
 ```
 
 Build and run it:

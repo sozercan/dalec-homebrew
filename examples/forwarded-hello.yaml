@@ -22,4 +22,4 @@ image:
 targets:
   homebrew:
     frontend:
-      image: ghcr.io/sozercan/dalec-homebrew@sha256:<provider-digest>
+      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-digest>

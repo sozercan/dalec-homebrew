@@ -73,13 +73,17 @@ The live helper builds and tests one final, single-platform runtime image in
 either component mode. Both modes use the only production invocation chain:
 
 ```text
-BuildKit -> upstream Dalec -> homebrew/image -> dalec-homebrew -> runtime image
+BuildKit --target homebrew/image
+  -> upstream Dalec
+  -> targets.homebrew.frontend.image (dalec-homebrew)
+  -> child route image
+  -> runtime image
 ```
 
 | Mode | Required variables | Behavior |
 | --- | --- | --- |
-| Component rebuild | `DALEC_HOMEBREW_LIVE_BUILDER`, `DALEC_HOMEBREW_LIVE_REGISTRY`, and `DALEC_HOMEBREW_LIVE_PLATFORM` | Builds and pushes the runtime base, materializer, and provider frontend with one fixed source-date epoch, then consumes their reported digests. |
-| Published tuple | Builder and platform plus all three `DALEC_HOMEBREW_LIVE_*_REF` component variables | Skips component builds and passes the immutable tuple through upstream Dalec to the release-bound provider. |
+| Component rebuild | `DALEC_HOMEBREW_LIVE_BUILDER`, `DALEC_HOMEBREW_LIVE_REGISTRY`, and `DALEC_HOMEBREW_LIVE_PLATFORM` | Builds and pushes the runtime base, materializer, and `dalec-homebrew` child frontend with one fixed source-date epoch, then consumes their reported digests. |
+| Published tuple | Builder and platform plus all three `DALEC_HOMEBREW_LIVE_*_REF` component variables | Skips component builds and passes the immutable tuple through upstream Dalec to the release-bound child frontend. |
 
 The helper validates [`release/dalec-frontend.json`](release/dalec-frontend.json)
 before any Docker command. It uses the pinned upstream index and fixed
@@ -90,7 +94,7 @@ index or the selected platform child, and the target must equal the pinned
 route. Partial, mutable, mismatched, or malformed inputs fail before the builder
 is inspected.
 
-Leave all three provider-component reference variables unset to rebuild, or set
+Leave all three component reference variables unset to rebuild, or set
 all three to replay a published tuple. The input fixture must start with a
 `# syntax=` directive, define `dependencies.runtime` in map form, and not already
 define a top-level `targets` mapping. The helper replaces the directive with
@@ -139,14 +143,14 @@ Published mode requires digest-pinned
 `DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF`,
 `DALEC_HOMEBREW_LIVE_MATERIALIZER_REF`, and
 `DALEC_HOMEBREW_LIVE_FRONTEND_REF`. Runtime-base and materializer inputs
-identify release indexes; the provider frontend input identifies the selected
-platform child. References printed after a rebuild identify that run's
-single-platform staging outputs, not release indexes.
+identify release indexes; the `dalec-homebrew` child-frontend input identifies
+the selected platform child. References printed after a rebuild identify that
+run's single-platform staging outputs, not release indexes.
 
-The helper prints the selected provider components, upstream Dalec reference
-and route, metadata floor, final image name, final digest, and immutable
-`DALEC_HOMEBREW_LIVE_FINAL_REF` as shell assignments. After `push`, the final
-reference is pullable from the final image repository.
+The helper prints the selected repository-owned components, upstream Dalec
+reference and route, metadata floor, final image name, final digest, and
+immutable `DALEC_HOMEBREW_LIVE_FINAL_REF` as shell assignments. After `push`,
+the final reference is pullable from the final image repository.
 
 ## Exercise focused runtime closures
 

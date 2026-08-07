@@ -7,8 +7,10 @@
 - A Linux `amd64` or `arm64` target
 - Docker Buildx or `buildctl` backed by BuildKit 0.31.2 or newer
 - An upstream Dalec frontend reference pinned by digest
-- A `dalec-homebrew` provider reference pinned by digest
-- Network access from the BuildKit daemon to both frontends and the provider's bound components, `formulae.brew.sh`, `ghcr.io`, public default-GitHub taps, and selected public bottle or prebuilt-archive hosts
+- A `dalec-homebrew` child frontend reference pinned by digest
+- Network access from the BuildKit daemon to both frontend images and the child
+  frontend's bound components, `formulae.brew.sh`, `ghcr.io`, public
+  default-GitHub taps, and selected public bottle or prebuilt-archive hosts
 
 The repository's [`../release/dalec-frontend.json`](../release/dalec-frontend.json)
 binding records the release-approved upstream Dalec index, exact Linux platform
@@ -41,11 +43,11 @@ image:
 targets:
   homebrew:
     frontend:
-      image: ghcr.io/sozercan/dalec-homebrew@sha256:<provider-digest>
+      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-digest>
 ```
 
 Replace both placeholders with immutable references supplied by trusted release
-evidence, then build the provider-owned `image` route:
+evidence, then invoke upstream Dalec's `homebrew/image` target:
 
 ```console
 docker buildx build \
@@ -63,8 +65,11 @@ The complete example is available at
 such as `linux/amd64/v1` and `linux/arm64/v8` are equivalent; non-default
 variants and other operating systems or architectures are unsupported.
 
-`homebrew` is the selected Dalec spec target and `image` is the only route
-advertised by the provider. The top-level `x-dalec-homebrew` extension is
+`homebrew` is the selected upstream Dalec spec target. Upstream forwards the
+`/image` suffix to the child as target `image`, the only route advertised by
+the `dalec-homebrew` child frontend. Advertising that child route does not make
+direct invocation supported: an `image` solve without the forwarded `homebrew`
+target context is rejected. The top-level `x-dalec-homebrew` extension is
 required because upstream Dalec represents dependencies as a map; its
 `runtime_dependency_order` sequence must contain every selected runtime key
 exactly once and preserves user order across forwarding. The extension schema
@@ -72,7 +77,7 @@ and target are fixed, and unknown or mismatched fields fail before network
 access. `targets.homebrew.frontend.image` must exactly match
 the digest-pinned gateway source used for the child solve, and `cmdline` must be
 omitted or empty. Bare `--target homebrew`, unknown child routes, nested routes,
-and mutable or mismatched provider references fail closed before Homebrew
+and mutable or mismatched child-frontend references fail closed before Homebrew
 metadata access.
 
 ## Declare runtime dependencies
@@ -119,13 +124,13 @@ x-dalec-homebrew:
 targets:
   homebrew:
     frontend:
-      image: ghcr.io/sozercan/dalec-homebrew@sha256:<provider-digest>
+      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-digest>
     dependencies:
       runtime:
         hello: {}
 ```
 
-Select it through the full provider route:
+Select it through upstream Dalec's full `homebrew/image` target:
 
 ```console
 docker buildx build \
@@ -221,7 +226,7 @@ V1 behavior is limited to core-only global and selected-target `dependencies.run
 - build steps, build environment, build mounts, caches, or build network configuration
 - package artifacts or package configuration
 - `provides`, `replaces`, or `conflicts`
-- frontend forwarding outside the exact digest-pinned `homebrew/image` route, including non-empty `cmdline`, nested forwarding, and unknown provider routes
+- frontend forwarding outside the exact digest-pinned `homebrew/image` route, including non-empty `cmdline`, nested forwarding, and unknown child routes
 - image base overrides or post-install image steps
 - casks, private or authenticated taps, arbitrary Git remotes, general source builds, user-defined archive recipes, historical versions, version ranges, and bottles whose embedded Formula requires unstaged tap-local Ruby helper files
 - test mounts or networked tests

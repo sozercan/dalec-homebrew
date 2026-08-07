@@ -44,7 +44,11 @@ binding checks before signing.
 
 Release builds use the only production invocation chain: the upstream Dalec
 gateway frontend dispatches the fixed `homebrew/image` route to
-`dalec-homebrew`. The external dispatcher binding is checked in as
+`dalec-homebrew`. The child advertises `image` only for upstream route discovery. Direct use of
+`dalec-homebrew` as the syntax frontend is outside the release contract and is
+rejected when the forwarded `homebrew` target context is absent.
+
+The external dispatcher binding is checked in as
 [`../release/dalec-frontend.json`](../release/dalec-frontend.json). It records:
 
 - schema `dalec-homebrew-dalec-frontend/v1`;
@@ -56,8 +60,8 @@ gateway frontend dispatches the fixed `homebrew/image` route to
 `scripts/release-inputs.sh` strictly decodes that file, validates every OCI
 reference, requires all three references to use the same repository, and
 keeps the dispatcher release version distinct from the Dalec Go module compiled
-into `dalec-homebrew`. Release inputs use schema `dalec-homebrew-release-inputs/v2` and embed the
-complete external binding.
+into `dalec-homebrew`. Release inputs use schema
+`dalec-homebrew-release-inputs/v2` and embed the complete external binding.
 
 Release integration also derives the required `x-dalec-homebrew` root-order
 sequence from each reviewed base fixture before forwarding. The child validates

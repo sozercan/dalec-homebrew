@@ -15,8 +15,8 @@ const (
 	targetOption       = "target"
 )
 
-// NewHandler returns the gateway entrypoint for upstream-Dalec forwarded
-// invocations and subrequests. The provider exposes only the image route.
+// NewHandler returns the child gateway entrypoint for upstream-Dalec-forwarded
+// invocations and subrequests. It advertises only the image route.
 func NewHandler(ctx context.Context) gwclient.BuildFunc {
 	return newHandler(ctx, Handle)
 }

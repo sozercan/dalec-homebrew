@@ -4,15 +4,21 @@
 
 ## Frontend routing
 
-The only production invocation is an out-of-tree Dalec provider chain:
+The only supported production invocation uses upstream Dalec with an
+out-of-tree child frontend:
 
 ```text
 BuildKit
   -> digest-pinned upstream Dalec frontend
   -> targets.homebrew.frontend.image
-  -> digest-pinned dalec-homebrew frontend, route image
+  -> digest-pinned dalec-homebrew child frontend, child route image
   -> resolution and materialization pipeline
 ```
+
+The child still advertises `image` for upstream Dalec route discovery. That is
+not direct-invocation compatibility: the router requires the selected Dalec
+target to be `homebrew` and the child target to be `image`, and rejects an
+unforwarded `image` solve.
 
 The upstream frontend selects the `homebrew` spec target, discovers the child
 frontend's advertised routes, and forwards `homebrew/image` as child target
@@ -87,7 +93,7 @@ See [`../SECURITY.md`](../SECURITY.md) for the properties enforced at each bound
 - `internal/runtimefs`: allowlist assembly, ownership and mode normalization, inventory, pruning evidence, runtime manifest, and SPDX output.
 - `internal/runtimecheck`: static ELF, loader, library, shebang, and link checks.
 - `internal/testplan` and `internal/testrunner`: conversion and execution for the supported public Dalec test subset.
-- `internal/frontend`: provider gateway routing, target-list
+- `internal/frontend`: child gateway routing, target-list
   subrequests, DockerUI fan-out, shared snapshot orchestration, image
   configuration, test dependencies, and exporter epoch.
 - `internal/release`: canonical component-manifest, release-bound upstream Dalec
@@ -111,10 +117,10 @@ A resolution record binds:
 - frontend, runtime-base, and materializer component identities
 - runtime, attestation-waiver, and pruning-policy inputs
 
-Here `frontend` means the executing `dalec-homebrew` provider. Upstream Dalec is
-an externally authenticated release input and provenance material; it is not
-projected into the child-generated resolution as if the child had authenticated
-its parent.
+Here `frontend` means the executing `dalec-homebrew` child frontend. Upstream
+Dalec is an externally authenticated release input and provenance material; it
+is not projected into the child-generated resolution as if the child had
+authenticated its parent.
 
 Formula and migration documents are fetched and verified separately because upstream does not provide a signed common snapshot identifier. The combined snapshot digest commits to the exact accepted payload pair, but does not prove that Homebrew published the pair atomically. An authenticated `generated_date` takes precedence over HTTP metadata for each document; otherwise freshness uses `Last-Modified`. The record's `generated_at` and `source_date_epoch` use the earlier accepted document timestamp.
 
