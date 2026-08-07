@@ -107,7 +107,9 @@ The `dependencies.runtime` mapping is unordered. For each platform, applicable
 roots are sorted lexicographically by canonical requested Formula ID. This
 canonical order is recorded in resolution evidence and drives the default
 generated `PATH`; installation uses a separate deterministic topological order
-so dependencies precede dependents.
+so dependencies precede dependents. Each global or selected-target
+`dependencies` scope must either be omitted or contain a non-empty runtime map;
+omit the selected scope to inherit global roots.
 
 See the [usage reference](docs/usage.md) for image settings, tests, dependency rules, and the complete supported contract.
 

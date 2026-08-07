@@ -110,6 +110,92 @@ targets:
 	}
 }
 
+func TestRuntimeDependencyNamesRejectsPresentEmptyScopes(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{
+			name: "empty global dependencies",
+			data: `dependencies: {}
+targets:
+  homebrew:
+    dependencies:
+      runtime:
+        jq: {}
+`,
+			want: "global dependencies.runtime must use map form and contain at least one entry",
+		},
+		{
+			name: "empty selected dependencies",
+			data: `dependencies:
+  runtime:
+    hello: {}
+targets:
+  homebrew:
+    dependencies: {}
+`,
+			want: "target homebrew dependencies.runtime must use map form and contain at least one entry",
+		},
+		{
+			name: "empty global runtime map",
+			data: `dependencies:
+  runtime: {}
+`,
+			want: "global dependencies.runtime must use map form and contain at least one entry",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := RuntimeDependencyNames([]byte(tt.data), "homebrew")
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error=%v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRuntimeDependencyNamesAllowsOmittedScopes(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{
+			name: "inherit global",
+			data: `dependencies:
+  runtime:
+    hello: {}
+targets:
+  homebrew: {}
+`,
+			want: "hello",
+		},
+		{
+			name: "selected only",
+			data: `targets:
+  homebrew:
+    dependencies:
+      runtime:
+        jq: {}
+`,
+			want: "jq",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			names, err := RuntimeDependencyNames([]byte(tt.data), "homebrew")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(names, ",") != tt.want {
+				t.Fatalf("names=%v, want %q", names, tt.want)
+			}
+		})
+	}
+}
+
 func TestBareDependencyOnlySpec(t *testing.T) {
 	data := `{"dependencies":{"runtime":{"hello":{}}},"image":{"entrypoint":"/home/linuxbrew/.linuxbrew/bin/hello"}}`
 	sel, err := Validate(load(t, data), "", "amd64")

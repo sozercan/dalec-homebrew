@@ -69,7 +69,10 @@ mapping, and forwards through the pinned upstream Dalec image. The child treats
 `dependencies.runtime` as unordered. For each platform, it sorts applicable
 roots lexicographically by canonical requested Formula ID for resolution
 evidence and the default generated `PATH`; installation uses a separate
-deterministic topological order.
+deterministic topological order. Release E2E coverage sends list syntax through
+the exact pinned parent in global-only and mixed global/selected shapes and
+requires every resulting empty dependency scope to fail preflight. A future
+parent pin therefore cannot silently broaden or change this map-only contract.
 
 The `dalec-homebrew` child can authenticate its own gateway `source`, but the
 BuildKit forwarding protocol does not give it an authenticated identity for the

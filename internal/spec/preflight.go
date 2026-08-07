@@ -30,17 +30,18 @@ func runtimeDependencyNames(data []byte, targetKey string) ([]string, error) {
 		return nil, nil
 	}
 	root := doc.Content[0]
-	global := mappingPath(root, "dependencies", "runtime")
-	selected := mappingPath(root, "targets", targetKey, "dependencies", "runtime")
-	if err := requireRuntimeDependencyMap("global", global); err != nil {
+	global, err := runtimeDependencyMap("global", mappingPath(root, "dependencies"))
+	if err != nil {
 		return nil, err
 	}
+	var selected *yaml.Node
 	if targetKey != "" {
-		if err := requireRuntimeDependencyMap("target "+targetKey, selected); err != nil {
+		selected, err = runtimeDependencyMap("target "+targetKey, mappingPath(root, "targets", targetKey, "dependencies"))
+		if err != nil {
 			return nil, err
 		}
 	}
-	if nodeLength(selected) > 0 {
+	if selected != nil {
 		return namesFromNode(selected)
 	}
 	return namesFromNode(global)
@@ -84,24 +85,18 @@ func mappingPath(n *yaml.Node, keys ...string) *yaml.Node {
 	return n
 }
 
-func nodeLength(n *yaml.Node) int {
-	if n == nil {
-		return 0
+func runtimeDependencyMap(scope string, dependencies *yaml.Node) (*yaml.Node, error) {
+	if dependencies == nil {
+		return nil, nil
 	}
-	if n.Kind == yaml.MappingNode {
-		return len(n.Content) / 2
+	if dependencies.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s dependencies must use map form", scope)
 	}
-	return len(n.Content)
-}
-
-func requireRuntimeDependencyMap(scope string, n *yaml.Node) error {
-	if n == nil {
-		return nil
+	runtime := mappingPath(dependencies, "runtime")
+	if runtime == nil || runtime.Kind != yaml.MappingNode || len(runtime.Content) == 0 {
+		return nil, fmt.Errorf("%s dependencies.runtime must use map form and contain at least one entry", scope)
 	}
-	if n.Kind != yaml.MappingNode {
-		return fmt.Errorf("%s dependencies.runtime must use map form", scope)
-	}
-	return nil
+	return runtime, nil
 }
 
 func namesFromNode(n *yaml.Node) ([]string, error) {

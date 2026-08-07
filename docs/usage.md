@@ -87,6 +87,10 @@ dependencies:
 
 Dependency rules:
 
+- Each global or selected-target `dependencies` scope must either be omitted or
+  contain a non-empty `runtime` map. To inherit global dependencies, omit
+  `targets.homebrew.dependencies`; explicit empty dependency scopes are invalid.
+
 - An omitted or empty `version` list selects the current stable Formula in the authenticated metadata. Any non-empty version constraint is rejected; historical versions and version ranges are not supported.
 - Explicit canonical versioned Formula names such as `python@3.14` are supported. Version-looking requests must be exact canonical names; they do not select arbitrary historical releases.
 - A bare name canonicalizes to `homebrew/core/<name>`; explicit `homebrew/core/<name>` is identical, and duplicate canonical roots such as both forms of `hello` are rejected.
@@ -96,7 +100,7 @@ Dependency rules:
 - A Formula without a supported bottle fails unless its exact Formula ID is authorized by the embedded prebuilt-archive policy. Initial prebuilt support is root-only, invokes neither the Formula `install` method nor source-build fallback, and accepts only the policy-fixed archive inventory, executable mapping, platform, and static-binary properties.
 - Formula short names must start with a lowercase letter or digit and contain only lowercase letters, digits, `+`, `_`, `.`, `@`, or `-`. Malformed `@` syntax is rejected before metadata access.
 - `arch` may contain `amd64`, `arm64`, or both. Duplicate or unsupported entries are rejected. A root omitted by `arch` is not part of that platform's closure.
-- A non-empty selected-target `dependencies.runtime` map replaces the global runtime map as a group; it is not merged per Formula. If the target omits runtime dependencies, the global map is inherited. Both scopes are still validated fail-closed.
+- A non-empty selected-target `dependencies.runtime` map replaces the global runtime map as a group; it is not merged per Formula. If the target omits its entire `dependencies` scope, the global map is inherited. Both scopes are validated fail-closed.
 - Every selected platform must have at least one applicable runtime root.
 - `dependencies.runtime` has no declaration-order semantics. For each platform, applicable roots are sorted lexicographically by canonical requested Formula ID. This canonical order is recorded in resolution evidence and drives the default generated `PATH`; installation uses a separate deterministic topological order so dependencies precede dependents. Requested Formulae that expose the same executable basename fail instead of silently shadowing one another.
 - A multi-platform build fails if the same canonical requested root resolves to different package versions on different platforms. Architecture-filtered roots that appear on only one platform are independent.

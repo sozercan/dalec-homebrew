@@ -28,7 +28,11 @@ an unordered map with no caller-controlled precedence semantics. For each
 platform, applicable roots are sorted lexicographically by canonical requested
 Formula ID. That order is bound into resolution evidence and the generated
 `PATH`; installation uses a separately computed deterministic topological
-order. Target frontend metadata is accepted only as routing metadata for this
+order. Every present global or selected-target `dependencies` scope must contain
+a non-empty runtime map; inheritance requires omitting the selected dependency
+scope rather than supplying an empty one. This rejects the empty-scope markers
+left when the exact pinned upstream Dalec v0.21.5 dispatcher drops legacy list
+syntax. Target frontend metadata is accepted only as routing metadata for this
 exact chain; nested forwarding remains rejected.
 
 The forwarded child does **not** receive an authenticated identity for the

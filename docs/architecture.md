@@ -32,7 +32,10 @@ metadata or registry access. Runtime dependency maps carry no declaration-order
 semantics. Applicable roots for each platform are sorted lexicographically by
 canonical requested Formula ID for resolution evidence and the default
 generated `PATH`; installation uses a separate
-deterministic topological order.
+deterministic topological order. A dependency scope is either omitted or
+contains a non-empty runtime map. Explicit empty scopes fail preflight, which
+also catches the markers emitted when the exact pinned upstream Dalec v0.21.5
+dispatcher drops legacy list syntax during typed-spec forwarding.
 
 The child can authenticate only its own gateway source. BuildKit does not give
 the child an authenticated identity for the parent that initiated the nested

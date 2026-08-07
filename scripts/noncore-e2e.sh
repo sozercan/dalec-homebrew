@@ -162,7 +162,27 @@ FRONTEND_REF=$(build_component "V2 frontend" frontend dalec-homebrew \
   --build-arg "MATERIALIZER_REF=$MATERIALIZER_REF" \
   "${V2_BUILD_ARGS[@]}")
 
-cat > "$WORK/list-form-spec.yaml" <<EOF_LIST_SPEC
+expect_forwarding_rejection() {
+  local name=$1
+  local expected=$2
+  if docker buildx build \
+    --builder "$BUILDER" \
+    --platform "$PLATFORM" \
+    --progress="$PROGRESS" \
+    --target "$DALEC_ROUTE" \
+    --file "$WORK/$name.yaml" \
+    . >"$WORK/$name.log" 2>&1; then
+    echo "upstream Dalec accepted unsupported dependency shape $name" >&2
+    exit 1
+  fi
+  grep -F "$expected" "$WORK/$name.log" >/dev/null || {
+    cat "$WORK/$name.log" >&2
+    echo "dependency-shape rejection $name did not fail at the expected preflight boundary" >&2
+    exit 1
+  }
+}
+
+cat > "$WORK/list-only.yaml" <<EOF_LIST_ONLY
 # syntax=$DALEC_FRONTEND_REF
 dependencies:
   runtime: [hello]
@@ -170,23 +190,40 @@ targets:
   homebrew:
     frontend:
       image: $FRONTEND_REF
-EOF_LIST_SPEC
-if docker buildx build \
-  --builder "$BUILDER" \
-  --platform "$PLATFORM" \
-  --progress="$PROGRESS" \
-  --target "$DALEC_ROUTE" \
-  --file "$WORK/list-form-spec.yaml" \
-  . >"$WORK/list-form.log" 2>&1; then
-  echo "upstream Dalec accepted unsupported list-form runtime dependencies" >&2
-  exit 1
-fi
-grep -F "target $PLATFORM has no applicable runtime roots" \
-  "$WORK/list-form.log" >/dev/null || {
-    cat "$WORK/list-form.log" >&2
-    echo "list-form rejection did not fail at the expected empty-root boundary" >&2
-    exit 1
-  }
+EOF_LIST_ONLY
+
+cat > "$WORK/global-map-target-list.yaml" <<EOF_MAP_LIST
+# syntax=$DALEC_FRONTEND_REF
+dependencies:
+  runtime:
+    hello: {}
+targets:
+  homebrew:
+    frontend:
+      image: $FRONTEND_REF
+    dependencies:
+      runtime: [jq]
+EOF_MAP_LIST
+
+cat > "$WORK/global-list-target-map.yaml" <<EOF_LIST_MAP
+# syntax=$DALEC_FRONTEND_REF
+dependencies:
+  runtime: [hello]
+targets:
+  homebrew:
+    frontend:
+      image: $FRONTEND_REF
+    dependencies:
+      runtime:
+        jq: {}
+EOF_LIST_MAP
+
+expect_forwarding_rejection list-only \
+  'global dependencies.runtime must use map form and contain at least one entry'
+expect_forwarding_rejection global-map-target-list \
+  'target homebrew dependencies.runtime must use map form and contain at least one entry'
+expect_forwarding_rejection global-list-target-map \
+  'global dependencies.runtime must use map form and contain at least one entry'
 
 DALEC_HOMEBREW_LIVE_BUILDER="$BUILDER" \
 DALEC_HOMEBREW_LIVE_PLATFORM="$PLATFORM" \
