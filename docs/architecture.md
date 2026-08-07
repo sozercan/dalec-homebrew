@@ -90,7 +90,9 @@ See [`../SECURITY.md`](../SECURITY.md) for the properties enforced at each bound
 - `internal/frontend`: provider gateway routing, target-list
   subrequests, DockerUI fan-out, shared snapshot orchestration, image
   configuration, test dependencies, and exporter epoch.
-- `internal/release`: canonical component-manifest and platform-reference validation; online registry, signing, and promotion checks remain release-workflow responsibilities.
+- `internal/release`: canonical component-manifest, release-bound upstream Dalec
+  frontend pin, and platform-reference validation; online registry, signing, and
+  promotion checks remain release-workflow responsibilities.
 - `internal/buildfiles`: source-level contract tests for Dockerfile, pin
   inventory, Bake, and release workflow definitions.
 

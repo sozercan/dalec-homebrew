@@ -15,17 +15,12 @@ import (
 
 	"github.com/goccy/go-yaml"
 	"github.com/project-dalec/dalec"
+	releasecontract "github.com/sozercan/dalec-homebrew/internal/release"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 	speccontract "github.com/sozercan/dalec-homebrew/internal/spec"
 )
 
-const (
-	maxDalecFrontendPinBytes = 64 << 10
-	maxLiveSpecBytes         = 16 << 20
-	dalecHomebrewRoute       = "homebrew/image"
-	dalecFrontendPinSchema   = "dalec-homebrew-dalec-frontend/v1"
-	dalecModulePath          = "github.com/project-dalec/dalec"
-)
+const maxLiveSpecBytes = 16 << 20
 
 type namedPinnedRef struct {
 	name  string
@@ -63,25 +58,6 @@ type options struct {
 	platform             string
 	baseSpecFile         string
 	pinnedRefs           namedPinnedRefs
-}
-
-type dalecFrontendPin struct {
-	SchemaVersion string            `json:"schema_version"`
-	Module        dalecModule       `json:"module"`
-	Index         string            `json:"index"`
-	Platforms     map[string]string `json:"platforms"`
-	Route         string            `json:"route"`
-}
-
-type dalecModule struct {
-	Path    string `json:"path"`
-	Version string `json:"version"`
-}
-
-type dalecFrontendSelection struct {
-	Index                  string   `json:"index"`
-	Route                  string   `json:"route"`
-	RuntimeDependencyOrder []string `json:"runtime_dependency_order,omitempty"`
 }
 
 func main() {
@@ -152,13 +128,13 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if opts.dalecFrontendRef != "" && opts.dalecFrontendPinFile == "" {
 		return errors.New("an explicit upstream Dalec frontend requires --dalec-frontend-file")
 	}
-	var selection *dalecFrontendSelection
+	var selection *releasecontract.DalecFrontendSelection
 	if opts.dalecFrontendPinFile != "" {
-		pin, err := loadDalecFrontendPin(opts.dalecFrontendPinFile)
+		pin, err := releasecontract.LoadDalecFrontendPin(opts.dalecFrontendPinFile)
 		if err != nil {
 			return fmt.Errorf("DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN: %w", err)
 		}
-		selected, err := selectDalecFrontend(*pin, opts.dalecFrontendRef, opts.dalecRoute, opts.platform)
+		selected, err := releasecontract.SelectDalecFrontend(*pin, opts.dalecFrontendRef, opts.dalecRoute, opts.platform)
 		if err != nil {
 			return fmt.Errorf("DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN: %w", err)
 		}
@@ -210,6 +186,9 @@ func validateBaseSpec(path string) ([]string, error) {
 	if _, ok := raw["targets"]; ok {
 		return nil, errors.New("must not define top-level targets; the live helper reserves targets.homebrew for forwarding")
 	}
+	if _, ok := raw[speccontract.ForwardingExtensionKey]; ok {
+		return nil, fmt.Errorf("must not define top-level %s; the live helper reserves it for forwarding metadata", speccontract.ForwardingExtensionKey)
+	}
 	dependencies, ok := raw["dependencies"].(map[string]any)
 	if !ok {
 		return nil, errors.New("dependencies.runtime must use map form")
@@ -234,196 +213,12 @@ func validateBaseSpec(path string) ([]string, error) {
 	return order, nil
 }
 
-func loadDalecFrontendPin(path string) (*dalecFrontendPin, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open %q: %w", path, err)
-	}
-	defer f.Close()
-
-	data, err := io.ReadAll(io.LimitReader(f, maxDalecFrontendPinBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read %q: %w", path, err)
-	}
-	if len(data) > maxDalecFrontendPinBytes {
-		return nil, fmt.Errorf("%q exceeds %d bytes", path, maxDalecFrontendPinBytes)
-	}
-	if err := validateUniqueJSON(data); err != nil {
-		return nil, fmt.Errorf("decode %q: %w", path, err)
-	}
-
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	var pin dalecFrontendPin
-	if err := dec.Decode(&pin); err != nil {
-		return nil, fmt.Errorf("decode %q: %w", path, err)
-	}
-	var trailing any
-	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return nil, fmt.Errorf("decode %q: multiple JSON values", path)
-		}
-		return nil, fmt.Errorf("decode %q: %w", path, err)
-	}
-	if err := validateDalecFrontendPin(pin); err != nil {
-		return nil, fmt.Errorf("validate %q: %w", path, err)
-	}
-	return &pin, nil
-}
-
-func validateDalecFrontendPin(pin dalecFrontendPin) error {
-	var errs []error
-	if pin.SchemaVersion != dalecFrontendPinSchema {
-		errs = append(errs, fmt.Errorf("schema_version must be exactly %q", dalecFrontendPinSchema))
-	}
-	if pin.Module.Path != dalecModulePath {
-		errs = append(errs, fmt.Errorf("module path must be exactly %q", dalecModulePath))
-	}
-	if !stableModuleVersionPattern.MatchString(pin.Module.Version) {
-		errs = append(errs, errors.New("module version must use stable vMAJOR.MINOR.PATCH form"))
-	}
-	if err := resolution.ValidatePinnedReference(pin.Index); err != nil {
-		errs = append(errs, fmt.Errorf("index must be a digest-pinned OCI reference using sha256: %w", err))
-	}
-	if pin.Route != dalecHomebrewRoute {
-		errs = append(errs, fmt.Errorf("route must be exactly %q", dalecHomebrewRoute))
-	}
-
-	indexRepository := referenceRepository(pin.Index)
-	for key, ref := range pin.Platforms {
-		if key != "linux/amd64" && key != "linux/arm64" {
-			errs = append(errs, fmt.Errorf("unsupported platform %q", key))
-			continue
-		}
-		if err := resolution.ValidatePinnedReference(ref); err != nil {
-			errs = append(errs, fmt.Errorf("%s child must be a digest-pinned OCI reference using sha256: %w", key, err))
-			continue
-		}
-		if indexRepository != "" && referenceRepository(ref) != indexRepository {
-			errs = append(errs, fmt.Errorf("%s child uses a different repository from the index", key))
-		}
-	}
-	for _, key := range []string{"linux/amd64", "linux/arm64"} {
-		if _, ok := pin.Platforms[key]; !ok {
-			errs = append(errs, fmt.Errorf("missing platform %q", key))
-		}
-	}
-	if pin.Platforms["linux/amd64"] != "" && pin.Platforms["linux/amd64"] == pin.Platforms["linux/arm64"] {
-		errs = append(errs, errors.New("linux/amd64 and linux/arm64 children must use different manifests"))
-	}
-	return errors.Join(errs...)
-}
-
-func selectDalecFrontend(pin dalecFrontendPin, ref, route, platform string) (dalecFrontendSelection, error) {
-	if ref == "" {
-		return dalecFrontendSelection{Index: pin.Index, Route: pin.Route}, nil
-	}
-	if err := resolution.ValidatePinnedReference(ref); err != nil {
-		return dalecFrontendSelection{}, fmt.Errorf("DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF must be a digest-pinned OCI reference using sha256: %w", err)
-	}
-	if route != pin.Route {
-		return dalecFrontendSelection{}, fmt.Errorf("DALEC_HOMEBREW_LIVE_TARGET %q does not match release-bound route %q", route, pin.Route)
-	}
-	if platform != "linux/amd64" && platform != "linux/arm64" {
-		return dalecFrontendSelection{}, fmt.Errorf("explicit upstream Dalec frontend requires platform linux/amd64 or linux/arm64, got %q", platform)
-	}
-	if ref != pin.Index && ref != pin.Platforms[platform] {
-		return dalecFrontendSelection{}, fmt.Errorf("DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF %q does not match the release-bound index or %s child", ref, platform)
-	}
-	return dalecFrontendSelection{Index: ref, Route: route}, nil
-}
-
-func referenceRepository(ref string) string {
-	repository, _, _ := strings.Cut(ref, "@")
-	return repository
-}
-
-func validateUniqueJSON(data []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	token, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	if err := walkUniqueJSON(dec, token); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("trailing JSON value")
-		}
-		return err
-	}
-	return nil
-}
-
-func walkUniqueJSON(dec *json.Decoder, token json.Token) error {
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delim {
-	case '{':
-		seen := map[string]struct{}{}
-		for dec.More() {
-			keyToken, err := dec.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("object key is not a string")
-			}
-			if _, exists := seen[key]; exists {
-				return fmt.Errorf("duplicate JSON member %q", key)
-			}
-			seen[key] = struct{}{}
-			value, err := dec.Token()
-			if err != nil {
-				return err
-			}
-			if err := walkUniqueJSON(dec, value); err != nil {
-				return err
-			}
-		}
-		end, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		if end != json.Delim('}') {
-			return errors.New("unterminated object")
-		}
-	case '[':
-		for dec.More() {
-			value, err := dec.Token()
-			if err != nil {
-				return err
-			}
-			if err := walkUniqueJSON(dec, value); err != nil {
-				return err
-			}
-		}
-		end, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		if end != json.Delim(']') {
-			return errors.New("unterminated array")
-		}
-	default:
-		return fmt.Errorf("unexpected JSON delimiter %q", delim)
-	}
-	return nil
-}
-
 func validatePinnedReference(ref namedPinnedRef) error {
 	if err := resolution.ValidatePinnedReference(ref.value); err != nil {
 		return fmt.Errorf("%s must be a digest-pinned OCI reference using sha256: %w", ref.name, err)
 	}
 	return nil
 }
-
-var stableModuleVersionPattern = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
 var rfc3339Pattern = regexp.MustCompile(
 	`^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?(Z|([+-])([0-9]{2}):([0-9]{2}))$`,

@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	releasecontract "github.com/sozercan/dalec-homebrew/internal/release"
 )
 
 func TestRun(t *testing.T) {
@@ -62,15 +64,15 @@ func TestDalecFrontendPin(t *testing.T) {
 	digestA := "sha256:" + strings.Repeat("a", 64)
 	digestB := "sha256:" + strings.Repeat("b", 64)
 	digestC := "sha256:" + strings.Repeat("c", 64)
-	valid := dalecFrontendPin{
-		SchemaVersion: dalecFrontendPinSchema,
-		Module:        dalecModule{Path: dalecModulePath, Version: "v0.21.5"},
+	valid := releasecontract.DalecFrontendPin{
+		SchemaVersion: releasecontract.DalecFrontendPinSchema,
+		Module:        releasecontract.DalecModule{Path: releasecontract.DalecModulePath, Version: "v0.21.5"},
 		Index:         "ghcr.io/project-dalec/dalec/frontend@" + digestA,
 		Platforms: map[string]string{
 			"linux/amd64": "ghcr.io/project-dalec/dalec/frontend@" + digestB,
 			"linux/arm64": "ghcr.io/project-dalec/dalec/frontend@" + digestC,
 		},
-		Route: dalecHomebrewRoute,
+		Route: releasecontract.DalecHomebrewRoute,
 	}
 
 	writePin := func(t *testing.T, value any) string {
@@ -85,7 +87,7 @@ func TestDalecFrontendPin(t *testing.T) {
 		}
 		return path
 	}
-	clone := func() dalecFrontendPin {
+	clone := func() releasecontract.DalecFrontendPin {
 		pin := valid
 		pin.Platforms = make(map[string]string, len(valid.Platforms))
 		for platform, ref := range valid.Platforms {
@@ -100,11 +102,11 @@ func TestDalecFrontendPin(t *testing.T) {
 		if err := run([]string{"--dalec-frontend-file", path}, &stdout, io.Discard); err != nil {
 			t.Fatalf("run: %v", err)
 		}
-		var got dalecFrontendSelection
+		var got releasecontract.DalecFrontendSelection
 		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 			t.Fatalf("decode stdout: %v", err)
 		}
-		want := dalecFrontendSelection{Index: valid.Index, Route: valid.Route}
+		want := releasecontract.DalecFrontendSelection{Index: valid.Index, Route: valid.Route}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("selection = %+v, want %+v", got, want)
 		}
@@ -122,7 +124,7 @@ func TestDalecFrontendPin(t *testing.T) {
 		if err := run(args, &stdout, io.Discard); err != nil {
 			t.Fatalf("run: %v", err)
 		}
-		var got dalecFrontendSelection
+		var got releasecontract.DalecFrontendSelection
 		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 			t.Fatalf("decode stdout: %v", err)
 		}
@@ -133,26 +135,28 @@ func TestDalecFrontendPin(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		mutate func(*dalecFrontendPin)
+		mutate func(*releasecontract.DalecFrontendPin)
 		want   string
 	}{
-		{name: "wrong schema", mutate: func(pin *dalecFrontendPin) { pin.SchemaVersion = "v2" }, want: "schema_version must be exactly"},
-		{name: "wrong module", mutate: func(pin *dalecFrontendPin) { pin.Module.Path = "example.invalid/dalec" }, want: "module path must be exactly"},
-		{name: "mutable index", mutate: func(pin *dalecFrontendPin) { pin.Index = "ghcr.io/project-dalec/dalec/frontend:latest" }, want: "index must be a digest-pinned"},
-		{name: "mutable child", mutate: func(pin *dalecFrontendPin) {
+		{name: "wrong schema", mutate: func(pin *releasecontract.DalecFrontendPin) { pin.SchemaVersion = "v2" }, want: "schema_version must be exactly"},
+		{name: "wrong module", mutate: func(pin *releasecontract.DalecFrontendPin) { pin.Module.Path = "example.invalid/dalec" }, want: "module path must be exactly"},
+		{name: "mutable index", mutate: func(pin *releasecontract.DalecFrontendPin) { pin.Index = "ghcr.io/project-dalec/dalec/frontend:latest" }, want: "index must be a digest-pinned"},
+		{name: "mutable child", mutate: func(pin *releasecontract.DalecFrontendPin) {
 			pin.Platforms["linux/amd64"] = "ghcr.io/project-dalec/dalec/frontend:latest"
 		}, want: "linux/amd64 child must be a digest-pinned"},
-		{name: "different repository", mutate: func(pin *dalecFrontendPin) {
+		{name: "different repository", mutate: func(pin *releasecontract.DalecFrontendPin) {
 			pin.Platforms["linux/amd64"] = "ghcr.io/example/dalec/frontend@" + digestB
 		}, want: "different repository"},
-		{name: "missing arm64", mutate: func(pin *dalecFrontendPin) { delete(pin.Platforms, "linux/arm64") }, want: "missing platform \"linux/arm64\""},
-		{name: "unsupported platform", mutate: func(pin *dalecFrontendPin) {
+		{name: "missing arm64", mutate: func(pin *releasecontract.DalecFrontendPin) { delete(pin.Platforms, "linux/arm64") }, want: "missing platform \"linux/arm64\""},
+		{name: "unsupported platform", mutate: func(pin *releasecontract.DalecFrontendPin) {
 			pin.Platforms["linux/s390x"] = "ghcr.io/project-dalec/dalec/frontend@" + digestB
 		}, want: "unsupported platform"},
-		{name: "same child", mutate: func(pin *dalecFrontendPin) { pin.Platforms["linux/arm64"] = pin.Platforms["linux/amd64"] }, want: "must use different manifests"},
-		{name: "wrong route", mutate: func(pin *dalecFrontendPin) { pin.Route = "homebrew/debug" }, want: "route must be exactly \"homebrew/image\""},
-		{name: "unstable module version", mutate: func(pin *dalecFrontendPin) { pin.Module.Version = "v0.21.5-rc.1" }, want: "stable vMAJOR.MINOR.PATCH"},
-		{name: "malformed module version", mutate: func(pin *dalecFrontendPin) { pin.Module.Version = "garbage" }, want: "stable vMAJOR.MINOR.PATCH"},
+		{name: "same child", mutate: func(pin *releasecontract.DalecFrontendPin) {
+			pin.Platforms["linux/arm64"] = pin.Platforms["linux/amd64"]
+		}, want: "must use different manifests"},
+		{name: "wrong route", mutate: func(pin *releasecontract.DalecFrontendPin) { pin.Route = "homebrew/debug" }, want: "route must be exactly \"homebrew/image\""},
+		{name: "unstable module version", mutate: func(pin *releasecontract.DalecFrontendPin) { pin.Module.Version = "v0.21.5-rc.1" }, want: "stable vMAJOR.MINOR.PATCH"},
+		{name: "malformed module version", mutate: func(pin *releasecontract.DalecFrontendPin) { pin.Module.Version = "garbage" }, want: "stable vMAJOR.MINOR.PATCH"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -177,7 +181,7 @@ func TestDalecFrontendPin(t *testing.T) {
 		if err := run([]string{"--dalec-frontend-file", pinPath, "--base-spec-file", specPath}, &stdout, io.Discard); err != nil {
 			t.Fatal(err)
 		}
-		var got dalecFrontendSelection
+		var got releasecontract.DalecFrontendSelection
 		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
@@ -234,7 +238,7 @@ func TestDalecFrontendPin(t *testing.T) {
 
 	t.Run("oversized", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "dalec-frontend.json")
-		if err := os.WriteFile(path, bytes.Repeat([]byte(" "), maxDalecFrontendPinBytes+1), 0o600); err != nil {
+		if err := os.WriteFile(path, bytes.Repeat([]byte(" "), (64<<10)+1), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		err := run([]string{"--dalec-frontend-file", path}, io.Discard, io.Discard)
@@ -302,6 +306,16 @@ func TestBaseSpecValidation(t *testing.T) {
 			name: "quoted targets",
 			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime:\n    hello: {}\n\"targets\": {}\n",
 			want: "must not define top-level targets",
+		},
+		{
+			name: "forwarding metadata",
+			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime:\n    hello: {}\nx-dalec-homebrew: {}\n",
+			want: "must not define top-level x-dalec-homebrew",
+		},
+		{
+			name: "quoted forwarding metadata",
+			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime:\n    hello: {}\n\"x-dalec-homebrew\": {}\n",
+			want: "must not define top-level x-dalec-homebrew",
 		},
 	}
 
