@@ -1,9 +1,10 @@
 # Release and rollback
 
-A release is an immutable tuple of frontend, runtime-base, materializer,
+A release is an immutable tuple of repository-owned frontend, runtime-base, and
+materializer components together with the external upstream Dalec dispatcher,
 Homebrew, verification-key, module, builder, snapshot, Chisel, and policy
-inputs. Promotion adds references to already tested digests; it never rebuilds
-or re-resolves them.
+inputs. Promotion adds references to already tested owned-component digests; it
+never rebuilds or re-resolves them.
 
 ## Component tuple
 
@@ -39,6 +40,54 @@ query a registry, or prove that child descriptors belong to the indexes.
 Release CI performs those additional canonical-byte, registry, and index-child
 binding checks before signing.
 
+## Upstream Dalec dispatcher binding
+
+Release builds use the only production invocation chain: the upstream Dalec
+gateway frontend dispatches the fixed `homebrew/image` route to
+`dalec-homebrew`. The child advertises `image` only for upstream route discovery. Direct use of
+`dalec-homebrew` as the syntax frontend is outside the release contract and is
+rejected when the forwarded `homebrew` target context is absent.
+
+The external dispatcher binding is checked in as
+[`../release/dalec-frontend.json`](../release/dalec-frontend.json). It records:
+
+- schema `dalec-homebrew-dalec-frontend/v1`;
+- module `github.com/project-dalec/dalec` at `v0.21.5`;
+- route `homebrew/image`;
+- one digest-pinned multi-platform index and its exact Linux `amd64` and `arm64`
+  children.
+
+`scripts/release-inputs.sh` strictly decodes that file, validates every OCI
+reference, requires all three references to use the same repository, and
+keeps the dispatcher release version distinct from the Dalec Go module compiled
+into `dalec-homebrew`. Release inputs use schema
+`dalec-homebrew-release-inputs/v2` and embed the complete external binding.
+
+Release integration validates map-form runtime dependencies in each reviewed
+base fixture, injects only the exact `targets.homebrew.frontend.image` child
+mapping, and forwards through the pinned upstream Dalec image. The child treats
+`dependencies.runtime` as unordered. For each platform, it sorts applicable
+roots lexicographically by canonical requested Formula ID for resolution
+evidence and the default generated `PATH`; installation uses a separate
+deterministic topological order. Release E2E coverage sends list syntax through
+the exact pinned parent in global-only and mixed global/selected shapes and
+requires every resulting empty dependency scope to fail preflight. A future
+parent pin therefore cannot silently broaden or change this map-only contract.
+
+The `dalec-homebrew` child can authenticate its own gateway `source`, but the
+BuildKit forwarding protocol does not give it an authenticated identity for the
+parent dispatcher. Release CI therefore validates the upstream index-to-child
+descriptor chain independently, runs integration builds through the appropriate
+platform child, and records the index as an external OCI material and full
+invocation parameter in signed provenance. A caller-provided parent claim is not
+accepted as provenance.
+
+The upstream dispatcher is not a repository-owned component. It is not added to
+`components.json` or resolution records, is not signed or tagged by this
+repository, and is not promoted. Rollback selects the dispatcher binding from
+the signed `inputs.json` and provenance that accompanied the selected component
+tuple.
+
 ## Component build order
 
 Build and publish components in this order:
@@ -57,6 +106,13 @@ The repository currently pins:
 
 - `github.com/project-dalec/dalec v0.21.5-0.20260728234020-5fa2c46d716b`
 - `github.com/moby/buildkit v0.31.2`
+- upstream Dalec frontend `v0.21.5` from
+  `ghcr.io/project-dalec/dalec/frontend`, with index
+  `sha256:37f3a2ab5b7e65b3f8c5cb4e79f9f184f8d2b7e7d3f328041d7d22d160805c8c`,
+  `amd64` child
+  `sha256:4ce1cda772259b27a37a304ed9b30f3f06a3d776e1468afea4b05e8bdfa24d46`,
+  and `arm64` child
+  `sha256:ebb7d748011880b9bd6d430257831d3eb5e8ed1d1814ebeef1fcf182daff171e`
 - digest-pinned Dockerfile frontend and Go `1.25.9` builder images
 - Homebrew commit `935053a12d38d62e59c467bf7f0f50dbc11cbcb6` and source
   archive SHA-256
@@ -75,17 +131,21 @@ The repository currently pins:
 [`../scripts/release-inputs.sh`](../scripts/release-inputs.sh) is the
 machine-readable inventory used by CI. It validates the Dockerfile and Bake
 defaults and emits the builder images, Ubuntu children, snapshot and epoch,
-Chisel and Homebrew source hashes, Ruby and key-set pins, and module versions.
-The exact references and hashes live beside the build instructions in
-[`../Dockerfile`](../Dockerfile) and
-[`../docker-bake.hcl`](../docker-bake.hcl). These values are release inputs, not
-update channels. Update, test, review, and sign the complete tuple together.
+Chisel and Homebrew source hashes, Ruby and key-set pins, module versions, and
+the external Dalec dispatcher binding. The exact references and hashes live
+beside the build instructions in [`../Dockerfile`](../Dockerfile),
+[`../docker-bake.hcl`](../docker-bake.hcl), and
+[`../release/dalec-frontend.json`](../release/dalec-frontend.json). These values
+are release inputs, not update channels. Update, test, review, and sign the
+complete tuple together.
 
 The BuildKit Go module pin above is distinct from the release executor. The
 workflows currently install Buildx `v0.36.0` and start BuildKit `v0.32.0` from a
 digest-pinned image. They also pin binfmt, Syft, Trivy, Cosign, and every external
 GitHub Action; `provenance.json` records the Buildx, BuildKit, binfmt, Syft, and
-Trivy identities used for the release.
+Trivy identities used for the release. It also records the external Dalec
+frontend index as an OCI material and records the complete dispatcher binding as
+an invocation parameter.
 
 ## Release requirements
 
@@ -114,6 +174,8 @@ Release CI must reject:
 - conflicting `SOURCE_DATE_EPOCH` values
 - changed Chisel, release-definition, snapshot, or Ubuntu pins without review
 - unsigned or mixed component tuples
+- a mutable, malformed, module-mismatched, or descriptor-mismatched upstream
+  Dalec dispatcher binding
 - exporter settings that differ between test and promotion
 
 Component vulnerability scans are evidence-producing checks, not release
@@ -186,21 +248,26 @@ and OCI referrers needed to verify or resume the release.
 
 For a new tuple, the workflow:
 
-1. Runs normal CI and validates the tagged release inputs.
+1. Runs normal CI, validates the tagged release inputs, and verifies that the
+   pinned upstream Dalec index contains the recorded `amd64` and `arm64`
+   dispatcher children.
 2. Builds and smoke-tests the `amd64` and `arm64` runtime-base and materializer
    children, assembles and verifies their indexes, builds the frontend against
    those exact indexes, and generates and verifies the completed component
    manifest.
-3. Runs every focused integration spec on native `amd64` and `arm64` workers,
-   requires one authenticated Homebrew metadata snapshot across every spec and
+3. Runs every focused integration spec through the pinned platform-specific
+   upstream Dalec dispatcher on native `amd64` and `arm64` workers, requires one
+   authenticated Homebrew metadata snapshot across every spec and
    platform, produces deterministic runtime evidence, and separately generates
    SPDX SBOMs and vulnerability reports for each component child. Fixed
    `CRITICAL` findings are surfaced in the corresponding evidence job summary
    and retained in the reports without blocking the release.
-4. Generates provenance, signs every component child and index with keyless
-   Cosign, attaches the exact SLSA predicate to all nine subjects and the
-   matching SPDX predicate to the six children, and signs the component
-   manifest, metadata snapshot, and checksum set.
+4. Generates provenance that includes the external dispatcher binding, signs
+   every repository-owned component child and index with keyless Cosign,
+   attaches the exact SLSA predicate to all nine owned subjects and the matching
+   SPDX predicate to the six owned children, and signs the component manifest,
+   metadata snapshot, and checksum set. The upstream Dalec image is neither
+   signed nor promoted by this repository.
 
 Promotion revalidates the tag and signed bundle, creates or resumes the draft,
 verifies its exact asset inventory, and validates each vulnerability report's

@@ -399,10 +399,14 @@ jobs:
             docker buildx imagetools inspect --raw "$ref" \
               | jq -er --arg os "$os" --arg arch "$arch" '
                   .manifests as $manifests
-                  | if (($manifests | length) == 2 and
-                        ([$manifests[] | .platform.os + "/" + .platform.architecture] | sort) ==
+                  | [$manifests[] | select(
+                      (.platform.os // "") != "unknown" or
+                      (.platform.architecture // "") != "unknown"
+                    )] as $platform_manifests
+                  | if (($platform_manifests | length) == 2 and
+                        ([$platform_manifests[] | .platform.os + "/" + .platform.architecture] | sort) ==
                           ["linux/amd64", "linux/arm64"]) then
-                      $manifests
+                      $platform_manifests
                     else
                       error("expected exactly the linux/amd64 and linux/arm64 platform children")
                     end
@@ -411,6 +415,17 @@ jobs:
                   | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))
                 '
           }
+
+          dalec_frontend_index=$(jq -er .dalec_frontend.index dist/release/inputs.json)
+          for platform in linux/amd64 linux/arm64; do
+            expected_ref=$(jq -er --arg platform "$platform" '.dalec_frontend.platforms[$platform]' dist/release/inputs.json)
+            expected_digest=${expected_ref##*@}
+            actual_digest=$(platform_digest "$dalec_frontend_index" "$platform")
+            [[ "$actual_digest" == "$expected_digest" ]] || {
+              echo "upstream Dalec frontend $platform child $actual_digest does not match release input $expected_digest" >&2
+              exit 1
+            }
+          done
 
           for target in \
             runtime-base-amd64 runtime-base-arm64 \
@@ -651,6 +666,8 @@ jobs:
           runtime_base_ref=$(component_ref runtime-base)
           materializer_ref=$(component_ref materializer)
           frontend_ref=$(component_ref frontend "$PLATFORM")
+          dalec_frontend_ref=$(jq -er --arg platform "$PLATFORM" '.dalec_frontend.platforms[$platform]' dist/release/inputs.json)
+          dalec_frontend_route=$(jq -er .dalec_frontend.route dist/release/inputs.json)
           source_date_epoch=$(jq -er .source.source_date_epoch dist/release/digests.json)
 
           read -r -a specs <<< "$RELEASE_SPECS"
@@ -664,6 +681,8 @@ jobs:
             DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF="$runtime_base_ref" \
             DALEC_HOMEBREW_LIVE_MATERIALIZER_REF="$materializer_ref" \
             DALEC_HOMEBREW_LIVE_FRONTEND_REF="$frontend_ref" \
+            DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF="$dalec_frontend_ref" \
+            DALEC_HOMEBREW_LIVE_TARGET="$dalec_frontend_route" \
             DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH="$source_date_epoch" \
             DALEC_HOMEBREW_LIVE_IMAGE="$final_image" \
             DALEC_HOMEBREW_LIVE_OUTPUT=load \
@@ -1410,18 +1429,21 @@ jobs:
             --arg workflow_sha "$WORKFLOW_SHA" \
             --slurpfile digests dist/release/digests.json \
             --slurpfile inputs dist/release/inputs.json \
-            '{
+            '($inputs[0].dalec_frontend.index
+              | capture("^(?<repository>[^@]+)@sha256:(?<digest>[0-9a-f]{64})$")) as $dalec_frontend
+            | {
               builder: {id: "https://github.com/actions/runner"},
-              buildType: "https://github.com/" + $repository + "/.github/workflows/release.yml@v1",
+              buildType: ("https://github.com/" + $repository + "/.github/workflows/release.yml@v1"),
               invocation: {
                 configSource: {
-                  uri: "git+https://github.com/" + $repository + "@" + $workflow_ref,
+                  uri: ("git+https://github.com/" + $repository + "@" + $workflow_ref),
                   digest: {sha1: $workflow_sha},
                   entryPoint: ".github/workflows/release.yml"
                 },
                 parameters: {
                   tag: $tag,
                   source_date_epoch: $inputs[0].source_date_epoch,
+                  dalec_frontend: $inputs[0].dalec_frontend,
                   buildx_version: env.BUILDX_VERSION,
                   buildx_sha256_amd64: env.BUILDX_SHA256_AMD64,
                   buildx_sha256_arm64: env.BUILDX_SHA256_ARM64,
@@ -1439,10 +1461,16 @@ jobs:
                 completeness: {parameters: false, environment: false, materials: false},
                 reproducible: false
               },
-              materials: [{
-                uri: "git+https://github.com/" + $repository + "@refs/tags/" + $tag,
-                digest: {sha1: $sha}
-              }]
+              materials: [
+                {
+                  uri: ("git+https://github.com/" + $repository + "@refs/tags/" + $tag),
+                  digest: {sha1: $sha}
+                },
+                {
+                  uri: ("oci://" + $dalec_frontend.repository),
+                  digest: {sha256: $dalec_frontend.digest}
+                }
+              ]
             }' > dist/release/provenance.json
 
       - name: Validate release tuple before signing
@@ -1495,11 +1523,13 @@ jobs:
             def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
             def hex256: type == "string" and test("^[0-9a-f]{64}$");
             def pinned: type == "string" and test("^[^[:space:]@]+@sha256:[0-9a-f]{64}$");
-            (keys == ["builder", "buildkit_module", "dalec_module",
+            (.dalec_frontend.index
+              | capture("^(?<repository>[^@]+)@sha256:(?<digest>[0-9a-f]{64})$")) as $dalec_frontend_index
+            | (keys == ["builder", "buildkit_module", "dalec_frontend", "dalec_module",
               "homebrew_archive_sha256", "homebrew_commit", "portable_ruby_version",
               "schema_version", "source_date_epoch", "ubuntu_base", "ubuntu_snapshot",
               "verification_keys_digest"]) and
-            .schema_version == "dalec-homebrew-release-inputs/v1" and
+            .schema_version == "dalec-homebrew-release-inputs/v2" and
             (.source_date_epoch | type == "string" and test("^[0-9]+$")) and
             (.ubuntu_snapshot | type == "string" and test("^[0-9]{8}T[0-9]{6}Z$")) and
             ((.ubuntu_base | keys) == ["linux/amd64", "linux/arm64"]) and
@@ -1518,7 +1548,21 @@ jobs:
             (.portable_ruby_version | type == "string" and length > 0) and
             (.verification_keys_digest | sha256) and
             (.dalec_module | type == "string" and length > 0) and
-            (.buildkit_module | type == "string" and length > 0)
+            (.buildkit_module | type == "string" and length > 0) and
+            ((.dalec_frontend | keys) == ["index", "module", "platforms", "route", "schema_version"]) and
+            .dalec_frontend.schema_version == "dalec-homebrew-dalec-frontend/v1" and
+            ((.dalec_frontend.module | keys) == ["path", "version"]) and
+            .dalec_frontend.module.path == "github.com/project-dalec/dalec" and
+            (.dalec_frontend.module.version | type == "string" and
+              test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")) and
+            .dalec_frontend.route == "homebrew/image" and
+            (.dalec_frontend.index | pinned) and
+            ((.dalec_frontend.platforms | keys) == ["linux/amd64", "linux/arm64"]) and
+            all(.dalec_frontend.platforms[];
+              pinned and
+              ((capture("^(?<repository>[^@]+)@sha256:[0-9a-f]{64}$").repository) ==
+                $dalec_frontend_index.repository)) and
+            .dalec_frontend.platforms["linux/amd64"] != .dalec_frontend.platforms["linux/arm64"]
           ' dist/release/inputs.json >/dev/null
           source_date_epoch=$(jq -er .source_date_epoch dist/release/inputs.json)
           expected_snapshot=$(date -u --date="@$source_date_epoch" +%Y%m%dT%H%M%SZ)
@@ -1556,10 +1600,14 @@ jobs:
             docker buildx imagetools inspect --raw "$ref" \
               | jq -er --arg os "$os" --arg arch "$arch" '
                   .manifests as $manifests
-                  | if (($manifests | length) == 2 and
-                        ([$manifests[] | .platform.os + "/" + .platform.architecture] | sort) ==
+                  | [$manifests[] | select(
+                      (.platform.os // "") != "unknown" or
+                      (.platform.architecture // "") != "unknown"
+                    )] as $platform_manifests
+                  | if (($platform_manifests | length) == 2 and
+                        ([$platform_manifests[] | .platform.os + "/" + .platform.architecture] | sort) ==
                           ["linux/amd64", "linux/arm64"]) then
-                      $manifests
+                      $platform_manifests
                     else
                       error("expected exactly the linux/amd64 and linux/arm64 platform children")
                     end
@@ -1579,6 +1627,17 @@ jobs:
                 exit 1
               }
             done
+          done
+
+          dalec_frontend_index=$(jq -er .dalec_frontend.index dist/release/inputs.json)
+          for platform in linux/amd64 linux/arm64; do
+            expected_ref=$(jq -er --arg platform "$platform" '.dalec_frontend.platforms[$platform]' dist/release/inputs.json)
+            expected_digest=${expected_ref##*@}
+            actual_digest=$(platform_digest "$dalec_frontend_index" "$platform")
+            [[ "$actual_digest" == "$expected_digest" ]] || {
+              echo "upstream Dalec frontend $platform child $actual_digest does not match release input $expected_digest" >&2
+              exit 1
+            }
           done
 
           python3 - dist/release/components.json dist/release/components.digest <<'PYCOMPONENTS'
@@ -1758,7 +1817,9 @@ jobs:
             --arg sha "$RELEASE_SHA" \
             --slurpfile digests dist/release/digests.json \
             --slurpfile inputs dist/release/inputs.json '
-            .builder.id == "https://github.com/actions/runner" and
+            ($inputs[0].dalec_frontend.index
+              | capture("^(?<repository>[^@]+)@sha256:(?<digest>[0-9a-f]{64})$")) as $dalec_frontend
+            | .builder.id == "https://github.com/actions/runner" and
             .buildType == ("https://github.com/" + $repository + "/.github/workflows/release.yml@v1") and
             .invocation.configSource.uri == ("git+https://github.com/" + $repository + "@refs/heads/main") and
             (.invocation.configSource.digest.sha1 | type == "string" and test("^[0-9a-f]{40}$")) and
@@ -1766,6 +1827,7 @@ jobs:
             .invocation.configSource.entryPoint == ".github/workflows/release.yml" and
             .invocation.parameters.tag == $tag and
             .invocation.parameters.source_date_epoch == $inputs[0].source_date_epoch and
+            .invocation.parameters.dalec_frontend == $inputs[0].dalec_frontend and
             .invocation.parameters.buildx_version == env.BUILDX_VERSION and
             .invocation.parameters.buildx_sha256_amd64 == env.BUILDX_SHA256_AMD64 and
             .invocation.parameters.buildx_sha256_arm64 == env.BUILDX_SHA256_ARM64 and
@@ -1779,9 +1841,11 @@ jobs:
             .metadata.buildInvocationId == $digests[0].source.build_invocation and
             .metadata.completeness == {parameters: false, environment: false, materials: false} and
             .metadata.reproducible == false and
-            (.materials | length) == 1 and
+            (.materials | length) == 2 and
             .materials[0].uri == ("git+https://github.com/" + $repository + "@refs/tags/" + $tag) and
-            .materials[0].digest.sha1 == $sha
+            .materials[0].digest == {sha1: $sha} and
+            .materials[1].uri == ("oci://" + $dalec_frontend.repository) and
+            .materials[1].digest == {sha256: $dalec_frontend.digest}
           ' dist/release/provenance.json >/dev/null
           workflow_sha=$(jq -er .invocation.configSource.digest.sha1 dist/release/provenance.json)
           build_invocation=$(jq -er .metadata.buildInvocationId dist/release/provenance.json)

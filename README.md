@@ -16,19 +16,36 @@
 
 ## Build an image
 
-You need Docker Buildx and a digest-pinned `dalec-homebrew` frontend. Use a digest supplied by a trusted release pipeline, or see [Contributing](CONTRIBUTING.md) to build the component tuple yourself.
+The only supported production path uses two immutable gateway images:
 
-### Build from the command line
+1. the upstream Dalec syntax frontend, which selects the `homebrew` target; and
+2. the digest-pinned `dalec-homebrew` child frontend, selected through
+   `targets.homebrew.frontend.image` and invoked at child route `image`.
 
-Build directly from the command line with `jq`:
+The child advertises `image` only so upstream Dalec can discover and forward to
+that route. Direct use of `dalec-homebrew` as the syntax frontend is unsupported:
+an `image` solve without the forwarded `homebrew` target context is rejected.
+
+Use the exact digests from trusted release evidence. The repository binding in
+[`release/dalec-frontend.json`](release/dalec-frontend.json) records the upstream
+Dalec index, its Linux platform children, and the fixed `homebrew/image` route.
+
+### Build from the command line through upstream Dalec
+
+Build from stdin through upstream Dalec with `jq`:
 
 ```console
-jq -nc '{
+DALEC_FRONTEND=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
+DALEC_HOMEBREW_CHILD=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-digest>
+
+jq -nc --arg child_frontend "$DALEC_HOMEBREW_CHILD" '{
   dependencies: {runtime: {hello: {}}},
-  image: {entrypoint: "/home/linuxbrew/.linuxbrew/bin/hello"}
+  image: {entrypoint: "/home/linuxbrew/.linuxbrew/bin/hello"},
+  targets: {homebrew: {frontend: {image: $child_frontend}}}
 }' |
   docker buildx build \
-    --build-arg "BUILDKIT_SYNTAX=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>" \
+    --build-arg "BUILDKIT_SYNTAX=$DALEC_FRONTEND" \
+    --target homebrew/image \
     --platform linux/amd64 \
     --tag hello-runtime:inline \
     --load \
@@ -39,10 +56,10 @@ docker run --rm hello-runtime:inline
 
 ### Build from YAML
 
-Save this as `hello.yaml`, replacing `<frontend-digest>` with the same immutable frontend digest:
+Save this as `hello.yaml`, replacing both placeholders with immutable digests:
 
 ```yaml
-# syntax=ghcr.io/sozercan/dalec-homebrew@sha256:<frontend-digest>
+# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
 
 dependencies:
   runtime:
@@ -50,12 +67,18 @@ dependencies:
 
 image:
   entrypoint: /home/linuxbrew/.linuxbrew/bin/hello
+
+targets:
+  homebrew:
+    frontend:
+      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-digest>
 ```
 
 Build and run it:
 
 ```console
 docker buildx build \
+  --target homebrew/image \
   --platform linux/amd64 \
   --file hello.yaml \
   --tag hello-runtime:spec \
@@ -70,6 +93,23 @@ Both forms print:
 ```text
 Hello, world!
 ```
+
+The upstream frontend forwards the effective Dalec spec to the exact
+`targets.homebrew.frontend.image`. The child requires the selected spec target
+to be `homebrew`, the child route to be `image`, target and invocation `cmdline`
+values to be empty, and the target frontend image to equal the child gateway
+`source`. Inside the child solve, `source` identifies `dalec-homebrew`, so the
+child can authenticate its own digest but cannot prove which parent frontend
+invoked it. Trusted releases bind the upstream Dalec index and children
+externally through the release pin and signed provenance.
+
+The `dependencies.runtime` mapping is unordered. For each platform, applicable
+roots are sorted lexicographically by canonical requested Formula ID. This
+canonical order is recorded in resolution evidence and drives the default
+generated `PATH`; installation uses a separate deterministic topological order
+so dependencies precede dependents. Each global or selected-target
+`dependencies` scope must either be omitted or contain a non-empty runtime map;
+omit the selected scope to inherit global roots.
 
 See the [usage reference](docs/usage.md) for image settings, tests, dependency rules, and the complete supported contract.
 
@@ -101,7 +141,13 @@ The example identity above is illustrative; use a Formula present in the public 
 
 ## Examples
 
-More examples: [multi-package toolchain](examples/live-toolchain.yaml), [Python](examples/live-python.yaml), [Redis](examples/live-redis.yaml), [Graphviz](examples/live-graphviz.yaml), and [glibc](examples/live-glibc.yaml).
+Start with the standalone [forwarded hello](examples/forwarded-hello.yaml). The
+[multi-package toolchain](examples/live-toolchain.yaml),
+[Python](examples/live-python.yaml), [Redis](examples/live-redis.yaml),
+[Graphviz](examples/live-graphviz.yaml), and [glibc](examples/live-glibc.yaml)
+files are base fixtures for `scripts/live-test.sh`; the helper validates them,
+injects the release-bound `targets.homebrew.frontend.image` child mapping, and
+builds through upstream Dalec's `homebrew/image` target.
 
 ## Learn more
 

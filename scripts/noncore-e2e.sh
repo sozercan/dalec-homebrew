@@ -12,6 +12,7 @@ SPEC=${DALEC_HOMEBREW_E2E_SPEC:-examples/ci-noncore-multi-package.yaml}
 PROGRESS=${DALEC_HOMEBREW_E2E_PROGRESS:-plain}
 PLATFORM=${DALEC_HOMEBREW_E2E_PLATFORM:-linux/amd64}
 KEEP_WORK=${DALEC_HOMEBREW_E2E_KEEP_WORK:-0}
+DALEC_FRONTEND_PIN=${DALEC_HOMEBREW_E2E_DALEC_FRONTEND_PIN:-release/dalec-frontend.json}
 
 fail_usage() {
   echo "$*" >&2
@@ -25,7 +26,17 @@ done
 [[ -n "$REGISTRY_IMAGE" ]] || fail_usage "DALEC_HOMEBREW_E2E_REGISTRY_IMAGE is required"
 [[ "$PLATFORM" == linux/amd64 ]] || fail_usage "only linux/amd64 is supported by the CI non-core E2E"
 [[ "$RUN_ID" =~ ^[0-9A-Za-z][0-9A-Za-z_.-]{0,63}$ ]] || fail_usage "invalid E2E run ID"
-[[ -f "$SPEC" ]] || fail_usage "E2E spec does not exist: $SPEC"
+if ! DALEC_SELECTION=$(GOWORK=off GOFLAGS='' go run ./cmd/live-input-verify \
+  --dalec-frontend-file "$DALEC_FRONTEND_PIN" \
+  --base-spec-file "$SPEC" \
+  --pinned-ref "DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE=$BUILDKIT_IMAGE" \
+  --pinned-ref "DALEC_HOMEBREW_E2E_REGISTRY_IMAGE=$REGISTRY_IMAGE"); then
+  exit 64
+fi
+DALEC_FRONTEND_REF=$(jq -er '.index | select(type == "string" and length > 0)' <<<"$DALEC_SELECTION") ||
+  fail_usage "validated upstream Dalec frontend pin did not contain an index"
+DALEC_ROUTE=$(jq -er '.route | select(type == "string" and length > 0)' <<<"$DALEC_SELECTION") ||
+  fail_usage "validated upstream Dalec frontend pin did not contain a route"
 
 WORK=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dalec-homebrew-noncore-e2e.XXXXXX")
 NETWORK="dalec-homebrew-e2e-${RUN_ID}"
@@ -151,12 +162,76 @@ FRONTEND_REF=$(build_component "V2 frontend" frontend dalec-homebrew \
   --build-arg "MATERIALIZER_REF=$MATERIALIZER_REF" \
   "${V2_BUILD_ARGS[@]}")
 
+expect_forwarding_rejection() {
+  local name=$1
+  local expected=$2
+  if docker buildx build \
+    --builder "$BUILDER" \
+    --platform "$PLATFORM" \
+    --progress="$PROGRESS" \
+    --target "$DALEC_ROUTE" \
+    --file "$WORK/$name.yaml" \
+    . >"$WORK/$name.log" 2>&1; then
+    echo "upstream Dalec accepted unsupported dependency shape $name" >&2
+    exit 1
+  fi
+  grep -F "$expected" "$WORK/$name.log" >/dev/null || {
+    cat "$WORK/$name.log" >&2
+    echo "dependency-shape rejection $name did not fail at the expected preflight boundary" >&2
+    exit 1
+  }
+}
+
+cat > "$WORK/list-only.yaml" <<EOF_LIST_ONLY
+# syntax=$DALEC_FRONTEND_REF
+dependencies:
+  runtime: [hello]
+targets:
+  homebrew:
+    frontend:
+      image: $FRONTEND_REF
+EOF_LIST_ONLY
+
+cat > "$WORK/global-map-target-list.yaml" <<EOF_MAP_LIST
+# syntax=$DALEC_FRONTEND_REF
+dependencies:
+  runtime:
+    hello: {}
+targets:
+  homebrew:
+    frontend:
+      image: $FRONTEND_REF
+    dependencies:
+      runtime: [jq]
+EOF_MAP_LIST
+
+cat > "$WORK/global-list-target-map.yaml" <<EOF_LIST_MAP
+# syntax=$DALEC_FRONTEND_REF
+dependencies:
+  runtime: [hello]
+targets:
+  homebrew:
+    frontend:
+      image: $FRONTEND_REF
+    dependencies:
+      runtime:
+        jq: {}
+EOF_LIST_MAP
+
+expect_forwarding_rejection list-only \
+  'global dependencies.runtime must use map form and contain at least one entry'
+expect_forwarding_rejection global-map-target-list \
+  'target homebrew dependencies.runtime must use map form and contain at least one entry'
+expect_forwarding_rejection global-list-target-map \
+  'global dependencies.runtime must use map form and contain at least one entry'
+
 DALEC_HOMEBREW_LIVE_BUILDER="$BUILDER" \
 DALEC_HOMEBREW_LIVE_PLATFORM="$PLATFORM" \
 DALEC_HOMEBREW_LIVE_SPEC="$SPEC" \
 DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF="$RUNTIME_BASE_REF" \
 DALEC_HOMEBREW_LIVE_MATERIALIZER_REF="$MATERIALIZER_REF" \
 DALEC_HOMEBREW_LIVE_FRONTEND_REF="$FRONTEND_REF" \
+DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN="$DALEC_FRONTEND_PIN" \
 DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
 DALEC_HOMEBREW_LIVE_IMAGE="$FINAL_IMAGE" \
 DALEC_HOMEBREW_LIVE_OUTPUT=load \
@@ -174,6 +249,14 @@ for name in resolution.json materialization-v2.json runtime-inventory.json; do
   docker run --rm --network none --entrypoint /bin/cat "$FINAL_IMAGE" \
     "/usr/share/dalec-homebrew/$name" > "$WORK/$name"
 done
+
+jq -e '
+  (.requested | map(.requested)) == [
+    "hello",
+    "sozercan/repo/a365",
+    "svt/avtools/libdf"
+  ]
+' "$WORK/resolution.json" >/dev/null
 
 LIBDF_ID=svt/avtools/libdf
 LIBDF_TAP=svt/avtools
@@ -286,5 +369,7 @@ DALEC_HOMEBREW_E2E_BOTTLE_FETCHER_REF=$BOTTLE_FETCHER_REF
 DALEC_HOMEBREW_E2E_CATALOG_EXTRACTOR_REF=$EXTRACTOR_REF
 DALEC_HOMEBREW_E2E_MATERIALIZER_REF=$MATERIALIZER_REF
 DALEC_HOMEBREW_E2E_FRONTEND_REF=$FRONTEND_REF
+DALEC_HOMEBREW_E2E_DALEC_FRONTEND_REF=$DALEC_FRONTEND_REF
+DALEC_HOMEBREW_E2E_DALEC_ROUTE=$DALEC_ROUTE
 DALEC_HOMEBREW_E2E_FINAL_IMAGE=$FINAL_IMAGE
 RESULT

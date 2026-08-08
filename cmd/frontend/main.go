@@ -14,7 +14,7 @@ import (
 func main() {
 	ctx, cancel := context.WithCancel(appcontext.Context())
 	defer cancel()
-	if err := grpcclient.RunFromEnvironment(ctx, front.Handle); err != nil {
+	if err := grpcclient.RunFromEnvironment(ctx, front.NewHandler(ctx)); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(70)
 	}

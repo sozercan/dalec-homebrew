@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -374,6 +375,156 @@ func TestReleaseWorkflowSpecInventory(t *testing.T) {
 	}
 	if strings.Count(workflow, `"$RELEASE_SPECS"`) < 3 {
 		t.Fatal("release workflow does not reuse RELEASE_SPECS across build and validation paths")
+	}
+}
+
+func TestReleaseWorkflowBindsExternalDalecFrontend(t *testing.T) {
+	workflow := workflowYAML(t, "release.yml")
+
+	buildScript := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "build", "Build children and assemble component indexes"), "run"))
+	for _, want := range []string{
+		`dalec_frontend_index=$(jq -er .dalec_frontend.index dist/release/inputs.json)`,
+		`expected_ref=$(jq -er --arg platform "$platform" '.dalec_frontend.platforms[$platform]' dist/release/inputs.json)`,
+		`actual_digest=$(platform_digest "$dalec_frontend_index" "$platform")`,
+		`(.platform.os // "") != "unknown"`,
+	} {
+		if !strings.Contains(buildScript, want) {
+			t.Fatalf("release build does not validate upstream Dalec frontend binding with %q", want)
+		}
+	}
+
+	integrationScript := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "integration", "Build and test a runtime from the released tuple"), "run"))
+	for _, want := range []string{
+		`dalec_frontend_ref=$(jq -er --arg platform "$PLATFORM" '.dalec_frontend.platforms[$platform]' dist/release/inputs.json)`,
+		`dalec_frontend_route=$(jq -er .dalec_frontend.route dist/release/inputs.json)`,
+		`DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF="$dalec_frontend_ref"`,
+		`DALEC_HOMEBREW_LIVE_TARGET="$dalec_frontend_route"`,
+	} {
+		if !strings.Contains(integrationScript, want) {
+			t.Fatalf("release integration does not use upstream Dalec frontend binding with %q", want)
+		}
+	}
+
+	provenanceScript := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "sign", "Generate SLSA provenance predicate"), "run"))
+	for _, want := range []string{
+		`dalec_frontend: $inputs[0].dalec_frontend`,
+		`uri: ("oci://" + $dalec_frontend.repository)`,
+		`digest: {sha256: $dalec_frontend.digest}`,
+	} {
+		if !strings.Contains(provenanceScript, want) {
+			t.Fatalf("release provenance does not bind upstream Dalec frontend with %q", want)
+		}
+	}
+
+	validationScript := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "sign", "Validate release tuple before signing"), "run"))
+	for _, want := range []string{
+		`.schema_version == "dalec-homebrew-release-inputs/v2"`,
+		`test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")`,
+		`.invocation.parameters.dalec_frontend == $inputs[0].dalec_frontend`,
+		`.materials[1].uri == ("oci://" + $dalec_frontend.repository)`,
+		`upstream Dalec frontend $platform child`,
+	} {
+		if !strings.Contains(validationScript, want) {
+			t.Fatalf("release tuple validation does not bind upstream Dalec frontend with %q", want)
+		}
+	}
+
+	ownedSigningScript := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "sign", "Sign images and attach provenance and SBOM attestations"), "run"))
+	if strings.Contains(ownedSigningScript, "dalec_frontend") || strings.Contains(ownedSigningScript, "project-dalec") {
+		t.Fatal("release signing treats the external Dalec frontend as a repository-owned component")
+	}
+	promotionScript := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "promote", "Stage assets, promote digests, and publish release"), "run"))
+	if strings.Contains(promotionScript, "dalec_frontend") || strings.Contains(promotionScript, "project-dalec") {
+		t.Fatal("release promotion treats the external Dalec frontend as a repository-owned component")
+	}
+}
+
+func TestReleaseWorkflowDalecFrontendProvenance(t *testing.T) {
+	workflow := workflowYAML(t, "release.yml")
+	step := workflowStepByName(t, workflow, "sign", "Generate SLSA provenance predicate")
+	script := yamlScalarValue(t, yamlMappingValue(t, step, "run"))
+
+	root := repositoryRoot(t)
+	pinData, err := os.ReadFile(filepath.Join(root, "release", "dalec-frontend.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pin map[string]any
+	if err := json.Unmarshal(pinData, &pin); err != nil {
+		t.Fatal(err)
+	}
+
+	temporary := t.TempDir()
+	releaseDir := filepath.Join(temporary, "dist", "release")
+	if err := os.MkdirAll(releaseDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string, value any) {
+		t.Helper()
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(releaseDir, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("inputs.json", map[string]any{
+		"source_date_epoch": "1781049600",
+		"dalec_frontend":    pin,
+	})
+	write("digests.json", map[string]any{
+		"source": map[string]any{
+			"build_invocation": "https://github.com/sozercan/dalec-homebrew/actions/runs/123/attempts/1",
+		},
+	})
+
+	sha := strings.Repeat("a", 40)
+	output, err := runWorkflowShell(t, "cd \"$WORKDIR\"\n"+script, map[string]string{
+		"BINFMT_IMAGE":        "example.invalid/binfmt@sha256:" + strings.Repeat("b", 64),
+		"BUILDKIT_IMAGE":      "example.invalid/buildkit@sha256:" + strings.Repeat("c", 64),
+		"BUILDX_SHA256_AMD64": strings.Repeat("d", 64),
+		"BUILDX_SHA256_ARM64": strings.Repeat("e", 64),
+		"BUILDX_VERSION":      "v0.36.0",
+		"GITHUB_REPOSITORY":   "sozercan/dalec-homebrew",
+		"PATH":                os.Getenv("PATH"),
+		"RELEASE_SHA":         sha,
+		"RELEASE_TAG":         "v1.2.3",
+		"SYFT_IMAGE":          "example.invalid/syft@sha256:" + strings.Repeat("f", 64),
+		"TRIVY_IMAGE":         "example.invalid/trivy@sha256:" + strings.Repeat("1", 64),
+		"WORKDIR":             temporary,
+		"WORKFLOW_REF":        "sozercan/dalec-homebrew/.github/workflows/release.yml@refs/heads/main",
+		"WORKFLOW_SHA":        sha,
+	})
+	if err != nil {
+		t.Fatalf("generate provenance: %v\n%s", err, output)
+	}
+
+	data, err := os.ReadFile(filepath.Join(releaseDir, "provenance.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var provenance struct {
+		Invocation struct {
+			Parameters map[string]any `json:"parameters"`
+		} `json:"invocation"`
+		Materials []struct {
+			URI    string            `json:"uri"`
+			Digest map[string]string `json:"digest"`
+		} `json:"materials"`
+	}
+	if err := json.Unmarshal(data, &provenance); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(provenance.Invocation.Parameters["dalec_frontend"], pin) {
+		t.Fatalf("provenance Dalec frontend parameter = %#v, want %#v", provenance.Invocation.Parameters["dalec_frontend"], pin)
+	}
+	if len(provenance.Materials) != 2 {
+		t.Fatalf("provenance materials = %#v", provenance.Materials)
+	}
+	if provenance.Materials[1].URI != "oci://ghcr.io/project-dalec/dalec/frontend" ||
+		provenance.Materials[1].Digest["sha256"] != strings.TrimPrefix(testDalecIndex, "ghcr.io/project-dalec/dalec/frontend@sha256:") {
+		t.Fatalf("upstream Dalec provenance material = %#v", provenance.Materials[1])
 	}
 }
 

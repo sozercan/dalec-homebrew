@@ -5,6 +5,7 @@ go 1.25.9
 require (
 	github.com/containerd/platforms v1.0.0-rc.4
 	github.com/distribution/reference v0.6.0
+	github.com/goccy/go-yaml v1.19.2
 	github.com/klauspost/compress v1.18.6
 	github.com/moby/buildkit v0.31.2
 	github.com/opencontainers/go-digest v1.0.0
@@ -60,7 +61,6 @@ require (
 	github.com/go-openapi/swag/yamlutils v0.26.0 // indirect
 	github.com/go-openapi/validate v0.25.3 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
-	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/google/certificate-transparency-go v1.3.3 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect

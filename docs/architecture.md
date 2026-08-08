@@ -2,10 +2,56 @@
 
 `dalec-homebrew` separates networked resolution from offline execution. A build first turns a Dalec dependency declaration into a canonical, digest-bound resolution record, then materializes that record without network access and copies an allowlisted runtime into an independent Ubuntu Chisel base.
 
+## Frontend routing
+
+The only supported production invocation uses upstream Dalec with an
+out-of-tree child frontend:
+
+```text
+BuildKit
+  -> digest-pinned upstream Dalec frontend
+  -> targets.homebrew.frontend.image
+  -> digest-pinned dalec-homebrew child frontend, child route image
+  -> resolution and materialization pipeline
+```
+
+The child still advertises `image` for upstream Dalec route discovery. That is
+not direct-invocation compatibility: the router requires the selected Dalec
+target to be `homebrew` and the child target to be `image`, and rejects an
+unforwarded `image` solve.
+
+The upstream frontend selects the `homebrew` spec target, discovers the child
+frontend's advertised routes, and forwards `homebrew/image` as child target
+`image`. It replaces the child solve's gateway `source` with the exact
+`targets.homebrew.frontend.image` and forwards the effective typed Dalec spec.
+Before any metadata or registry access, `dalec-homebrew` requires the selected
+spec target to be exactly `homebrew`, the child route to be exactly `image`, the
+target's frontend image to equal its gateway `source`, and both target and
+invocation `cmdline` values to be empty. These routing checks complete before
+metadata or registry access. Runtime dependency maps carry no declaration-order
+semantics. Applicable roots for each platform are sorted lexicographically by
+canonical requested Formula ID for resolution evidence and the default
+generated `PATH`; installation uses a separate
+deterministic topological order. A dependency scope is either omitted or
+contains a non-empty runtime map. Explicit empty scopes fail preflight, which
+also catches the markers emitted when the exact pinned upstream Dalec v0.21.5
+dispatcher drops legacy list syntax during typed-spec forwarding.
+
+The child can authenticate only its own gateway source. BuildKit does not give
+the child an authenticated identity for the parent that initiated the nested
+solve, and caller-provided parent options would be forgeable. Therefore
+[`../release/dalec-frontend.json`](../release/dalec-frontend.json) binds the
+upstream index, exact Linux children, module identity, and route externally;
+top-level signed release provenance authenticates that parent binding. The
+resolution record's frontend fields continue to identify `dalec-homebrew`, not
+the upstream dispatcher.
+
 ## Build pipeline
 
 ```text
-raw Dalec preflight
+upstream Dalec target selection and forwarding
+  -> dalec-homebrew route and source validation
+  -> raw Dalec preflight
   -> separately verified Formula and migration metadata
   -> per-platform OCI descriptor resolution
   -> canonical resolution.json and independent structural verification
@@ -31,7 +77,8 @@ See [`../SECURITY.md`](../SECURITY.md) for the properties enforced at each bound
 
 ## Package layout
 
-- `internal/spec`: raw dependency-order extraction and typed V1 Dalec validation.
+- `internal/spec`: runtime-dependency shape and name preflight plus typed V1
+  Dalec validation.
 - `internal/config`: gateway build-option parsing, immutable component bindings,
   and release-bound metadata policy.
 - `internal/homebrew/metadata`: bounded HTTP fetch, RFC 7797/PS512 JWS verification, freshness and rollback policy, and canonical alias, rename, and migration lookup.
@@ -50,8 +97,12 @@ See [`../SECURITY.md`](../SECURITY.md) for the properties enforced at each bound
 - `internal/runtimefs`: allowlist assembly, ownership and mode normalization, inventory, pruning evidence, runtime manifest, and SPDX output.
 - `internal/runtimecheck`: static ELF, loader, library, shebang, and link checks.
 - `internal/testplan` and `internal/testrunner`: conversion and execution for the supported public Dalec test subset.
-- `internal/frontend`: DockerUI fan-out, shared snapshot orchestration, image configuration, test dependencies, and exporter epoch.
-- `internal/release`: canonical component-manifest and platform-reference validation; online registry, signing, and promotion checks remain release-workflow responsibilities.
+- `internal/frontend`: child gateway routing, target-list
+  subrequests, DockerUI fan-out, shared snapshot orchestration, image
+  configuration, test dependencies, and exporter epoch.
+- `internal/release`: canonical component-manifest, release-bound upstream Dalec
+  frontend pin, and platform-reference validation; online registry, signing, and
+  promotion checks remain release-workflow responsibilities.
 - `internal/buildfiles`: source-level contract tests for Dockerfile, pin
   inventory, Bake, and release workflow definitions.
 
@@ -62,12 +113,24 @@ Command entrypoints live under `cmd/`; component image recipes live in [`../Dock
 A resolution record binds:
 
 - the effective Dalec input digest and target platform
+- requested roots sorted lexicographically by canonical requested Formula ID,
+  independent of YAML map ordering
 - Formula and migration payload and envelope digests, freshness sources, timestamps, URLs, and recorded signature-verification evidence
 - exact OCI index, manifest, config, and layer descriptor identities plus selected annotations
-- requested roots and the resolved dependency closure
-- deterministic installation order
+- the resolved dependency closure
+- a separately computed deterministic topological installation order
 - frontend, runtime-base, and materializer component identities
 - runtime, attestation-waiver, and pruning-policy inputs
+
+Requested-root order and installation order are distinct. Canonical root order
+is reflected in resolution evidence and the generated default `PATH`, while the
+topological installation order ensures dependencies are installed before their
+dependents.
+
+Here `frontend` means the executing `dalec-homebrew` child frontend. Upstream
+Dalec is an externally authenticated release input and provenance material; it
+is not projected into the child-generated resolution as if the child had
+authenticated its parent.
 
 Formula and migration documents are fetched and verified separately because upstream does not provide a signed common snapshot identifier. The combined snapshot digest commits to the exact accepted payload pair, but does not prove that Homebrew published the pair atomically. An authenticated `generated_date` takes precedence over HTTP metadata for each document; otherwise freshness uses `Last-Modified`. The record's `generated_at` and `source_date_epoch` use the earlier accepted document timestamp.
 

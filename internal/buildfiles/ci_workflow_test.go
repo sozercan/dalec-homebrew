@@ -18,7 +18,10 @@ func TestCIExercisesProductionPathNonCoreV2(t *testing.T) {
 	text := string(workflow)
 	for _, want := range []string{
 		"Non-core multi-package container E2E",
-		"Build and test build-local non-core V2",
+		"Validate upstream Dalec forwarding pin",
+		"--dalec-frontend-file release/dalec-frontend.json",
+		"Build and test upstream-forwarded build-local non-core V2",
+		"DALEC_HOMEBREW_E2E_DALEC_FRONTEND_PIN: release/dalec-frontend.json",
 		"DALEC_HOMEBREW_E2E_SPEC: examples/ci-noncore-multi-package.yaml",
 		"run: ./scripts/noncore-e2e.sh",
 	} {
@@ -46,12 +49,29 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 	}
 	text := string(script)
 	for _, want := range []string{
+		`--dalec-frontend-file "$DALEC_FRONTEND_PIN"`,
+		`--base-spec-file "$SPEC"`,
+		`--pinned-ref "DALEC_HOMEBREW_E2E_BUILDKIT_IMAGE=$BUILDKIT_IMAGE"`,
+		`--pinned-ref "DALEC_HOMEBREW_E2E_REGISTRY_IMAGE=$REGISTRY_IMAGE"`,
+		`DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN="$DALEC_FRONTEND_PIN"`,
+		"DALEC_HOMEBREW_E2E_DALEC_ROUTE=$DALEC_ROUTE",
+		"expect_forwarding_rejection list-only",
+		"expect_forwarding_rejection global-map-target-list",
+		"expect_forwarding_rejection global-list-target-map",
+		"upstream Dalec accepted unsupported dependency shape",
+		"global dependencies.runtime must use map form and contain at least one entry",
+		"target homebrew dependencies.runtime must use map form and contain at least one entry",
 		`--catalog-extractor-ref "$EXTRACTOR_REF"`,
 		`--build-arg "CATALOG_EXTRACTOR_REF=$EXTRACTOR_REF"`,
 		"docker run --rm --network none",
 		".components.catalog_extractor_ref as $extractor",
 		".extraction.policy_version == \"build-local-tap-extraction-v1\"",
 		".extraction.extractor_ref == $extractor",
+		`(.requested | map(.requested)) == [
+    "hello",
+    "sozercan/repo/a365",
+    "svt/avtools/libdf"
+  ]`,
 		".requested == $id and .id == $id",
 		".tap == $tap",
 		".bottle.transport.https.fetch_policy_version == \"homebrew-bottle-fetch-v1\"",
@@ -81,9 +101,11 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 		"INGESTION_JWS",
 		"catalog-worker",
 		"--buildkit-address",
+		"x-dalec-homebrew",
+		"runtime_dependency_order",
 	} {
 		if strings.Contains(text, forbidden) {
-			t.Fatalf("non-core E2E contains forbidden release/CI tap control %q", forbidden)
+			t.Fatalf("non-core E2E contains forbidden marker %q", forbidden)
 		}
 	}
 }
@@ -105,6 +127,12 @@ func TestNonCoreE2ESpecContainsQualifiedAndCoreRoots(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("non-core E2E spec is missing %q", want)
 		}
+	}
+	const nonCanonicalDeclarationOrder = `    svt/avtools/libdf: {}
+    sozercan/repo/a365: {}
+    hello: {}`
+	if !strings.Contains(text, nonCanonicalDeclarationOrder) {
+		t.Fatal("non-core E2E fixture must retain noncanonical YAML declaration order")
 	}
 	decoded, err := dalec.LoadSpec(spec)
 	if err != nil {

@@ -1,9 +1,9 @@
 # syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
-name: hello-runtime
-description: GNU hello from a verified Homebrew bottle
-website: https://www.gnu.org/software/hello/
+name: homebrew-forwarded-hello
 version: 0.1.0
 revision: 1
+description: Minimal Homebrew runtime built through upstream Dalec forwarding
+website: https://brew.sh/
 license: Apache-2.0
 
 dependencies:
@@ -12,15 +12,7 @@ dependencies:
 
 image:
   entrypoint: /home/linuxbrew/.linuxbrew/bin/hello
-
-tests:
-  - name: hello
-    steps:
-      - command: hello
-        stdout:
-          contains: ["Hello, world!"]
-    files:
-      /home/linuxbrew/.linuxbrew/bin/hello: {}
+  user: linuxbrew
 
 targets:
   homebrew:

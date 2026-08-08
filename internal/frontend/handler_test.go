@@ -1,6 +1,7 @@
 package frontend
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -30,6 +31,59 @@ func TestDalecLoadOptionsAllowFrontendOwnedBuildArgs(t *testing.T) {
 	args["DALEC_HOMEBREW_UNKNOWN"] = "value"
 	if err := (&dalec.Spec{}).SubstituteArgs(args, loadConfig.SubstituteOpts...); err == nil || !strings.Contains(err.Error(), `unknown arg: "DALEC_HOMEBREW_UNKNOWN"`) {
 		t.Fatalf("unknown frontend arg error = %v", err)
+	}
+}
+
+func TestMarshalEffectiveSpecPreservesFrontendMetadata(t *testing.T) {
+	frontendRef := "ghcr.io/example/dalec-homebrew@sha256:" + strings.Repeat("a", 64)
+	spec := &dalec.Spec{Targets: map[string]dalec.Target{
+		"homebrew": {Frontend: &dalec.Frontend{Image: frontendRef}},
+	}}
+
+	effective, err := marshalEffectiveSpec(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		SchemaVersion string     `json:"schema_version"`
+		DalecSpec     dalec.Spec `json:"dalec_spec"`
+	}
+	if err := json.Unmarshal(effective, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.SchemaVersion != "dalec-homebrew-effective-input/v1" {
+		t.Fatalf("effective envelope=%+v", decoded)
+	}
+	if got := decoded.DalecSpec.Targets["homebrew"].Frontend; got == nil || got.Image != frontendRef {
+		t.Fatalf("frontend metadata=%+v, want image %q", got, frontendRef)
+	}
+
+	target := spec.Targets["homebrew"]
+	target.Frontend = nil
+	spec.Targets["homebrew"] = target
+	withoutFrontend, err := marshalEffectiveSpec(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha256Hex(effective) == sha256Hex(withoutFrontend) {
+		t.Fatal("effective spec digest did not bind frontend routing metadata")
+	}
+	firstOrder, err := marshalEffectiveSpec(&dalec.Spec{Dependencies: &dalec.PackageDependencies{Runtime: dalec.PackageDependencyList{
+		"zlib":  {},
+		"hello": {},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondOrder, err := marshalEffectiveSpec(&dalec.Spec{Dependencies: &dalec.PackageDependencies{Runtime: dalec.PackageDependencyList{
+		"hello": {},
+		"zlib":  {},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha256Hex(firstOrder) != sha256Hex(secondOrder) {
+		t.Fatal("effective spec digest depends on Go map insertion order")
 	}
 }
 

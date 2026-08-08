@@ -28,11 +28,21 @@ func TestReleaseInputsFixture(t *testing.T) {
 		VerificationKeysDigest string            `json:"verification_keys_digest"`
 		DalecModule            string            `json:"dalec_module"`
 		BuildKitModule         string            `json:"buildkit_module"`
+		DalecFrontend          struct {
+			SchemaVersion string `json:"schema_version"`
+			Module        struct {
+				Path    string `json:"path"`
+				Version string `json:"version"`
+			} `json:"module"`
+			Route     string            `json:"route"`
+			Index     string            `json:"index"`
+			Platforms map[string]string `json:"platforms"`
+		} `json:"dalec_frontend"`
 	}
 	if err := json.Unmarshal(stdout, &inputs); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, stdout)
 	}
-	if inputs.SchemaVersion != "dalec-homebrew-release-inputs/v1" {
+	if inputs.SchemaVersion != "dalec-homebrew-release-inputs/v2" {
 		t.Fatalf("schema_version = %q", inputs.SchemaVersion)
 	}
 	if inputs.UbuntuBase["linux/amd64"] != testRuntimeBaseAMD64 || inputs.UbuntuBase["linux/arm64"] != testRuntimeBaseARM64 {
@@ -47,8 +57,17 @@ func TestReleaseInputsFixture(t *testing.T) {
 	if inputs.VerificationKeysDigest != testVerificationKeysDigest {
 		t.Fatalf("verification_keys_digest = %q", inputs.VerificationKeysDigest)
 	}
-	if inputs.DalecModule != "v0.21.5-0.20260728234020-5fa2c46d716b" || inputs.BuildKitModule != "v0.31.2" {
+	if inputs.DalecModule != testDalecVersion || inputs.BuildKitModule != "v0.31.2" {
 		t.Fatalf("module versions = %q, %q", inputs.DalecModule, inputs.BuildKitModule)
+	}
+	if inputs.DalecFrontend.SchemaVersion != "dalec-homebrew-dalec-frontend/v1" ||
+		inputs.DalecFrontend.Module.Path != "github.com/project-dalec/dalec" ||
+		inputs.DalecFrontend.Module.Version != testDalecFrontendVersion ||
+		inputs.DalecFrontend.Route != testDalecRoute ||
+		inputs.DalecFrontend.Index != testDalecIndex ||
+		inputs.DalecFrontend.Platforms["linux/amd64"] != testDalecAMD64 ||
+		inputs.DalecFrontend.Platforms["linux/arm64"] != testDalecARM64 {
+		t.Fatalf("dalec_frontend = %#v", inputs.DalecFrontend)
 	}
 }
 
@@ -58,10 +77,11 @@ func TestReleaseInputsRejectsUnsafeFixtures(t *testing.T) {
 		f.Target["materializer-amd64"].Args["RUNTIME_BASE"] = ref
 	}
 	tests := []struct {
-		name           string
-		mutate         func(*bakeFixture)
-		replacedModule string
-		want           string
+		name               string
+		mutate             func(*bakeFixture)
+		replacedModule     string
+		dalecModuleVersion string
+		want               string
 	}{
 		{
 			name: "conflicting epochs",
@@ -179,7 +199,11 @@ func TestReleaseInputsRejectsUnsafeFixtures(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(&fixture)
 			}
-			stdout, stderr, err := runReleaseInputs(t, fixture, tt.replacedModule)
+			dalecModuleVersion := tt.dalecModuleVersion
+			if dalecModuleVersion == "" {
+				dalecModuleVersion = testDalecVersion
+			}
+			stdout, stderr, err := runReleaseInputsWithDalecVersion(t, fixture, tt.replacedModule, dalecModuleVersion)
 			if err == nil {
 				t.Fatalf("release-inputs.sh succeeded\nstdout: %s", stdout)
 			}
@@ -202,6 +226,12 @@ const (
 	testHomebrewCommit         = "935053a12d38d62e59c467bf7f0f50dbc11cbcb6"
 	testHomebrewArchiveSHA256  = "09eafcf099e344f5c1a4040992a2e1add3789e9b553b9141ab14df9f727f8c6b"
 	testVerificationKeysDigest = "sha256:ef2d2c9e0219d485df9f07fff7b037feadc36c93085be9ffefb1390f31a3de1d"
+	testDalecVersion           = "v0.21.5-0.20260728234020-5fa2c46d716b"
+	testDalecFrontendVersion   = "v0.21.5"
+	testDalecRoute             = "homebrew/image"
+	testDalecIndex             = "ghcr.io/project-dalec/dalec/frontend@sha256:37f3a2ab5b7e65b3f8c5cb4e79f9f184f8d2b7e7d3f328041d7d22d160805c8c"
+	testDalecAMD64             = "ghcr.io/project-dalec/dalec/frontend@sha256:4ce1cda772259b27a37a304ed9b30f3f06a3d776e1468afea4b05e8bdfa24d46"
+	testDalecARM64             = "ghcr.io/project-dalec/dalec/frontend@sha256:ebb7d748011880b9bd6d430257831d3eb5e8ed1d1814ebeef1fcf182daff171e"
 )
 
 type bakeFixture struct {
@@ -262,6 +292,11 @@ func validBakeFixture() bakeFixture {
 
 func runReleaseInputs(t *testing.T, fixture bakeFixture, replacedModule string) ([]byte, []byte, error) {
 	t.Helper()
+	return runReleaseInputsWithDalecVersion(t, fixture, replacedModule, testDalecVersion)
+}
+
+func runReleaseInputsWithDalecVersion(t *testing.T, fixture bakeFixture, replacedModule, dalecModuleVersion string) ([]byte, []byte, error) {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("release-inputs.sh requires Bash")
 	}
@@ -308,7 +343,7 @@ fi
 }
 module=$4
 case "$module" in
-  github.com/project-dalec/dalec) version=v0.21.5-0.20260728234020-5fa2c46d716b ;;
+  github.com/project-dalec/dalec) version=$RELEASE_INPUTS_DALEC_MODULE_VERSION ;;
   github.com/moby/buildkit) version=v0.31.2 ;;
   *) echo "unexpected module: $module" >&2; exit 1 ;;
 esac
@@ -339,6 +374,7 @@ fi
 		"RELEASE_INPUTS_BAKE_FIXTURE="+fixturePath,
 		"RELEASE_INPUTS_REAL_GO="+realGo,
 		"RELEASE_INPUTS_REPLACED_MODULE="+replacedModule,
+		"RELEASE_INPUTS_DALEC_MODULE_VERSION="+dalecModuleVersion,
 	)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

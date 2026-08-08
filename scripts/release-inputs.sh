@@ -16,6 +16,64 @@ done
 release_registry=${REGISTRY:-ghcr.io/sozercan}
 release_version=${VERSION:-dev}
 
+dalec_frontend_file=release/dalec-frontend.json
+dalec_frontend=$(python3 - "$dalec_frontend_file" <<'PYJSON'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+max_bytes = 64 << 10
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON member {key!r}")
+        result[key] = value
+    return result
+
+
+def reject_constant(value):
+    raise ValueError(f"invalid JSON constant {value}")
+
+
+try:
+    size = path.stat().st_size
+    if size <= 0 or size > max_bytes:
+        raise ValueError(f"binding size {size} is outside the allowed range")
+    raw = path.read_bytes()
+    if len(raw) != size:
+        raise ValueError("binding size changed while reading")
+    document = json.loads(
+        raw.decode("utf-8"),
+        object_pairs_hook=unique_object,
+        parse_constant=reject_constant,
+    )
+    if not isinstance(document, dict):
+        raise ValueError("binding is not an object")
+except (OSError, UnicodeError, ValueError) as exc:
+    raise SystemExit(f"{path}: invalid Dalec frontend binding: {exc}")
+
+sys.stdout.write(json.dumps(document, ensure_ascii=False, allow_nan=False, separators=(",", ":")))
+PYJSON
+)
+jq -e '
+  (keys == ["index", "module", "platforms", "route", "schema_version"]) and
+  .schema_version == "dalec-homebrew-dalec-frontend/v1" and
+  ((.module | keys) == ["path", "version"]) and
+  .module.path == "github.com/project-dalec/dalec" and
+  (.module.version | type == "string" and test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")) and
+  .route == "homebrew/image" and
+  (.index | type == "string" and length > 0) and
+  ((.platforms | keys) == ["linux/amd64", "linux/arm64"]) and
+  all(.platforms[]; type == "string" and length > 0)
+' <<<"$dalec_frontend" >/dev/null || fail "$dalec_frontend_file has an unsupported schema or value"
+dalec_frontend_index=$(jq -er .index <<<"$dalec_frontend")
+dalec_frontend_amd64=$(jq -er '.platforms["linux/amd64"]' <<<"$dalec_frontend")
+dalec_frontend_arm64=$(jq -er '.platforms["linux/arm64"]' <<<"$dalec_frontend")
+
 targets=(
   runtime-base-amd64
   runtime-base-arm64
@@ -144,7 +202,19 @@ GOWORK=off GOFLAGS='' go run ./cmd/live-input-verify \
   --pinned-ref "runtime-base-amd64=$runtime_base_amd64" \
   --pinned-ref "runtime-base-arm64=$runtime_base_arm64" \
   --pinned-ref "GO_IMAGE=$go_image" \
-  --pinned-ref "Dockerfile frontend=$dockerfile_frontend"
+  --pinned-ref "Dockerfile frontend=$dockerfile_frontend" \
+  --pinned-ref "Dalec frontend index=$dalec_frontend_index" \
+  --pinned-ref "Dalec frontend linux/amd64=$dalec_frontend_amd64" \
+  --pinned-ref "Dalec frontend linux/arm64=$dalec_frontend_arm64" \
+  --dalec-frontend-file "$dalec_frontend_file" >/dev/null
+
+dalec_frontend_repository=${dalec_frontend_index%@sha256:*}
+[[ "${dalec_frontend_amd64%@sha256:*}" == "$dalec_frontend_repository" ]] || fail \
+  "Dalec frontend linux/amd64 child uses a different repository from the index"
+[[ "${dalec_frontend_arm64%@sha256:*}" == "$dalec_frontend_repository" ]] || fail \
+  "Dalec frontend linux/arm64 child uses a different repository from the index"
+[[ "$dalec_frontend_amd64" != "$dalec_frontend_arm64" ]] || fail \
+  "Dalec frontend platform children unexpectedly use the same manifest"
 
 [[ -n "$chisel_version" ]] || fail "CHISEL_VERSION is empty"
 [[ "$chisel_releases_commit" =~ ^[0-9a-f]{40}$ ]] || fail \
@@ -216,8 +286,9 @@ jq -n \
   --arg verification_keys_digest "$verification_keys_digest" \
   --arg dalec_module "$dalec_module" \
   --arg buildkit_module "$buildkit_module" \
+  --argjson dalec_frontend "$dalec_frontend" \
   '{
-    schema_version: "dalec-homebrew-release-inputs/v1",
+    schema_version: "dalec-homebrew-release-inputs/v2",
     source_date_epoch: $source_date_epoch,
     ubuntu_snapshot: $ubuntu_snapshot,
     ubuntu_base: {
@@ -240,5 +311,6 @@ jq -n \
     portable_ruby_version: $portable_ruby_version,
     verification_keys_digest: $verification_keys_digest,
     dalec_module: $dalec_module,
-    buildkit_module: $buildkit_module
+    buildkit_module: $buildkit_module,
+    dalec_frontend: $dalec_frontend
   }'
