@@ -390,6 +390,69 @@ func TestReleaseWorkflowSpecInventory(t *testing.T) {
 	}
 }
 
+func TestReleaseRuntimeEvidenceAssertionsUseV2Schemas(t *testing.T) {
+	workflow := releaseWorkflowText(t)
+	match := regexp.MustCompile(`(?m)^  RELEASE_SPECS: (.+)$`).FindStringSubmatch(workflow)
+	if len(match) != 2 {
+		t.Fatal("release workflow does not define RELEASE_SPECS")
+	}
+
+	wantSchemas := []string{
+		"dalec-homebrew-runtime-manifest/v2",
+		"dalec-homebrew-resolution/v2",
+		"dalec-homebrew-runtime-inventory/v2",
+		"dalec-homebrew-prune-manifest/v3",
+	}
+	staleSchemas := []string{
+		"dalec-homebrew-runtime-manifest/v1",
+		"dalec-homebrew-resolution/v1",
+		"dalec-homebrew-runtime-inventory/v1",
+		"dalec-homebrew-prune-manifest/v2",
+	}
+
+	assertions := 0
+	for _, spec := range strings.Fields(match[1]) {
+		path := filepath.Join(repositoryRoot(t), "examples", spec+".yaml")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(data, []byte("/usr/share/dalec-homebrew/manifest.json:")) {
+			continue
+		}
+		assertions++
+		for _, schema := range wantSchemas {
+			if !bytes.Contains(data, []byte(schema)) {
+				t.Errorf("%s does not assert current V2 evidence schema %q", spec, schema)
+			}
+		}
+		for _, schema := range staleSchemas {
+			if bytes.Contains(data, []byte(schema)) {
+				t.Errorf("%s still asserts stale evidence schema %q", spec, schema)
+			}
+		}
+	}
+	if assertions == 0 {
+		t.Fatal("release specs do not assert runtime evidence schemas")
+	}
+
+	validatorPath := filepath.Join(repositoryRoot(t), "scripts", "vm-live-validate.sh")
+	validator, err := os.ReadFile(validatorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, schema := range wantSchemas {
+		if !bytes.Contains(validator, []byte(schema)) {
+			t.Errorf("vm-live-validate.sh does not assert current V2 evidence schema %q", schema)
+		}
+	}
+	for _, schema := range staleSchemas {
+		if bytes.Contains(validator, []byte(schema)) {
+			t.Errorf("vm-live-validate.sh still asserts stale evidence schema %q", schema)
+		}
+	}
+}
+
 func TestReleaseWorkflowBindsExternalDalecFrontend(t *testing.T) {
 	workflow := workflowYAML(t, "release.yml")
 

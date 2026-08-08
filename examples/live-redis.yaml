@@ -136,16 +136,16 @@ tests:
         not_exist: true
       /usr/share/dalec-homebrew/manifest.json:
         permissions: 0o444
-        contains: [dalec-homebrew-runtime-manifest/v1]
+        contains: [dalec-homebrew-runtime-manifest/v2]
       /usr/share/dalec-homebrew/resolution.json:
         permissions: 0o444
-        contains: [dalec-homebrew-resolution/v1]
+        contains: [dalec-homebrew-resolution/v2]
       /usr/share/dalec-homebrew/runtime-inventory.json:
         permissions: 0o444
-        contains: [dalec-homebrew-runtime-inventory/v1]
+        contains: [dalec-homebrew-runtime-inventory/v2]
       /usr/share/dalec-homebrew/prune-manifest.json:
         permissions: 0o444
-        contains: [dalec-homebrew-prune-manifest/v2]
+        contains: [dalec-homebrew-prune-manifest/v3]
       /usr/share/dalec-homebrew/sbom.spdx.json:
         permissions: 0o444
         contains:
