@@ -33,6 +33,7 @@ env:
   MAX_RELEASE_TOTAL_BYTES: 1073741824
   MAX_RUNTIME_EVIDENCE_EXPANDED_BYTES: 268435456
   RELEASE_SPECS: live-test live-python live-glibc live-redis live-graphviz live-toolchain
+  RELEASE_AMD64_ONLY_SPECS: ci-noncore-multi-package
 
 jobs:
   prepare:
@@ -331,6 +332,8 @@ jobs:
           set -euo pipefail
 
           runtime_base_repo="$REGISTRY/dalec-homebrew-runtime-base"
+          bottle_fetcher_repo="$REGISTRY/dalec-homebrew-bottle-fetcher"
+          catalog_extractor_repo="$REGISTRY/dalec-homebrew-catalog-extractor"
           materializer_repo="$REGISTRY/dalec-homebrew-materializer"
           frontend_repo="$REGISTRY/dalec-homebrew"
 
@@ -427,9 +430,67 @@ jobs:
             }
           done
 
+          for target in runtime-base-amd64 runtime-base-arm64; do
+            digest=$(build_target "$target")
+            tag=$(target_tag "$target")
+            published=$(inspect_digest "$tag")
+            [[ "$published" == "$digest" ]] || {
+              echo "$target tag $tag resolved to $published, not exporter digest $digest" >&2
+              exit 1
+            }
+            printf '%s=%s\n' "$target" "$digest"
+            printf -v "${target//-/_}" '%s' "$digest"
+          done
+
+          runtime_base_index=$(create_index \
+            "$runtime_base_repo" "$VERSION" \
+            "$runtime_base_amd64" "$runtime_base_arm64")
+          [[ $(platform_digest "$runtime_base_repo@$runtime_base_index" linux/amd64) == "$runtime_base_amd64" ]]
+          [[ $(platform_digest "$runtime_base_repo@$runtime_base_index" linux/arm64) == "$runtime_base_arm64" ]]
+
           for target in \
-            runtime-base-amd64 runtime-base-arm64 \
-            materializer-amd64 materializer-arm64; do
+            bottle-fetcher-amd64 bottle-fetcher-arm64 \
+            catalog-extractor-amd64 catalog-extractor-arm64; do
+            digest=$(build_target "$target")
+            tag=$(target_tag "$target")
+            published=$(inspect_digest "$tag")
+            [[ "$published" == "$digest" ]] || {
+              echo "$target tag $tag resolved to $published, not exporter digest $digest" >&2
+              exit 1
+            }
+            printf '%s=%s\n' "$target" "$digest"
+            printf -v "${target//-/_}" '%s' "$digest"
+          done
+
+          bottle_fetcher_index=$(create_index \
+            "$bottle_fetcher_repo" "$VERSION" \
+            "$bottle_fetcher_amd64" "$bottle_fetcher_arm64")
+          catalog_extractor_index=$(create_index \
+            "$catalog_extractor_repo" "$VERSION" \
+            "$catalog_extractor_amd64" "$catalog_extractor_arm64")
+          [[ $(platform_digest "$bottle_fetcher_repo@$bottle_fetcher_index" linux/amd64) == "$bottle_fetcher_amd64" ]]
+          [[ $(platform_digest "$bottle_fetcher_repo@$bottle_fetcher_index" linux/arm64) == "$bottle_fetcher_arm64" ]]
+          [[ $(platform_digest "$catalog_extractor_repo@$catalog_extractor_index" linux/amd64) == "$catalog_extractor_amd64" ]]
+          [[ $(platform_digest "$catalog_extractor_repo@$catalog_extractor_index" linux/arm64) == "$catalog_extractor_arm64" ]]
+
+          go run ./cmd/v2-bindings \
+            --catalog-extractor-ref "$catalog_extractor_repo@$catalog_extractor_index" \
+            --output "$RUNNER_TEMP/v2-bindings.json"
+          export BOTTLE_FETCHER_REF="$bottle_fetcher_repo@$bottle_fetcher_index"
+          export CATALOG_EXTRACTOR_REF
+          export TAP_POLICY_DIGEST
+          export EXECUTABLE_RUNTIME_POLICY_DIGEST
+          export SUPPORTED_CATALOG_POLICY_VERSIONS
+          export SUPPORTED_FETCH_POLICY_VERSIONS
+          export SUPPORTED_PROVENANCE_POLICY_VERSIONS
+          CATALOG_EXTRACTOR_REF=$(jq -er .catalog_extractor_ref "$RUNNER_TEMP/v2-bindings.json")
+          TAP_POLICY_DIGEST=$(jq -er .tap_policy_digest "$RUNNER_TEMP/v2-bindings.json")
+          EXECUTABLE_RUNTIME_POLICY_DIGEST=$(jq -er .executable_runtime_policy_digest "$RUNNER_TEMP/v2-bindings.json")
+          SUPPORTED_CATALOG_POLICY_VERSIONS=$(jq -er .supported_catalog_policy_versions "$RUNNER_TEMP/v2-bindings.json")
+          SUPPORTED_FETCH_POLICY_VERSIONS=$(jq -er .supported_fetch_policy_versions "$RUNNER_TEMP/v2-bindings.json")
+          SUPPORTED_PROVENANCE_POLICY_VERSIONS=$(jq -er .supported_provenance_policy_versions "$RUNNER_TEMP/v2-bindings.json")
+
+          for target in materializer-amd64 materializer-arm64; do
             digest=$(build_target "$target")
             tag=$(target_tag "$target")
             published=$(inspect_digest "$tag")
@@ -463,15 +524,10 @@ jobs:
               --current
           done
 
-          runtime_base_index=$(create_index \
-            "$runtime_base_repo" "$VERSION" \
-            "$runtime_base_amd64" "$runtime_base_arm64")
           materializer_index=$(create_index \
             "$materializer_repo" "$VERSION" \
             "$materializer_amd64" "$materializer_arm64")
 
-          [[ $(platform_digest "$runtime_base_repo@$runtime_base_index" linux/amd64) == "$runtime_base_amd64" ]]
-          [[ $(platform_digest "$runtime_base_repo@$runtime_base_index" linux/arm64) == "$runtime_base_arm64" ]]
           [[ $(platform_digest "$materializer_repo@$materializer_index" linux/amd64) == "$materializer_amd64" ]]
           [[ $(platform_digest "$materializer_repo@$materializer_index" linux/arm64) == "$materializer_arm64" ]]
 
@@ -514,12 +570,20 @@ jobs:
             --arg runtime_base_index "$runtime_base_index" \
             --arg runtime_base_amd64 "$runtime_base_amd64" \
             --arg runtime_base_arm64 "$runtime_base_arm64" \
+            --arg bottle_fetcher_repo "$bottle_fetcher_repo" \
+            --arg bottle_fetcher_index "$bottle_fetcher_index" \
+            --arg bottle_fetcher_amd64 "$bottle_fetcher_amd64" \
+            --arg bottle_fetcher_arm64 "$bottle_fetcher_arm64" \
+            --arg catalog_extractor_repo "$catalog_extractor_repo" \
+            --arg catalog_extractor_index "$catalog_extractor_index" \
+            --arg catalog_extractor_amd64 "$catalog_extractor_amd64" \
+            --arg catalog_extractor_arm64 "$catalog_extractor_arm64" \
             --arg materializer_repo "$materializer_repo" \
             --arg materializer_index "$materializer_index" \
             --arg materializer_amd64 "$materializer_amd64" \
             --arg materializer_arm64 "$materializer_arm64" \
             '{
-              schema_version: "dalec-homebrew-release-digests/v1",
+              schema_version: "dalec-homebrew-release-digests/v2",
               source: {
                 tag: $release_tag,
                 git_sha: $git_sha,
@@ -541,6 +605,22 @@ jobs:
                   platforms: {
                     "linux/amd64": $runtime_base_amd64,
                     "linux/arm64": $runtime_base_arm64
+                  }
+                },
+                "bottle-fetcher": {
+                  repository: $bottle_fetcher_repo,
+                  index: $bottle_fetcher_index,
+                  platforms: {
+                    "linux/amd64": $bottle_fetcher_amd64,
+                    "linux/arm64": $bottle_fetcher_arm64
+                  }
+                },
+                "catalog-extractor": {
+                  repository: $catalog_extractor_repo,
+                  index: $catalog_extractor_index,
+                  platforms: {
+                    "linux/amd64": $catalog_extractor_amd64,
+                    "linux/arm64": $catalog_extractor_arm64
                   }
                 },
                 materializer: {
@@ -568,7 +648,12 @@ jobs:
             fi
           }
 
+          go run ./cmd/v2-bindings \
+            --catalog-extractor-ref "$(ref catalog-extractor index)" \
+            --output "$RUNNER_TEMP/v2-bindings.json"
+
           go run ./cmd/release-manifest \
+            --schema-version v2 \
             --frontend-index "$(ref frontend index)" \
             --frontend-amd64 "$(ref frontend child linux/amd64)" \
             --frontend-arm64 "$(ref frontend child linux/arm64)" \
@@ -578,11 +663,22 @@ jobs:
             --materializer-index "$(ref materializer index)" \
             --materializer-amd64 "$(ref materializer child linux/amd64)" \
             --materializer-arm64 "$(ref materializer child linux/arm64)" \
+            --bottle-fetcher-index "$(ref bottle-fetcher index)" \
+            --bottle-fetcher-amd64 "$(ref bottle-fetcher child linux/amd64)" \
+            --bottle-fetcher-arm64 "$(ref bottle-fetcher child linux/arm64)" \
+            --catalog-extractor-index "$(ref catalog-extractor index)" \
+            --catalog-extractor-amd64 "$(ref catalog-extractor child linux/amd64)" \
+            --catalog-extractor-arm64 "$(ref catalog-extractor child linux/arm64)" \
             --homebrew-commit "$(jq -er .homebrew_commit dist/release/inputs.json)" \
             --portable-ruby-version "$(jq -er .portable_ruby_version dist/release/inputs.json)" \
             --verification-keys-digest "$(jq -er .verification_keys_digest dist/release/inputs.json)" \
             --dalec-module "$(jq -er .dalec_module dist/release/inputs.json)" \
             --buildkit-module "$(jq -er .buildkit_module dist/release/inputs.json)" \
+            --tap-policy-digest "$(jq -er .tap_policy_digest "$RUNNER_TEMP/v2-bindings.json")" \
+            --executable-runtime-policy-digest "$(jq -er .executable_runtime_policy_digest "$RUNNER_TEMP/v2-bindings.json")" \
+            --supported-catalog-policy-versions "$(jq -er .supported_catalog_policy_versions "$RUNNER_TEMP/v2-bindings.json")" \
+            --supported-fetch-policy-versions "$(jq -er .supported_fetch_policy_versions "$RUNNER_TEMP/v2-bindings.json")" \
+            --supported-provenance-policy-versions "$(jq -er .supported_provenance_policy_versions "$RUNNER_TEMP/v2-bindings.json")" \
             --output dist/release/components.json
 
           go run ./cmd/release-verify dist/release/components.json \
@@ -665,13 +761,18 @@ jobs:
 
           runtime_base_ref=$(component_ref runtime-base)
           materializer_ref=$(component_ref materializer)
-          frontend_ref=$(component_ref frontend "$PLATFORM")
+          frontend_ref=$(component_ref frontend)
           dalec_frontend_ref=$(jq -er --arg platform "$PLATFORM" '.dalec_frontend.platforms[$platform]' dist/release/inputs.json)
           dalec_frontend_route=$(jq -er .dalec_frontend.route dist/release/inputs.json)
           source_date_epoch=$(jq -er .source.source_date_epoch dist/release/digests.json)
 
           read -r -a specs <<< "$RELEASE_SPECS"
           (( ${#specs[@]} > 0 ))
+          read -r -a amd64_only_specs <<< "$RELEASE_AMD64_ONLY_SPECS"
+          (( ${#amd64_only_specs[@]} > 0 ))
+          if [[ "$PLATFORM" == linux/amd64 ]]; then
+            specs+=("${amd64_only_specs[@]}")
+          fi
           mkdir -p runtime-evidence
           for spec in "${specs[@]}"; do
             final_image="dalec-homebrew-live:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${PLATFORM_SLUG}-${spec}"
@@ -740,6 +841,18 @@ jobs:
           - component: runtime-base
             platform: linux/arm64
             slug: runtime-base-linux-arm64
+          - component: bottle-fetcher
+            platform: linux/amd64
+            slug: bottle-fetcher-linux-amd64
+          - component: bottle-fetcher
+            platform: linux/arm64
+            slug: bottle-fetcher-linux-arm64
+          - component: catalog-extractor
+            platform: linux/amd64
+            slug: catalog-extractor-linux-amd64
+          - component: catalog-extractor
+            platform: linux/arm64
+            slug: catalog-extractor-linux-arm64
           - component: materializer
             platform: linux/amd64
             slug: materializer-linux-amd64
@@ -986,11 +1099,13 @@ jobs:
           set -euo pipefail
           read -r -a specs <<< "$RELEASE_SPECS"
           (( ${#specs[@]} > 0 ))
+          read -r -a amd64_only_specs <<< "$RELEASE_AMD64_ONLY_SPECS"
+          (( ${#amd64_only_specs[@]} > 0 ))
           runtime_evidence_dir=dist/release
           [[ -d dist/release/runtime-evidence ]] && runtime_evidence_dir=dist/release/runtime-evidence
 
-          extract_resolution() {
-            python3 - "$1" "$2" <<'PYARCHIVE'
+          extract_evidence_json() {
+            python3 - "$1" "$2" "$3" <<'PYARCHIVE'
           import json
           import os
           from pathlib import Path
@@ -1004,9 +1119,15 @@ jobs:
           max_archive_bytes = int(os.environ["MAX_RELEASE_ASSET_BYTES"])
           max_expanded_bytes = int(os.environ["MAX_RUNTIME_EVIDENCE_EXPANDED_BYTES"])
           max_members = 100_000
-          max_resolution_bytes = 16 << 20
+          max_document_bytes = 16 << 20
+          if len(sys.argv) not in {3, 4}:
+              raise SystemExit("runtime evidence extraction requires archive, output, and optional member arguments")
           archive_path = Path(sys.argv[1])
           output_path = Path(sys.argv[2])
+          member_name = sys.argv[3] if len(sys.argv) == 4 else "resolution.json"
+          if member_name not in {"resolution.json", "materialization-v2.json"}:
+              raise SystemExit(f"unsupported runtime evidence member {member_name!r}")
+          expected_path = "./" + member_name
           if sys.platform == "linux":
               memory_limit = 512 << 20
               resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
@@ -1119,7 +1240,7 @@ jobs:
               archive_size = archive_path.stat().st_size
               if archive_size <= 0 or archive_size > max_archive_bytes:
                   raise ValueError(f"archive size {archive_size} is outside the allowed range")
-              resolution = None
+              document_data = None
               member_count = 0
               total_size = 0
               with tempfile.TemporaryFile() as uncompressed:
@@ -1176,87 +1297,36 @@ jobs:
                       total_size += size
                       if total_size > max_expanded_bytes:
                           raise ValueError("archive expansion exceeds the limit")
-                      if normalized == "resolution.json":
-                          if path != "./resolution.json" or not is_regular:
-                              raise ValueError(f"archive uses noncanonical resolution path {path!r}")
-                          if resolution is not None:
-                              raise ValueError("archive contains duplicate ./resolution.json members")
-                          if size <= 0 or size > max_resolution_bytes:
-                              raise ValueError("archive resolution.json is not a bounded regular file")
-                          resolution = read_exact(uncompressed, size)
+                      if normalized == member_name:
+                          if path != expected_path or not is_regular:
+                              raise ValueError(f"archive uses noncanonical {member_name} path {path!r}")
+                          if document_data is not None:
+                              raise ValueError(f"archive contains duplicate {expected_path} members")
+                          if size <= 0 or size > max_document_bytes:
+                              raise ValueError(f"archive {member_name} is not a bounded regular file")
+                          document_data = read_exact(uncompressed, size)
                       else:
                           skip_exact(uncompressed, size)
                       padding = (-size) % 512
                       if padding and any(read_exact(uncompressed, padding)):
                           raise ValueError("archive member padding is nonzero")
-              if resolution is None:
-                  raise ValueError("archive is missing ./resolution.json")
+              if document_data is None:
+                  raise ValueError(f"archive is missing {expected_path}")
               json.loads(
-                  resolution.decode("utf-8"),
+                  document_data.decode("utf-8"),
                   object_pairs_hook=unique_object,
                   parse_constant=reject_constant,
               )
-              output_path.write_bytes(resolution)
+              output_path.write_bytes(document_data)
           except (EOFError, MemoryError, OSError, UnicodeError, ValueError, zlib.error) as exc:
               raise SystemExit(f"{archive_path}: invalid runtime evidence: {exc}")
           PYARCHIVE
           }
 
-          verify_resolution_epoch() {
-            python3 - "$1" <<'PYEPOCH'
-          from datetime import datetime
-          import json
-          import sys
-
-          with open(sys.argv[1], encoding="utf-8") as source:
-              record = json.load(source)
-          generated_at = record["metadata"]["generated_at"]
-          parsed = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
-          if parsed.tzinfo is None:
-              raise SystemExit("resolution metadata generated_at has no timezone")
-          if record["source_date_epoch"] != int(parsed.timestamp()):
-              raise SystemExit("resolution source_date_epoch does not match metadata generated_at")
-          PYEPOCH
-          }
-
-          metadata_filter='
-            def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
-            def allowed_metadata_keys: [
-              "digest", "fetched_at", "formula_digest", "formula_envelope_digest",
-              "formula_freshness_source", "formula_signatures", "formula_url",
-              "generated_at", "migration_digest", "migration_envelope_digest",
-              "migration_freshness_source", "migration_signatures", "migration_url",
-              "signatures"
-            ];
-            if .schema_version != "dalec-homebrew-resolution/v1" then
-              error("unexpected resolution schema")
-            elif (.metadata | type) != "object" then
-              error("resolution metadata is missing")
-            elif ((.metadata | keys) - allowed_metadata_keys | length) != 0 then
-              error("resolution metadata has unknown fields")
-            elif ([.metadata.digest, .metadata.formula_digest, .metadata.migration_digest, .metadata.formula_envelope_digest, .metadata.migration_envelope_digest] | all(sha256)) | not then
-              error("resolution metadata digests are missing or invalid")
-            elif (.metadata.generated_at | type) != "string" or (.metadata.generated_at | length) == 0 then
-              error("resolution metadata generated_at is missing")
-            elif (.metadata.fetched_at | type) != "string" or (.metadata.fetched_at | length) == 0 then
-              error("resolution metadata fetched_at is missing")
-            elif ([.metadata.formula_freshness_source, .metadata.migration_freshness_source] | all(. == "signed-payload" or . == "http-last-modified")) | not then
-              error("resolution metadata freshness source is invalid")
-            elif (.metadata.formula_url | type) != "string" or (.metadata.formula_url | length) == 0 then
-              error("resolution Formula URL is missing")
-            elif (.metadata.migration_url | type) != "string" or (.metadata.migration_url | length) == 0 then
-              error("resolution migration URL is missing")
-            elif ([.metadata.signatures, .metadata.formula_signatures, .metadata.migration_signatures] | all(. == null or type == "array")) | not then
-              error("resolution metadata signatures are malformed")
-            else
-              {metadata: (.metadata | del(.fetched_at, .signatures, .formula_signatures, .migration_signatures))}
-            end
-          '
-
           # jq variables are intentionally literal in the single-quoted filter.
           # shellcheck disable=SC2016
           resolution_binding_filter='
-            .schema_version == "dalec-homebrew-resolution/v1" and
+            .schema_version == "dalec-homebrew-resolution/v2" and
             .input.platform.os == ($platform | split("/")[0]) and
             .input.platform.architecture == ($platform | split("/")[1]) and
             (((.input.platform | keys) == ["architecture", "os"]) or
@@ -1264,63 +1334,273 @@ jobs:
               ((.input.platform.variant | type) == "string") and
               .input.platform.variant == "")) and
             .policy_version == $manifest[0].policy_version and
+            .components.frontend_index_ref == $frontend_index and
             .components.frontend_ref == $frontend and
             .components.runtime_base_ref == $runtime_base and
             .components.materializer_ref == $materializer and
+            .components.bottle_fetcher_ref == $bottle_fetcher and
+            .components.catalog_extractor_ref == $catalog_extractor and
+            .components.catalog_service_origin == "" and
+            .components.ingestion_jws_key_policy_digest == "" and
+            .components.tap_policy_digest == $manifest[0].tap_policy_digest and
+            .components.executable_runtime_policy_digest == $manifest[0].executable_runtime_policy_digest and
             .components.homebrew_commit == $inputs[0].homebrew_commit and
             .components.ruby_runtime == $inputs[0].portable_ruby_version and
             .components.verification_keys_digest == $inputs[0].verification_keys_digest and
             .components.dalec_module == $inputs[0].dalec_module and
-            .components.buildkit_module == $inputs[0].buildkit_module
+            .components.buildkit_module == $inputs[0].buildkit_module and
+            .components.supported_catalog_policy_versions == $manifest[0].supported_catalog_policy_versions and
+            .components.supported_fetch_policy_versions == $manifest[0].supported_fetch_policy_versions and
+            .components.supported_provenance_policy_versions == $manifest[0].supported_provenance_policy_versions
           '
 
+          evidence_inventory=()
           for spec in "${specs[@]}"; do
             for platform in linux/amd64 linux/arm64; do
+              evidence_inventory+=("$spec" "$platform" common)
+            done
+          done
+          for spec in "${amd64_only_specs[@]}"; do
+            evidence_inventory+=("$spec" linux/amd64 amd64-only)
+          done
+
+          metadata_args=()
+          for ((i = 0; i < ${#evidence_inventory[@]}; i += 3)); do
+              spec=${evidence_inventory[i]}
+              platform=${evidence_inventory[i + 1]}
+              scope=${evidence_inventory[i + 2]}
               platform_slug=${platform//\//-}
               archive="$runtime_evidence_dir/runtime-evidence-${platform_slug}-${spec}.tar.gz"
               if [[ ! -s "$archive" ]]; then
                 echo "missing or empty runtime evidence archive: $archive" >&2
                 exit 1
               fi
+              frontend_index_ref=$(jq -er '.components.frontend.repository + "@" + .components.frontend.index' dist/release/digests.json)
               frontend_ref=$(jq -er --arg platform "$platform" '.components.frontend.repository + "@" + .components.frontend.platforms[$platform]' dist/release/digests.json)
-              runtime_base_ref=$(jq -er '.components["runtime-base"].repository + "@" + .components["runtime-base"].index' dist/release/digests.json)
-              materializer_ref=$(jq -er '.components.materializer.repository + "@" + .components.materializer.index' dist/release/digests.json)
+              runtime_base_ref=$(jq -er --arg platform "$platform" '.components["runtime-base"].repository + "@" + .components["runtime-base"].platforms[$platform]' dist/release/digests.json)
+              materializer_ref=$(jq -er --arg platform "$platform" '.components.materializer.repository + "@" + .components.materializer.platforms[$platform]' dist/release/digests.json)
+              bottle_fetcher_ref=$(jq -er '.components["bottle-fetcher"].repository + "@" + .components["bottle-fetcher"].index' dist/release/digests.json)
+              catalog_extractor_ref=$(jq -er '.components["catalog-extractor"].repository + "@" + .components["catalog-extractor"].index' dist/release/digests.json)
               resolution="$RUNNER_TEMP/${spec}-${platform_slug}-resolution.json"
-              extract_resolution "$archive" "$resolution"
+              extract_evidence_json "$archive" "$resolution" resolution.json
               if ! jq -e \
                 --arg platform "$platform" \
+                --arg frontend_index "$frontend_index_ref" \
                 --arg frontend "$frontend_ref" \
                 --arg runtime_base "$runtime_base_ref" \
                 --arg materializer "$materializer_ref" \
+                --arg bottle_fetcher "$bottle_fetcher_ref" \
+                --arg catalog_extractor "$catalog_extractor_ref" \
                 --slurpfile manifest dist/release/components.json \
                 --slurpfile inputs dist/release/inputs.json \
                 "$resolution_binding_filter" "$resolution" >/dev/null; then
-                echo "runtime evidence binding mismatch for $spec on $platform: expected the frontend child and runtime-base/materializer indexes" >&2
+                echo "runtime evidence binding mismatch for $spec on $platform: expected the complete V2 platform tuple" >&2
                 exit 1
               fi
-              verify_resolution_epoch "$resolution"
-              jq -S -e "$metadata_filter" "$resolution" \
-                > "$RUNNER_TEMP/${spec}-${platform_slug#linux-}-metadata.json"
-            done
-            diff -u \
-              "$RUNNER_TEMP/${spec}-amd64-metadata.json" \
-              "$RUNNER_TEMP/${spec}-arm64-metadata.json"
+              if [[ "$scope" == amd64-only ]]; then
+                if ! jq -e --arg catalog_extractor "$catalog_extractor_ref" '
+                  .schema_version == "dalec-homebrew-resolution/v2" and
+                  ([.metadata_sources[] | select(
+                    .tap == "svt/avtools" and
+                    .catalog_policy_version == "tap-catalog-v1" and
+                    .extraction.policy_version == "build-local-tap-extraction-v1" and
+                    .extraction.extractor_ref == $catalog_extractor
+                  )] | length) == 1 and
+                  ([.nodes[] | select(
+                    .id == "svt/avtools/libdf" and
+                    .bottle.transport.oci == null and
+                    .bottle.transport.https.fetch_policy_version == "homebrew-bottle-fetch-v1"
+                  )] | length) == 1
+                ' "$resolution" >/dev/null; then
+                  echo "runtime evidence for $spec on $platform does not prove published catalog extractor execution" >&2
+                  exit 1
+                fi
+                materialization="$RUNNER_TEMP/${spec}-${platform_slug}-materialization-v2.json"
+                extract_evidence_json "$archive" "$materialization" materialization-v2.json
+                if ! jq -e '
+                  .schema_version == "dalec-homebrew-materialization/v2" and
+                  .preparation.schema_version == "dalec-homebrew-preparation/v2" and
+                  ([.preparation.fetch_evidence[] | select(
+                    .artifact_id == "svt/avtools/libdf" and
+                    .schema_version == "bottle-fetch-evidence/v1" and
+                    .fetch_policy_version == "homebrew-bottle-fetch-v1"
+                  )] | length) == 1
+                ' "$materialization" >/dev/null; then
+                  echo "runtime evidence for $spec on $platform does not prove published bottle fetcher execution" >&2
+                  exit 1
+                fi
+              fi
+              metadata_args+=("$spec" "$platform" "$resolution")
           done
 
-          reference="$RUNNER_TEMP/${specs[0]}-amd64-metadata.json"
-          for spec in "${specs[@]:1}"; do
-            diff -u "$reference" "$RUNNER_TEMP/${spec}-amd64-metadata.json"
-          done
           candidate="$RUNNER_TEMP/metadata-snapshot-candidate.json"
-          jq -n \
-            --arg release_tag "$RELEASE_TAG" \
-            --arg release_sha "$RELEASE_SHA" \
-            --slurpfile snapshot "$reference" \
-            '{
-              schema_version: "dalec-homebrew-release-metadata/v1",
-              release: {tag: $release_tag, sha: $release_sha},
-              accepted_snapshot: $snapshot[0].metadata
-            }' > "$candidate"
+          python3 - "$candidate" "$RELEASE_TAG" "$RELEASE_SHA" dist/release/inputs.json "${metadata_args[@]}" <<'PYMETADATA'
+          from datetime import datetime
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          output_path = Path(sys.argv[1])
+          release_tag = sys.argv[2]
+          release_sha = sys.argv[3]
+          inputs_path = Path(sys.argv[4])
+          arguments = sys.argv[5:]
+          if not arguments or len(arguments) % 3:
+              raise SystemExit("metadata reconciliation requires spec/platform/resolution triples")
+
+          digest_pattern = re.compile(r"sha256:[0-9a-f]{64}")
+          time_pattern = re.compile(
+              r"([0-9]{4})-([0-9]{2})-([0-9]{2})T"
+              r"([0-9]{2}):([0-9]{2}):([0-9]{2})"
+              r"(?:\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})"
+          )
+
+          def exact_keys(value, expected, label):
+              if not isinstance(value, dict) or set(value) != set(expected):
+                  raise ValueError(f"{label} has unexpected fields")
+
+          def timestamp(value, label):
+              if not isinstance(value, str) or time_pattern.fullmatch(value) is None:
+                  raise ValueError(f"{label} is not RFC3339")
+              try:
+                  parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+              except ValueError as exc:
+                  raise ValueError(f"{label} is invalid: {exc}") from exc
+              if parsed.tzinfo is None:
+                  raise ValueError(f"{label} has no timezone")
+              return parsed
+
+          def require_digest(value, label):
+              if not isinstance(value, str) or digest_pattern.fullmatch(value) is None:
+                  raise ValueError(f"{label} is not a sha256 digest")
+
+          try:
+              with inputs_path.open(encoding="utf-8") as source:
+                  release_inputs = json.load(source)
+              pinned_homebrew_commit = release_inputs["homebrew_commit"]
+              if not isinstance(pinned_homebrew_commit, str) or re.fullmatch(r"[0-9a-f]{40}", pinned_homebrew_commit) is None:
+                  raise ValueError("release input Homebrew commit is invalid")
+          except (KeyError, OSError, TypeError, ValueError) as exc:
+              raise SystemExit(f"{inputs_path}: invalid release inputs: {exc}")
+
+          observations = []
+          reference_identity = None
+          seen = set()
+          for index in range(0, len(arguments), 3):
+              spec, platform, raw_path = arguments[index:index + 3]
+              key = (spec, platform)
+              if key in seen:
+                  raise SystemExit(f"duplicate metadata observation for {spec} on {platform}")
+              seen.add(key)
+              try:
+                  with Path(raw_path).open(encoding="utf-8") as source:
+                      record = json.load(source)
+                  if record.get("schema_version") != "dalec-homebrew-resolution/v2":
+                      raise ValueError("unexpected resolution schema")
+                  sources = record.get("metadata_sources")
+                  if not isinstance(sources, list) or not sources:
+                      raise ValueError("metadata_sources is not a nonempty array")
+                  core_sources = [item for item in sources if isinstance(item, dict) and item.get("tap") == "homebrew/core"]
+                  if len(core_sources) != 1:
+                      raise ValueError("resolution must contain exactly one homebrew/core metadata source")
+                  core = core_sources[0]
+                  exact_keys(
+                      core,
+                      ("tap", "commit", "signer", "documents", "generated_at", "generated_at_source", "fetched_at", "sequence", "rollback"),
+                      "homebrew/core metadata source",
+                  )
+                  if not isinstance(core["commit"], str) or re.fullmatch(r"[0-9a-f]{40}", core["commit"]) is None:
+                      raise ValueError("homebrew/core commit is invalid")
+                  if core["commit"] != pinned_homebrew_commit:
+                      raise ValueError("homebrew/core commit does not match release input")
+                  exact_keys(core["signer"], ("key_id", "algorithm", "verified"), "homebrew/core signer")
+                  if not core["signer"]["key_id"] or core["signer"]["algorithm"] != "PS512" or core["signer"]["verified"] is not True:
+                      raise ValueError("homebrew/core signer is invalid")
+                  documents = core["documents"]
+                  if not isinstance(documents, list) or len(documents) != 2:
+                      raise ValueError("homebrew/core documents must contain exactly formula and migrations")
+                  by_name = {}
+                  for document in documents:
+                      exact_keys(document, ("name", "digest", "envelope_digest"), "homebrew/core document")
+                      name = document["name"]
+                      if name in by_name:
+                          raise ValueError(f"duplicate homebrew/core document {name!r}")
+                      require_digest(document["digest"], f"{name} digest")
+                      require_digest(document["envelope_digest"], f"{name} envelope digest")
+                      by_name[name] = document
+                  if set(by_name) != {"formula", "migrations"}:
+                      raise ValueError("homebrew/core documents must contain exactly formula and migrations")
+                  exact_keys(core["rollback"], ("policy", "sequence_floor", "state_digest"), "homebrew/core rollback")
+                  if core["rollback"]["policy"] != "homebrew-core-generated-at-v1":
+                      raise ValueError("homebrew/core rollback policy is invalid")
+                  if isinstance(core["rollback"]["sequence_floor"], bool) or not isinstance(core["rollback"]["sequence_floor"], int) or core["rollback"]["sequence_floor"] < 0:
+                      raise ValueError("homebrew/core rollback floor is invalid")
+                  require_digest(core["rollback"]["state_digest"], "homebrew/core state digest")
+                  if core["generated_at_source"] not in {"signed-payload", "http-last-modified"}:
+                      raise ValueError("homebrew/core generated_at_source is invalid")
+                  generated = timestamp(core["generated_at"], "homebrew/core generated_at")
+                  fetched = timestamp(core["fetched_at"], "homebrew/core fetched_at")
+                  if fetched < generated:
+                      raise ValueError("homebrew/core fetched_at precedes generated_at")
+                  core_epoch = int(generated.timestamp())
+                  if isinstance(core["sequence"], bool) or core["sequence"] != core_epoch:
+                      raise ValueError("homebrew/core sequence does not match generated_at")
+
+                  source_epochs = []
+                  for source_index, metadata_source in enumerate(sources):
+                      if not isinstance(metadata_source, dict):
+                          raise ValueError(f"metadata_sources[{source_index}] is not an object")
+                      source_generated = timestamp(metadata_source.get("generated_at"), f"metadata_sources[{source_index}].generated_at")
+                      source_fetched = timestamp(metadata_source.get("fetched_at"), f"metadata_sources[{source_index}].fetched_at")
+                      if source_fetched < source_generated:
+                          raise ValueError(f"metadata_sources[{source_index}].fetched_at precedes generated_at")
+                      source_epochs.append(int(source_generated.timestamp()))
+                  resolution_epoch = record.get("source_date_epoch")
+                  if isinstance(resolution_epoch, bool) or not isinstance(resolution_epoch, int) or resolution_epoch != min(source_epochs):
+                      raise ValueError("resolution source_date_epoch does not match the earliest metadata source")
+
+                  identity = {
+                      "digest": core["rollback"]["state_digest"],
+                      "homebrew_commit": core["commit"],
+                      "signer": core["signer"],
+                      "formula_digest": by_name["formula"]["digest"],
+                      "formula_envelope_digest": by_name["formula"]["envelope_digest"],
+                      "migration_digest": by_name["migrations"]["digest"],
+                      "migration_envelope_digest": by_name["migrations"]["envelope_digest"],
+                      "generated_at_source": core["generated_at_source"],
+                      "rollback_policy": core["rollback"]["policy"],
+                      "rollback_sequence_floor": core["rollback"]["sequence_floor"],
+                  }
+                  if reference_identity is None:
+                      reference_identity = identity
+                  elif identity != reference_identity:
+                      raise ValueError("authenticated homebrew/core metadata identity differs across release integrations")
+                  observations.append({
+                      "spec": spec,
+                      "platform": platform,
+                      "generated_at": core["generated_at"],
+                      "core_generated_at_epoch": core_epoch,
+                      "resolution_source_date_epoch": resolution_epoch,
+                  })
+              except (KeyError, OSError, TypeError, ValueError) as exc:
+                  raise SystemExit(f"{raw_path}: invalid release metadata evidence: {exc}")
+
+          generated_values = {item["generated_at"] for item in observations}
+          if len(generated_values) != 1 and reference_identity["generated_at_source"] != "http-last-modified":
+              raise SystemExit("signed homebrew/core generated_at differs across release integrations")
+          accepted = min(observations, key=lambda item: (item["core_generated_at_epoch"], item["generated_at"]))
+          snapshot = dict(reference_identity)
+          snapshot["generated_at"] = accepted["generated_at"]
+          snapshot["source_date_epoch"] = accepted["core_generated_at_epoch"]
+          document = {
+              "schema_version": "dalec-homebrew-release-metadata/v2",
+              "release": {"tag": release_tag, "sha": release_sha},
+              "accepted_snapshot": snapshot,
+              "observations": observations,
+          }
+          output_path.write_text(json.dumps(document, ensure_ascii=False, allow_nan=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PYMETADATA
           if [[ -e dist/release/metadata-snapshot.json ]]; then
             diff -u dist/release/metadata-snapshot.json "$candidate"
           else
@@ -1333,7 +1613,7 @@ jobs:
           evidence_dir=dist/release
           [[ -d dist/release/evidence ]] && evidence_dir=dist/release/evidence
           report_args=()
-          for component in frontend runtime-base materializer; do
+          for component in frontend runtime-base bottle-fetcher catalog-extractor materializer; do
             for platform in linux/amd64 linux/arm64; do
               slug=${platform//\//-}
               report="$evidence_dir/vulnerability-${component}-${slug}.json"
@@ -1576,16 +1856,20 @@ jobs:
             --arg sha "$RELEASE_SHA" \
             --arg frontend "$REGISTRY_NAMESPACE/dalec-homebrew" \
             --arg runtime_base "$REGISTRY_NAMESPACE/dalec-homebrew-runtime-base" \
+            --arg bottle_fetcher "$REGISTRY_NAMESPACE/dalec-homebrew-bottle-fetcher" \
+            --arg catalog_extractor "$REGISTRY_NAMESPACE/dalec-homebrew-catalog-extractor" \
             --arg materializer "$REGISTRY_NAMESPACE/dalec-homebrew-materializer" \
             --slurpfile inputs dist/release/inputs.json '
             def digest: type == "string" and test("^sha256:[0-9a-f]{64}$");
-            .schema_version == "dalec-homebrew-release-digests/v1" and
+            .schema_version == "dalec-homebrew-release-digests/v2" and
             .source.tag == $tag and
             .source.git_sha == $sha and
             .source.source_date_epoch == $inputs[0].source_date_epoch and
-            (.components | keys) == ["frontend", "materializer", "runtime-base"] and
+            (.components | keys) == ["bottle-fetcher", "catalog-extractor", "frontend", "materializer", "runtime-base"] and
             .components.frontend.repository == $frontend and
             .components["runtime-base"].repository == $runtime_base and
+            .components["bottle-fetcher"].repository == $bottle_fetcher and
+            .components["catalog-extractor"].repository == $catalog_extractor and
             .components.materializer.repository == $materializer and
             all(.components[];
               (.index | digest) and
@@ -1616,7 +1900,7 @@ jobs:
                   | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))
                 '
           }
-          for component in frontend runtime-base materializer; do
+          for component in frontend runtime-base bottle-fetcher catalog-extractor materializer; do
             repository=$(jq -er --arg component "$component" '.components[$component].repository' dist/release/digests.json)
             index=$(jq -er --arg component "$component" '.components[$component].index' dist/release/digests.json)
             for platform in linux/amd64 linux/arm64; do
@@ -1667,6 +1951,11 @@ jobs:
                   raise ValueError(f"{label} is not a string")
               return value
 
+          def canonical_string_list(value, label):
+              if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                  raise ValueError(f"{label} is not a string array")
+              return sorted(value)
+
           def canonical_platform_ref(value):
               exact_keys(value, ("platform", "ref"), "platform reference")
               platform = value["platform"]
@@ -1709,8 +1998,12 @@ jobs:
           )
           top_keys = (
               "schema_version", "policy_version", "frontend", "runtime_base",
-              "materializer", "homebrew_commit", "portable_ruby_version",
+              "materializer", "bottle_fetcher", "catalog_extractor",
+              "homebrew_commit", "portable_ruby_version",
               "verification_keys_digest", "dalec_module", "buildkit_module",
+              "tap_policy_digest", "executable_runtime_policy_digest",
+              "supported_catalog_policy_versions", "supported_fetch_policy_versions",
+              "supported_provenance_policy_versions",
           )
           exact_keys(manifest, top_keys, "component manifest")
           canonical_manifest = {
@@ -1719,11 +2012,18 @@ jobs:
               "frontend": canonical_component(manifest["frontend"], "frontend"),
               "runtime_base": canonical_component(manifest["runtime_base"], "runtime_base"),
               "materializer": canonical_component(manifest["materializer"], "materializer"),
+              "bottle_fetcher": canonical_component(manifest["bottle_fetcher"], "bottle_fetcher"),
+              "catalog_extractor": canonical_component(manifest["catalog_extractor"], "catalog_extractor"),
               "homebrew_commit": require_string(manifest["homebrew_commit"], "homebrew_commit"),
               "portable_ruby_version": require_string(manifest["portable_ruby_version"], "portable_ruby_version"),
               "verification_keys_digest": require_string(manifest["verification_keys_digest"], "verification_keys_digest"),
               "dalec_module": require_string(manifest["dalec_module"], "dalec_module"),
               "buildkit_module": require_string(manifest["buildkit_module"], "buildkit_module"),
+              "tap_policy_digest": require_string(manifest["tap_policy_digest"], "tap_policy_digest"),
+              "executable_runtime_policy_digest": require_string(manifest["executable_runtime_policy_digest"], "executable_runtime_policy_digest"),
+              "supported_catalog_policy_versions": canonical_string_list(manifest["supported_catalog_policy_versions"], "supported_catalog_policy_versions"),
+              "supported_fetch_policy_versions": canonical_string_list(manifest["supported_fetch_policy_versions"], "supported_fetch_policy_versions"),
+              "supported_provenance_policy_versions": canonical_string_list(manifest["supported_provenance_policy_versions"], "supported_provenance_policy_versions"),
           }
           canonical_text = json.dumps(
               canonical_manifest,
@@ -1754,62 +2054,120 @@ jobs:
                   (.platform.variant // "") == "" and
                   .ref == ($component.repository + "@" +
                     $component.platforms["linux/" + .platform.architecture]));
-            .schema_version == "dalec-homebrew-components/v1" and
-            .policy_version == "homebrew-runtime-v1" and
+            .schema_version == "dalec-homebrew-components/v2" and
+            .policy_version == "homebrew-runtime-v2" and
             component_matches(.frontend; "frontend") and
             component_matches(.runtime_base; "runtime-base") and
             component_matches(.materializer; "materializer") and
+            component_matches(.bottle_fetcher; "bottle-fetcher") and
+            component_matches(.catalog_extractor; "catalog-extractor") and
             .homebrew_commit == $inputs[0].homebrew_commit and
             .portable_ruby_version == $inputs[0].portable_ruby_version and
             .verification_keys_digest == $inputs[0].verification_keys_digest and
             .dalec_module == $inputs[0].dalec_module and
-            .buildkit_module == $inputs[0].buildkit_module
+            .buildkit_module == $inputs[0].buildkit_module and
+            .tap_policy_digest == "sha256:9f5b47c9d241dc16464dd81c350fc6c7755fa35c992bc821e6c3927573a3f217" and
+            .executable_runtime_policy_digest == "sha256:dffdd27124b8337839e196dd98dbec93717b4694be1564fd9afd7684baf05d48" and
+            .supported_catalog_policy_versions == ["tap-catalog-v1"] and
+            .supported_fetch_policy_versions == ["homebrew-bottle-fetch-v1"] and
+            .supported_provenance_policy_versions == [
+              "homebrew-jws-and-verified-oci-chain-v1",
+              "https-bottle-embedded-formula-digest-only-v1",
+              "prebuilt-archive-buildkit-and-verified-checksum-v1",
+              "sigstore-in-toto-v1",
+              "tap-catalog-buildkit-and-verified-checksum-v1"
+            ]
           ' dist/release/components.json >/dev/null
 
-          jq -e --arg tag "$RELEASE_TAG" --arg sha "$RELEASE_SHA" '
+          jq -e \
+            --arg tag "$RELEASE_TAG" \
+            --arg sha "$RELEASE_SHA" \
+            --slurpfile inputs dist/release/inputs.json '
             def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
-            .schema_version == "dalec-homebrew-release-metadata/v1" and
+            (keys == ["accepted_snapshot", "observations", "release", "schema_version"]) and
+            .schema_version == "dalec-homebrew-release-metadata/v2" and
+            (.release | keys) == ["sha", "tag"] and
             .release.tag == $tag and
             .release.sha == $sha and
-            (.accepted_snapshot | type) == "object" and
+            (.accepted_snapshot | keys) == [
+              "digest", "formula_digest", "formula_envelope_digest", "generated_at",
+              "generated_at_source", "homebrew_commit", "migration_digest",
+              "migration_envelope_digest", "rollback_policy", "rollback_sequence_floor",
+              "signer", "source_date_epoch"
+            ] and
             ([.accepted_snapshot.digest,
               .accepted_snapshot.formula_digest,
               .accepted_snapshot.migration_digest,
               .accepted_snapshot.formula_envelope_digest,
               .accepted_snapshot.migration_envelope_digest] | all(sha256)) and
+            .accepted_snapshot.homebrew_commit == $inputs[0].homebrew_commit and
             (.accepted_snapshot.generated_at | type == "string" and length > 0) and
-            ([.accepted_snapshot.formula_freshness_source,
-              .accepted_snapshot.migration_freshness_source] |
-              all(. == "signed-payload" or . == "http-last-modified")) and
-            (.accepted_snapshot.formula_url | type == "string" and length > 0) and
-            (.accepted_snapshot.migration_url | type == "string" and length > 0)
+            (.accepted_snapshot.generated_at_source == "signed-payload" or
+              .accepted_snapshot.generated_at_source == "http-last-modified") and
+            .accepted_snapshot.rollback_policy == "homebrew-core-generated-at-v1" and
+            (.accepted_snapshot.rollback_sequence_floor | type == "number" and . >= 0 and . == floor) and
+            (.accepted_snapshot.source_date_epoch | type == "number" and . > 0 and . == floor) and
+            (.accepted_snapshot.signer | keys) == ["algorithm", "key_id", "verified"] and
+            (.accepted_snapshot.signer.key_id | type == "string" and length > 0) and
+            .accepted_snapshot.signer.algorithm == "PS512" and
+            .accepted_snapshot.signer.verified == true and
+            (.observations | type == "array" and length > 0) and
+            all(.observations[];
+              (keys == ["core_generated_at_epoch", "generated_at", "platform", "resolution_source_date_epoch", "spec"]) and
+              (.spec | type == "string" and length > 0) and
+              (.platform == "linux/amd64" or .platform == "linux/arm64") and
+              (.generated_at | type == "string" and length > 0) and
+              (.core_generated_at_epoch | type == "number" and . > 0 and . == floor) and
+              (.resolution_source_date_epoch | type == "number" and . > 0 and . == floor))
           ' dist/release/metadata-snapshot.json >/dev/null
           python3 - dist/release/metadata-snapshot.json <<'PYTIME'
           from datetime import datetime
           import json
+          import os
           import re
           import sys
 
           with open(sys.argv[1], encoding="utf-8") as source:
               document = json.load(source)
-          value = document["accepted_snapshot"]["generated_at"]
-          if not isinstance(value, str):
-              raise SystemExit("metadata generated_at is not a string")
-          match = re.fullmatch(
+          pattern = re.compile(
               r"([0-9]{4})-([0-9]{2})-([0-9]{2})T"
               r"([0-9]{2}):([0-9]{2}):([0-9]{2})"
-              r"(?:\.[0-9]+)?(Z|[+-]([0-9]{2}):([0-9]{2}))",
-              value,
+              r"(?:\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})"
           )
-          if match is None:
-              raise SystemExit("metadata generated_at is not RFC3339")
-          year, month, day, hour, minute, second = map(int, match.groups()[:6])
-          if hour > 23 or minute > 59 or second > 59:
-              raise SystemExit("metadata generated_at has an invalid time")
-          datetime(year, month, day, hour, minute, second)
-          if match.group(7) != "Z":
-              if int(match.group(8)) > 23 or int(match.group(9)) > 59:
-                  raise SystemExit("metadata generated_at has an invalid offset")
+
+          def epoch(value, label):
+              if not isinstance(value, str) or pattern.fullmatch(value) is None:
+                  raise SystemExit(f"{label} is not RFC3339")
+              try:
+                  parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+              except ValueError as exc:
+                  raise SystemExit(f"{label} is invalid: {exc}") from exc
+              if parsed.tzinfo is None:
+                  raise SystemExit(f"{label} has no timezone")
+              return int(parsed.timestamp())
+
+          expected_specs = os.environ["RELEASE_SPECS"].split()
+          expected = [(spec, platform) for spec in expected_specs for platform in ("linux/amd64", "linux/arm64")]
+          expected.extend(
+              (spec, "linux/amd64")
+              for spec in os.environ["RELEASE_AMD64_ONLY_SPECS"].split()
+          )
+          observations = document["observations"]
+          actual = [(item["spec"], item["platform"]) for item in observations]
+          if actual != expected or len(actual) != len(set(actual)):
+              raise SystemExit("metadata observations do not exactly match the release spec/platform inventory")
+          for item in observations:
+              observed_epoch = epoch(item["generated_at"], "metadata observation generated_at")
+              if observed_epoch != item["core_generated_at_epoch"]:
+                  raise SystemExit("metadata observation epoch does not match generated_at")
+          accepted = document["accepted_snapshot"]
+          accepted_epoch = epoch(accepted["generated_at"], "accepted metadata generated_at")
+          earliest = min(observations, key=lambda item: (item["core_generated_at_epoch"], item["generated_at"]))
+          if accepted["generated_at"] != earliest["generated_at"] or accepted["source_date_epoch"] != accepted_epoch or accepted_epoch != earliest["core_generated_at_epoch"]:
+              raise SystemExit("accepted metadata timestamp is not the earliest observed core timestamp")
+          observed_values = {item["generated_at"] for item in observations}
+          if len(observed_values) != 1 and accepted["generated_at_source"] != "http-last-modified":
+              raise SystemExit("signed metadata generated_at differs across release integrations")
           PYTIME
           jq -e \
             --arg repository "$GITHUB_REPOSITORY" \
@@ -1996,7 +2354,7 @@ jobs:
             rm -f "$errors_file"
             return 1
           }
-          for component in runtime-base materializer frontend; do
+          for component in runtime-base bottle-fetcher catalog-extractor materializer frontend; do
             repository=$(jq -er --arg component "$component" '.components[$component].repository' dist/release/digests.json)
             digest=$(jq -er --arg component "$component" '.components[$component].index' dist/release/digests.json)
             if existing=$(read_registry_digest "$repository:$RELEASE_TAG"); then
@@ -2025,7 +2383,7 @@ jobs:
               (.platforms[] | $repository + "@" + .)
           ' dist/release/digests.json | sort -u > "$subjects_file"
           mapfile -t subjects < "$subjects_file"
-          (( ${#subjects[@]} == 9 ))
+          (( ${#subjects[@]} == 15 ))
 
           for subject in "${subjects[@]}"; do
             "$RUNNER_TEMP/require-signing-context"
@@ -2063,7 +2421,7 @@ jobs:
               --predicate "$predicate" \
               "$subject"
           done < "$platform_subjects_file"
-          (( platform_subject_count == 6 ))
+          (( platform_subject_count == 10 ))
 
       - name: Flatten release evidence
         run: |
@@ -2208,6 +2566,8 @@ jobs:
           actual_names=$(mktemp "$RUNNER_TEMP/signed-assets-actual.XXXXXX")
           read -r -a specs <<< "$RELEASE_SPECS"
           (( ${#specs[@]} > 0 ))
+          read -r -a amd64_only_specs <<< "$RELEASE_AMD64_ONLY_SPECS"
+          (( ${#amd64_only_specs[@]} > 0 ))
           {
             printf '%s\n' \
               components.digest \
@@ -2220,7 +2580,7 @@ jobs:
               provenance.json \
               SHA256SUMS \
               SHA256SUMS.bundle
-            for component in frontend runtime-base materializer; do
+            for component in frontend runtime-base bottle-fetcher catalog-extractor materializer; do
               for platform in linux-amd64 linux-arm64; do
                 printf 'sbom-%s-%s.spdx.json\n' "$component" "$platform"
                 printf 'vulnerability-%s-%s.json\n' "$component" "$platform"
@@ -2231,8 +2591,11 @@ jobs:
                 printf 'runtime-evidence-%s-%s.tar.gz\n' "$platform" "$spec"
               done
             done
+            for spec in "${amd64_only_specs[@]}"; do
+              printf 'runtime-evidence-linux-amd64-%s.tar.gz\n' "$spec"
+            done
           } | sort > "$contract_names"
-          expected_contract_count=$((22 + 2 * ${#specs[@]}))
+          expected_contract_count=$((30 + 2 * ${#specs[@]} + ${#amd64_only_specs[@]}))
           (( $(wc -l < "$contract_names") == expected_contract_count ))
           (
             cd dist/release
@@ -2314,7 +2677,7 @@ jobs:
               (.platforms[] | $repository + "@" + .)
           ' dist/release/digests.json | sort -u > "$subjects_file"
           mapfile -t subjects < "$subjects_file"
-          (( ${#subjects[@]} == 9 ))
+          (( ${#subjects[@]} == 15 ))
           for subject in "${subjects[@]}"; do
             cosign verify \
               --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
@@ -2346,7 +2709,7 @@ jobs:
               "$subject" \
               "dist/release/sbom-${slug}.spdx.json"
           done < "$platform_subjects_file"
-          (( platform_subject_count == 6 ))
+          (( platform_subject_count == 10 ))
 
       - name: Stage assets, promote digests, and publish release
         env:
@@ -2451,7 +2814,7 @@ jobs:
             exit "$status"
           }
 
-          components=(runtime-base materializer frontend)
+          components=(runtime-base bottle-fetcher catalog-extractor materializer frontend)
           require_release_commit
           for component in "${components[@]}"; do
             require_component_tag "$component" true

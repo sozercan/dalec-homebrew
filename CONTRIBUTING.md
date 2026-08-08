@@ -270,16 +270,21 @@ go run ./cmd/release-manifest --help
 go run ./cmd/release-verify path/to/components.json
 ```
 
-[`release/components.example.json`](release/components.example.json) documents the shape but contains placeholders and is not directly verifiable.
+[`release/components-v2.example.json`](release/components-v2.example.json)
+documents the current V2 shape but contains placeholders and is not directly
+verifiable. [`release/components.example.json`](release/components.example.json)
+retains the V1 shape.
 
 ## Build component images
 
-[`docker-bake.hcl`](docker-bake.hcl) exposes platform-specific runtime-base and materializer targets plus the multi-platform frontend target:
+[`docker-bake.hcl`](docker-bake.hcl) exposes platform-specific runtime-base,
+bottle-fetcher, catalog-extractor, and materializer targets plus the
+multi-platform frontend target:
 
 ```console
 ./scripts/release-inputs.sh | jq .
 docker buildx bake --print release-children frontend
-docker buildx bake --load runtime-base-amd64 materializer-amd64
+docker buildx bake --load runtime-base-amd64 bottle-fetcher-amd64 catalog-extractor-amd64 materializer-amd64
 docker buildx build \
   --target frontend \
   --platform linux/amd64 \
@@ -289,7 +294,7 @@ docker buildx build \
   .
 
 REGISTRY=registry.example VERSION=dev \
-  docker buildx bake --push runtime-base-amd64 materializer-amd64
+  docker buildx bake --push runtime-base-amd64 bottle-fetcher-amd64 catalog-extractor-amd64 materializer-amd64
 ```
 
 After loading a materializer child, exercise its pinned Homebrew checkout with

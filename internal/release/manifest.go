@@ -232,16 +232,20 @@ func (m *Manifest) BindingsFor(platform resolution.Platform) (Bindings, error) {
 		SupportedProvenancePolicyVersions: append([]string(nil), m.SupportedProvenancePolicyVersions...),
 	}
 	if m.SchemaVersion == SchemaVersionV2 {
-		fetcher, err := componentRefFor(*m.BottleFetcher, platform, true)
-		if err != nil {
+		if _, err := componentRefFor(*m.BottleFetcher, platform, true); err != nil {
 			return Bindings{}, fmt.Errorf("bottle fetcher: %w", err)
 		}
+		// The frontend compiles the multi-platform helper indexes and resolves
+		// their platform children at execution time. Preserve those exact index
+		// identities in replay bindings while still requiring the manifest to
+		// contain a child for the selected platform.
+		fetcher := m.BottleFetcher.Index
 		extractor := ""
 		if m.CatalogExtractor != nil {
-			extractor, err = componentRefFor(*m.CatalogExtractor, platform, true)
-			if err != nil {
+			if _, err := componentRefFor(*m.CatalogExtractor, platform, true); err != nil {
 				return Bindings{}, fmt.Errorf("catalog extractor: %w", err)
 			}
+			extractor = m.CatalogExtractor.Index
 		}
 		bindings.BottleFetcherRef = fetcher
 		bindings.CatalogExtractorRef = extractor

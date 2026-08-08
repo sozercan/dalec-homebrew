@@ -43,14 +43,15 @@ func validRecordV2() *RecordV2 {
 				Rollback:             RollbackEvidence{Policy: MetadataRollbackPolicyV1, SequenceFloor: 7, StateDigest: digestD},
 			},
 			{
-				Tap:         "homebrew/core",
-				Commit:      strings.Repeat("1", 40),
-				Signer:      Signature{KeyID: "homebrew-1", Algorithm: "PS512", Verified: true},
-				Documents:   []MetadataDocument{{Name: "migrations", Digest: digestD, EnvelopeDigest: digestA}, {Name: "formula", Digest: digestA, EnvelopeDigest: digestD}},
-				GeneratedAt: coreGenerated,
-				FetchedAt:   coreGenerated.Add(time.Minute),
-				Sequence:    uint64(coreGenerated.Unix()),
-				Rollback:    RollbackEvidence{Policy: CoreMetadataRollbackPolicyV1, SequenceFloor: uint64(coreGenerated.Add(-time.Hour).Unix()), StateDigest: digestA},
+				Tap:               "homebrew/core",
+				Commit:            strings.Repeat("1", 40),
+				Signer:            Signature{KeyID: "homebrew-1", Algorithm: "PS512", Verified: true},
+				Documents:         []MetadataDocument{{Name: "migrations", Digest: digestD, EnvelopeDigest: digestA}, {Name: "formula", Digest: digestA, EnvelopeDigest: digestD}},
+				GeneratedAt:       coreGenerated,
+				GeneratedAtSource: CoreGeneratedAtSignedPayload,
+				FetchedAt:         coreGenerated.Add(time.Minute),
+				Sequence:          uint64(coreGenerated.Unix()),
+				Rollback:          RollbackEvidence{Policy: CoreMetadataRollbackPolicyV1, SequenceFloor: uint64(coreGenerated.Add(-time.Hour).Unix()), StateDigest: digestA},
 			},
 		},
 		ResolvedAt:      resolvedAt,
@@ -205,7 +206,7 @@ func TestCanonicalV2StableAcrossSetOrdering(t *testing.T) {
 	if digestA != digestB {
 		t.Fatalf("canonical V2 digests differ: %s != %s", digestA, digestB)
 	}
-	const wantDigest = "sha256:65706c7853a63dc3d8deb2d3cf518b1c7a33096876835649fbf04cf07e2435db"
+	const wantDigest = "sha256:706cba94027fe6cf79bf9712d2247140eceead5b7e9395db4b1ec18fcae88307"
 	if digestA.String() != wantDigest {
 		t.Fatalf("canonical V2 digest = %s, want stable %s", digestA, wantDigest)
 	}
@@ -518,6 +519,44 @@ func TestValidateV2SourceDateEpochUsesEarliestAuthenticatedSource(t *testing.T) 
 	record.SourceDateEpoch = external.GeneratedAt.Unix()
 	if err := ValidateV2(record); err != nil {
 		t.Fatalf("earliest external source was rejected: %v", err)
+	}
+}
+
+func TestValidateV2CoreGeneratedAtSource(t *testing.T) {
+	legacy := validRecordV2()
+	metadataSourceV2(legacy, "homebrew/core").GeneratedAtSource = ""
+	if err := ValidateV2(legacy); err != nil {
+		t.Fatalf("legacy record without generated_at_source was rejected: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*RecordV2)
+		want   string
+	}{
+		{
+			name: "invalid core source",
+			mutate: func(record *RecordV2) {
+				metadataSourceV2(record, "homebrew/core").GeneratedAtSource = "untrusted"
+			},
+			want: `generated_at_source "untrusted" is unsupported`,
+		},
+		{
+			name: "non-core source",
+			mutate: func(record *RecordV2) {
+				metadataSourceV2(record, "acme/tools").GeneratedAtSource = CoreGeneratedAtLastModified
+			},
+			want: "generated_at_source is valid only for homebrew/core",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			record := validRecordV2()
+			tt.mutate(record)
+			if err := ValidateV2(record); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ValidateV2() error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 

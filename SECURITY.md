@@ -55,7 +55,21 @@ V2 public-tap releases additionally preserve these properties:
 
 Homebrew's Formula and migration JWS documents are fetched and authenticated separately; upstream does not sign a common snapshot identifier for the pair. The combined snapshot digest commits to the exact accepted payload pair, but does not prove atomic upstream publication.
 
-The documents do not always include an authenticated generation timestamp. When a signed `generated_date` is absent, freshness relies on the unsigned HTTP `Last-Modified` value. Both documents are freshness-checked independently, and the resolution `generated_at` and `source_date_epoch` use the earlier accepted timestamp.
+The documents do not always include an authenticated generation timestamp. When a signed `generated_date` is absent, freshness relies on the unsigned HTTP `Last-Modified` value. Both documents are freshness-checked independently, and the resolution `generated_at` and `source_date_epoch` use the earlier accepted timestamp. V2 records identify the aggregate timestamp as `signed-payload` only when both document timestamps are authenticated; if either document uses the HTTP fallback, the aggregate is marked `http-last-modified` even when the signed document currently supplies the earlier timestamp.
+
+V2 records created before the timestamp trust marker existed may omit
+`generated_at_source`; structural replay retains that compatibility. New
+resolvers always emit the marker, and release signing rejects an omission, so a
+new signed tuple cannot downgrade the timestamp trust evidence.
+
+Release integrations may fetch the same authenticated documents on independent
+runners. Signing therefore requires identical Homebrew commit, signer, payload
+digests, envelope digests, and rollback identity across every observation.
+Signed-payload timestamps must also be byte-for-byte identical. Only when the
+V2 record identifies the aggregate timestamp as `http-last-modified` may
+those unsigned timestamps differ; the signed release evidence retains every
+observation and selects the earliest one deterministically. This exception does
+not permit payload, envelope, signer, commit, or rollback drift.
 
 Callers may supply a metadata rollback floor, but the repository release workflow does not persist one across releases. For release-bound frontends, it limits metadata age to seven days and future skew to 15 minutes, requires every release integration to use the same authenticated snapshot, and records that snapshot in signed evidence. This is not cross-release anti-rollback: a previously superseded but still-fresh signed snapshot may be accepted by a later release.
 
@@ -75,7 +89,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the complete resolution, 
 
 ## Out of scope and external controls
 
-The frontend does not hold signing credentials and cannot itself guarantee registry retention, CI builder identity, parent-frontend identity, vulnerability database freshness, VEX approval, or immutable rollback mirrors. Release automation must authenticate the external upstream Dalec binding, sign the repository-owned frontend, base, and materializer tuple; exact platform images; resolution and evidence artifacts; and provenance, then promote by digest without rebuilding.
+The frontend does not hold signing credentials and cannot itself guarantee registry retention, CI builder identity, parent-frontend identity, vulnerability database freshness, VEX approval, or immutable rollback mirrors. Release automation must authenticate the external upstream Dalec binding, sign the repository-owned frontend, runtime-base, bottle-fetcher, catalog-extractor, and materializer tuple; exact platform images; resolution and evidence artifacts; and provenance, then promote by digest without rebuilding.
 
 Reports that demonstrate a practical violation of the properties above are in scope even when the root cause is an upstream metadata-format limitation.
 

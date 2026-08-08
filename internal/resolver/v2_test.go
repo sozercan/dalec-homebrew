@@ -4,10 +4,70 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
+	"github.com/sozercan/dalec-homebrew/internal/homebrew/metadata"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 )
+
+func TestCoreGeneratedAtSource(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0).UTC()
+	tests := []struct {
+		name       string
+		formula    metadata.DocumentInfo
+		migrations metadata.DocumentInfo
+		generated  time.Time
+		want       string
+	}{
+		{
+			name:       "older HTTP observation",
+			formula:    metadata.DocumentInfo{GeneratedAt: base, GeneratedAtSource: metadata.GeneratedAtLastModified},
+			migrations: metadata.DocumentInfo{GeneratedAt: base.Add(time.Minute), GeneratedAtSource: metadata.GeneratedAtSignedPayload},
+			generated:  base,
+			want:       resolution.CoreGeneratedAtLastModified,
+		},
+		{
+			name:       "later HTTP observation still makes aggregate transport-dependent",
+			formula:    metadata.DocumentInfo{GeneratedAt: base, GeneratedAtSource: metadata.GeneratedAtSignedPayload},
+			migrations: metadata.DocumentInfo{GeneratedAt: base.Add(time.Minute), GeneratedAtSource: metadata.GeneratedAtLastModified},
+			generated:  base,
+			want:       resolution.CoreGeneratedAtLastModified,
+		},
+		{
+			name:       "equal mixed timestamps use HTTP trust",
+			formula:    metadata.DocumentInfo{GeneratedAt: base, GeneratedAtSource: metadata.GeneratedAtLastModified},
+			migrations: metadata.DocumentInfo{GeneratedAt: base, GeneratedAtSource: metadata.GeneratedAtSignedPayload},
+			generated:  base,
+			want:       resolution.CoreGeneratedAtLastModified,
+		},
+		{
+			name:       "both timestamps signed",
+			formula:    metadata.DocumentInfo{GeneratedAt: base, GeneratedAtSource: metadata.GeneratedAtSignedPayload},
+			migrations: metadata.DocumentInfo{GeneratedAt: base.Add(time.Minute), GeneratedAtSource: metadata.GeneratedAtSignedPayload},
+			generated:  base,
+			want:       resolution.CoreGeneratedAtSignedPayload,
+		},
+		{
+			name:       "missing source",
+			formula:    metadata.DocumentInfo{GeneratedAt: base},
+			migrations: metadata.DocumentInfo{GeneratedAt: base.Add(time.Minute), GeneratedAtSource: metadata.GeneratedAtSignedPayload},
+			generated:  base,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := coreGeneratedAtSource(metadata.SnapshotInfo{
+				GeneratedAt: tt.generated,
+				Formula:     tt.formula,
+				Migrations:  tt.migrations,
+			})
+			if got != tt.want {
+				t.Fatalf("coreGeneratedAtSource() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestConvertCatalogPrebuiltDerivationV2CopiesEverySignedField(t *testing.T) {
 	digest := func(ch string) string { return "sha256:" + strings.Repeat(ch, 64) }

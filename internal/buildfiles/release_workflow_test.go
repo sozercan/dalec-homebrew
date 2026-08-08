@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -376,6 +377,17 @@ func TestReleaseWorkflowSpecInventory(t *testing.T) {
 	if strings.Count(workflow, `"$RELEASE_SPECS"`) < 3 {
 		t.Fatal("release workflow does not reuse RELEASE_SPECS across build and validation paths")
 	}
+
+	amd64Only := regexp.MustCompile(`(?m)^  RELEASE_AMD64_ONLY_SPECS: (.+)$`).FindStringSubmatch(workflow)
+	if len(amd64Only) != 2 {
+		t.Fatal("release workflow does not define RELEASE_AMD64_ONLY_SPECS")
+	}
+	if got, want := strings.Fields(amd64Only[1]), []string{"ci-noncore-multi-package"}; !slices.Equal(got, want) {
+		t.Fatalf("RELEASE_AMD64_ONLY_SPECS = %v, want %v", got, want)
+	}
+	if strings.Count(workflow, `"$RELEASE_AMD64_ONLY_SPECS"`) < 3 {
+		t.Fatal("release workflow does not reuse RELEASE_AMD64_ONLY_SPECS across build and validation paths")
+	}
 }
 
 func TestReleaseWorkflowBindsExternalDalecFrontend(t *testing.T) {
@@ -436,6 +448,87 @@ func TestReleaseWorkflowBindsExternalDalecFrontend(t *testing.T) {
 	promotionScript := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "promote", "Stage assets, promote digests, and publish release"), "run"))
 	if strings.Contains(promotionScript, "dalec_frontend") || strings.Contains(promotionScript, "project-dalec") {
 		t.Fatal("release promotion treats the external Dalec frontend as a repository-owned component")
+	}
+}
+
+func TestReleaseWorkflowV2ComponentContract(t *testing.T) {
+	workflow := workflowYAML(t, "release.yml")
+	buildScript := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "build", "Build children and assemble component indexes"), "run"))
+	orderedBuildTokens := []string{
+		"for target in runtime-base-amd64 runtime-base-arm64; do",
+		"runtime_base_index=$(create_index",
+		"bottle-fetcher-amd64 bottle-fetcher-arm64",
+		"bottle_fetcher_index=$(create_index",
+		"catalog_extractor_index=$(create_index",
+		"go run ./cmd/v2-bindings",
+		"for target in materializer-amd64 materializer-arm64; do",
+		"materializer_index=$(create_index",
+		"docker buildx bake frontend",
+	}
+	previous := -1
+	for _, token := range orderedBuildTokens {
+		index := strings.Index(buildScript, token)
+		if index <= previous {
+			t.Fatalf("V2 release build token %q is missing or out of order", token)
+		}
+		previous = index
+	}
+
+	jobs := yamlMappingValue(t, workflow, "jobs")
+	evidence := yamlMappingValue(t, jobs, "evidence")
+	include := yamlMappingValue(t, yamlMappingValue(t, yamlMappingValue(t, evidence, "strategy"), "matrix"), "include")
+	if include.Kind != yaml.SequenceNode {
+		t.Fatalf("evidence matrix include kind = %v, want sequence", include.Kind)
+	}
+	gotSubjects := make([]string, 0, len(include.Content))
+	for _, entry := range include.Content {
+		component := yamlScalarValue(t, yamlMappingValue(t, entry, "component"))
+		platform := yamlScalarValue(t, yamlMappingValue(t, entry, "platform"))
+		slug := yamlScalarValue(t, yamlMappingValue(t, entry, "slug"))
+		if slug != component+"-"+strings.ReplaceAll(platform, "/", "-") {
+			t.Fatalf("evidence matrix slug %q does not bind %s on %s", slug, component, platform)
+		}
+		gotSubjects = append(gotSubjects, component+" "+platform)
+	}
+	sort.Strings(gotSubjects)
+	wantSubjects := make([]string, 0, 10)
+	for _, component := range []string{"frontend", "runtime-base", "bottle-fetcher", "catalog-extractor", "materializer"} {
+		for _, platform := range []string{"linux/amd64", "linux/arm64"} {
+			wantSubjects = append(wantSubjects, component+" "+platform)
+		}
+	}
+	sort.Strings(wantSubjects)
+	if !slices.Equal(gotSubjects, wantSubjects) {
+		t.Fatalf("evidence matrix subjects = %v, want %v", gotSubjects, wantSubjects)
+	}
+
+	for _, entry := range []struct {
+		job  string
+		step string
+	}{
+		{job: "sign", step: "Sign images and attach provenance and SBOM attestations"},
+		{job: "promote", step: "Reverify release signatures and attestations"},
+	} {
+		script := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, entry.job, entry.step), "run"))
+		for _, count := range []string{`(( ${#subjects[@]} == 15 ))`, `(( platform_subject_count == 10 ))`} {
+			if strings.Count(script, count) != 1 {
+				t.Fatalf("%s/%s does not enforce %q exactly once", entry.job, entry.step, count)
+			}
+		}
+	}
+
+	componentLoop := "for component in runtime-base bottle-fetcher catalog-extractor materializer frontend; do"
+	presign := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "sign", "Pin source state and validate release tags before signing"), "run"))
+	if !strings.Contains(presign, componentLoop) {
+		t.Fatal("pre-sign validation does not cover all five V2 components")
+	}
+	promotion := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "promote", "Stage assets, promote digests, and publish release"), "run"))
+	if !strings.Contains(promotion, "components=(runtime-base bottle-fetcher catalog-extractor materializer frontend)") {
+		t.Fatal("promotion does not cover all five V2 components")
+	}
+	recovery := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "promote", "Verify signed bundle checksums"), "run"))
+	if !strings.Contains(recovery, "expected_contract_count=$((30 + 2 * ${#specs[@]} + ${#amd64_only_specs[@]}))") {
+		t.Fatal("recovery asset contract does not count five-component evidence and amd64-only runtime evidence")
 	}
 }
 
@@ -772,80 +865,18 @@ func TestReleaseWorkflowRuntimeEvidenceExtractor(t *testing.T) {
 	})
 }
 
-func TestReleaseWorkflowMetadataFilter(t *testing.T) {
-	filter := releaseWorkflowShellFilter(t, "metadata_filter")
-	base := validResolutionMetadataRecord()
-	baseOutput := runWorkflowJQ(t, filter, base)
-
-	nonIdentityDrift := cloneJSONRecord(t, base)
-	metadata := nonIdentityDrift["metadata"].(map[string]any)
-	metadata["fetched_at"] = "2026-08-03T00:01:00Z"
-	metadata["signatures"] = []any{map[string]any{"key_id": "different"}}
-	if output := runWorkflowJQ(t, filter, nonIdentityDrift); !bytes.Equal(baseOutput, output) {
-		t.Fatalf("non-identity metadata changed the normalized snapshot:\nbase: %s\nnew:  %s", baseOutput, output)
-	}
-
-	identityTimestampDrift := cloneJSONRecord(t, base)
-	identityTimestampDrift["metadata"].(map[string]any)["generated_at"] = "2026-08-03T00:02:00Z"
-	if output := runWorkflowJQ(t, filter, identityTimestampDrift); bytes.Equal(baseOutput, output) {
-		t.Fatal("metadata timestamp drift did not change the normalized snapshot")
-	}
-
-	identityDrift := cloneJSONRecord(t, base)
-	identityDrift["metadata"].(map[string]any)["formula_digest"] = "sha256:" + strings.Repeat("b", 64)
-	if output := runWorkflowJQ(t, filter, identityDrift); bytes.Equal(baseOutput, output) {
-		t.Fatal("authenticated metadata drift did not change the normalized snapshot")
-	}
-
-	tests := []struct {
-		name   string
-		mutate func(map[string]any)
-	}{
-		{
-			name: "unknown field",
-			mutate: func(record map[string]any) {
-				record["metadata"].(map[string]any)["unexpected"] = true
-			},
-		},
-		{
-			name: "missing fetched at",
-			mutate: func(record map[string]any) {
-				delete(record["metadata"].(map[string]any), "fetched_at")
-			},
-		},
-		{
-			name: "missing generated at",
-			mutate: func(record map[string]any) {
-				delete(record["metadata"].(map[string]any), "generated_at")
-			},
-		},
-		{
-			name: "malformed digest",
-			mutate: func(record map[string]any) {
-				record["metadata"].(map[string]any)["digest"] = "sha256:not-a-digest"
-			},
-		},
-		{
-			name: "malformed signatures",
-			mutate: func(record map[string]any) {
-				record["metadata"].(map[string]any)["formula_signatures"] = map[string]any{}
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			record := cloneJSONRecord(t, base)
-			tt.mutate(record)
-			data, err := json.Marshal(record)
-			if err != nil {
-				t.Fatal(err)
-			}
-			cmd := exec.Command("jq", "-S", "-e", filter)
-			cmd.Stdin = bytes.NewReader(data)
-			if output, err := cmd.CombinedOutput(); err == nil {
-				t.Fatalf("invalid metadata accepted\n%s", output)
-			}
-		})
+func TestReleaseWorkflowMetadataReconciliationContract(t *testing.T) {
+	workflow := releaseWorkflowText(t)
+	for _, contract := range []string{
+		`"schema_version": "dalec-homebrew-release-metadata/v2"`,
+		`reference_identity["generated_at_source"] != "http-last-modified"`,
+		`"authenticated homebrew/core metadata identity differs across release integrations"`,
+		`"observations": observations`,
+		`accepted = min(observations`,
+	} {
+		if !strings.Contains(workflow, contract) {
+			t.Fatalf("release metadata reconciliation is missing %q", contract)
+		}
 	}
 }
 
@@ -883,33 +914,56 @@ func TestReleaseWorkflowRuntimeEvidenceValidation(t *testing.T) {
 	}
 	frontendRepository := "registry.example/frontend"
 	runtimeBaseRepository := "registry.example/runtime-base"
+	bottleFetcherRepository := "registry.example/bottle-fetcher"
+	catalogExtractorRepository := "registry.example/catalog-extractor"
 	materializerRepository := "registry.example/materializer"
 	frontendChildren := map[string]string{
 		"linux/amd64": digest("1"),
 		"linux/arm64": digest("2"),
 	}
-	runtimeBaseIndex := digest("3")
+	frontendIndex := digest("3")
+	runtimeBaseIndex := digest("4")
 	runtimeBaseChildren := map[string]string{
-		"linux/amd64": digest("4"),
-		"linux/arm64": digest("5"),
+		"linux/amd64": digest("5"),
+		"linux/arm64": digest("6"),
 	}
-	materializerIndex := digest("6")
+	materializerIndex := digest("7")
 	materializerChildren := map[string]string{
-		"linux/amd64": digest("7"),
-		"linux/arm64": digest("8"),
+		"linux/amd64": digest("8"),
+		"linux/arm64": digest("9"),
+	}
+	bottleFetcherIndex := digest("a")
+	bottleFetcherChildren := map[string]string{
+		"linux/amd64": digest("b"),
+		"linux/arm64": digest("c"),
+	}
+	catalogExtractorIndex := digest("d")
+	catalogExtractorChildren := map[string]string{
+		"linux/amd64": digest("e"),
+		"linux/arm64": digest("f"),
 	}
 
 	digests := map[string]any{
 		"components": map[string]any{
 			"frontend": map[string]any{
 				"repository": frontendRepository,
-				"index":      digest("9"),
+				"index":      frontendIndex,
 				"platforms":  frontendChildren,
 			},
 			"runtime-base": map[string]any{
 				"repository": runtimeBaseRepository,
 				"index":      runtimeBaseIndex,
 				"platforms":  runtimeBaseChildren,
+			},
+			"bottle-fetcher": map[string]any{
+				"repository": bottleFetcherRepository,
+				"index":      bottleFetcherIndex,
+				"platforms":  bottleFetcherChildren,
+			},
+			"catalog-extractor": map[string]any{
+				"repository": catalogExtractorRepository,
+				"index":      catalogExtractorIndex,
+				"platforms":  catalogExtractorChildren,
 			},
 			"materializer": map[string]any{
 				"repository": materializerRepository,
@@ -918,9 +972,17 @@ func TestReleaseWorkflowRuntimeEvidenceValidation(t *testing.T) {
 			},
 		},
 	}
-	manifest := map[string]any{"policy_version": "policy-v1"}
+	manifest := map[string]any{
+		"policy_version":                       "homebrew-runtime-v2",
+		"tap_policy_digest":                    digest("1"),
+		"executable_runtime_policy_digest":     digest("2"),
+		"supported_catalog_policy_versions":    []any{"tap-catalog-v1"},
+		"supported_fetch_policy_versions":      []any{"homebrew-bottle-fetch-v1"},
+		"supported_provenance_policy_versions": []any{"provenance-v1"},
+	}
+	homebrewCommit := strings.Repeat("a", 40)
 	inputs := map[string]any{
-		"homebrew_commit":          "homebrew",
+		"homebrew_commit":          homebrewCommit,
 		"portable_ruby_version":    "ruby",
 		"verification_keys_digest": "keys",
 		"dalec_module":             "dalec",
@@ -928,61 +990,191 @@ func TestReleaseWorkflowRuntimeEvidenceValidation(t *testing.T) {
 	}
 
 	makeRecord := func(platform, generatedAt string, sourceDateEpoch int64) map[string]any {
-		record := validResolutionMetadataRecord()
 		architecture := strings.TrimPrefix(platform, "linux/")
-		record["input"] = map[string]any{"platform": map[string]any{"os": "linux", "architecture": architecture}}
-		record["policy_version"] = "policy-v1"
-		record["source_date_epoch"] = sourceDateEpoch
-		record["metadata"].(map[string]any)["generated_at"] = generatedAt
-		record["components"] = map[string]any{
-			"frontend_ref":             frontendRepository + "@" + frontendChildren[platform],
-			"runtime_base_ref":         runtimeBaseRepository + "@" + runtimeBaseIndex,
-			"materializer_ref":         materializerRepository + "@" + materializerIndex,
-			"homebrew_commit":          "homebrew",
-			"ruby_runtime":             "ruby",
-			"verification_keys_digest": "keys",
-			"dalec_module":             "dalec",
-			"buildkit_module":          "buildkit",
+		metadataDigest := digest("0")
+		return map[string]any{
+			"schema_version":    "dalec-homebrew-resolution/v2",
+			"input":             map[string]any{"platform": map[string]any{"os": "linux", "architecture": architecture}},
+			"policy_version":    "homebrew-runtime-v2",
+			"source_date_epoch": sourceDateEpoch,
+			"metadata_sources": []any{map[string]any{
+				"tap":                 "homebrew/core",
+				"commit":              homebrewCommit,
+				"signer":              map[string]any{"key_id": "homebrew-1", "algorithm": "PS512", "verified": true},
+				"documents":           []any{map[string]any{"name": "formula", "digest": metadataDigest, "envelope_digest": digest("1")}, map[string]any{"name": "migrations", "digest": digest("2"), "envelope_digest": digest("3")}},
+				"generated_at":        generatedAt,
+				"generated_at_source": "http-last-modified",
+				"fetched_at":          "2026-08-03T00:01:00Z",
+				"sequence":            sourceDateEpoch,
+				"rollback":            map[string]any{"policy": "homebrew-core-generated-at-v1", "sequence_floor": 0, "state_digest": metadataDigest},
+			}},
+			"components": map[string]any{
+				"frontend_index_ref":                   frontendRepository + "@" + frontendIndex,
+				"frontend_ref":                         frontendRepository + "@" + frontendChildren[platform],
+				"runtime_base_ref":                     runtimeBaseRepository + "@" + runtimeBaseChildren[platform],
+				"materializer_ref":                     materializerRepository + "@" + materializerChildren[platform],
+				"bottle_fetcher_ref":                   bottleFetcherRepository + "@" + bottleFetcherIndex,
+				"catalog_extractor_ref":                catalogExtractorRepository + "@" + catalogExtractorIndex,
+				"catalog_service_origin":               "",
+				"ingestion_jws_key_policy_digest":      "",
+				"tap_policy_digest":                    manifest["tap_policy_digest"],
+				"executable_runtime_policy_digest":     manifest["executable_runtime_policy_digest"],
+				"homebrew_commit":                      homebrewCommit,
+				"ruby_runtime":                         "ruby",
+				"verification_keys_digest":             "keys",
+				"dalec_module":                         "dalec",
+				"buildkit_module":                      "buildkit",
+				"supported_catalog_policy_versions":    manifest["supported_catalog_policy_versions"],
+				"supported_fetch_policy_versions":      manifest["supported_fetch_policy_versions"],
+				"supported_provenance_policy_versions": manifest["supported_provenance_policy_versions"],
+			},
 		}
+	}
+	coreSource := func(record map[string]any) map[string]any {
+		return record["metadata_sources"].([]any)[0].(map[string]any)
+	}
+	makeNoncoreRecord := func() map[string]any {
+		record := makeRecord("linux/amd64", "2026-08-03T00:00:00Z", 1785715200)
+		record["metadata_sources"] = append(record["metadata_sources"].([]any), map[string]any{
+			"tap":                    "svt/avtools",
+			"generated_at":           "2026-08-03T00:00:00Z",
+			"fetched_at":             "2026-08-03T00:01:00Z",
+			"catalog_policy_version": "tap-catalog-v1",
+			"extraction": map[string]any{
+				"policy_version": "build-local-tap-extraction-v1",
+				"extractor_ref":  catalogExtractorRepository + "@" + catalogExtractorIndex,
+			},
+		})
+		record["nodes"] = []any{map[string]any{
+			"id": "svt/avtools/libdf",
+			"bottle": map[string]any{"transport": map[string]any{
+				"oci":   nil,
+				"https": map[string]any{"fetch_policy_version": "homebrew-bottle-fetch-v1"},
+			}},
+		}}
 		return record
+	}
+	makeMaterialization := func() map[string]any {
+		return map[string]any{
+			"schema_version": "dalec-homebrew-materialization/v2",
+			"preparation": map[string]any{
+				"schema_version": "dalec-homebrew-preparation/v2",
+				"fetch_evidence": []any{map[string]any{
+					"artifact_id":          "svt/avtools/libdf",
+					"schema_version":       "bottle-fetch-evidence/v1",
+					"fetch_policy_version": "homebrew-bottle-fetch-v1",
+				}},
+			},
+		}
 	}
 
 	type validationCase struct {
-		name         string
-		flat         bool
-		omitPlatform string
-		mutate       func(map[string]map[string]any)
-		wantError    string
+		name                  string
+		flat                  bool
+		omitPlatform          string
+		omitNoncore           bool
+		releaseSpecs          string
+		mutate                func(map[string]map[string]any)
+		mutateMaterialization func(map[string]any)
+		wantError             string
 	}
 	tests := []validationCase{
 		{name: "download artifact layout"},
 		{name: "signed bundle layout", flat: true},
 		{
-			name: "runtime base child ref",
+			name: "runtime base index ref",
 			mutate: func(records map[string]map[string]any) {
-				records["linux/amd64"]["components"].(map[string]any)["runtime_base_ref"] = runtimeBaseRepository + "@" + runtimeBaseChildren["linux/amd64"]
+				records["linux/amd64"]["components"].(map[string]any)["runtime_base_ref"] = runtimeBaseRepository + "@" + runtimeBaseIndex
 			},
 			wantError: "runtime evidence binding mismatch for live-test on linux/amd64",
 		},
 		{
-			name: "materializer child ref",
+			name: "materializer index ref",
 			mutate: func(records map[string]map[string]any) {
-				records["linux/amd64"]["components"].(map[string]any)["materializer_ref"] = materializerRepository + "@" + materializerChildren["linux/amd64"]
+				records["linux/amd64"]["components"].(map[string]any)["materializer_ref"] = materializerRepository + "@" + materializerIndex
 			},
 			wantError: "runtime evidence binding mismatch for live-test on linux/amd64",
 		},
 		{
-			name: "metadata timestamp drift",
+			name: "catalog extractor execution evidence",
 			mutate: func(records map[string]map[string]any) {
-				records["linux/arm64"]["metadata"].(map[string]any)["generated_at"] = "2026-08-03T00:00:01Z"
+				sources := records["noncore"]["metadata_sources"].([]any)
+				sources[1].(map[string]any)["extraction"].(map[string]any)["extractor_ref"] = catalogExtractorRepository + "@" + digest("0")
+			},
+			wantError: "does not prove published catalog extractor execution",
+		},
+		{
+			name: "bottle fetcher execution evidence",
+			mutateMaterialization: func(materialization map[string]any) {
+				materialization["preparation"].(map[string]any)["fetch_evidence"] = []any{}
+			},
+			wantError: "does not prove published bottle fetcher execution",
+		},
+		{
+			name: "HTTP metadata timestamp drift",
+			mutate: func(records map[string]map[string]any) {
+				coreSource(records["linux/arm64"])["generated_at"] = "2026-08-03T00:00:01Z"
+				coreSource(records["linux/arm64"])["sequence"] = int64(1785715201)
 				records["linux/arm64"]["source_date_epoch"] = int64(1785715201)
 			},
-			wantError: `"generated_at": "2026-08-03T00:00:01Z"`,
+		},
+		{
+			name: "signed metadata timestamp drift",
+			mutate: func(records map[string]map[string]any) {
+				for _, record := range records {
+					coreSource(record)["generated_at_source"] = "signed-payload"
+				}
+				coreSource(records["linux/arm64"])["generated_at"] = "2026-08-03T00:00:01Z"
+				coreSource(records["linux/arm64"])["sequence"] = int64(1785715201)
+				records["linux/arm64"]["source_date_epoch"] = int64(1785715201)
+			},
+			wantError: "signed homebrew/core generated_at differs across release integrations",
+		},
+		{
+			name: "authenticated metadata drift",
+			mutate: func(records map[string]map[string]any) {
+				documents := coreSource(records["linux/arm64"])["documents"].([]any)
+				documents[0].(map[string]any)["digest"] = digest("f")
+			},
+			wantError: "authenticated homebrew/core metadata identity differs across release integrations",
+		},
+		{
+			name: "metadata commit differs from release input",
+			mutate: func(records map[string]map[string]any) {
+				for _, record := range records {
+					coreSource(record)["commit"] = strings.Repeat("b", 40)
+				}
+			},
+			wantError: "homebrew/core commit does not match release input",
+		},
+		{
+			name: "missing timestamp source",
+			mutate: func(records map[string]map[string]any) {
+				delete(coreSource(records["linux/arm64"]), "generated_at_source")
+			},
+			wantError: "homebrew/core metadata source has unexpected fields",
+		},
+		{
+			name: "resolution epoch mismatch",
+			mutate: func(records map[string]map[string]any) {
+				records["linux/arm64"]["source_date_epoch"] = int64(1785715199)
+			},
+			wantError: "resolution source_date_epoch does not match the earliest metadata source",
+		},
+		{
+			name:         "duplicate spec inventory",
+			releaseSpecs: "live-test live-test",
+			wantError:    "duplicate metadata observation for live-test on linux/amd64",
 		},
 		{
 			name:         "missing archive",
 			omitPlatform: "linux/arm64",
 			wantError:    "missing or empty runtime evidence archive: dist/release/runtime-evidence/runtime-evidence-linux-arm64-live-test.tar.gz",
+		},
+		{
+			name:        "missing amd64-only archive",
+			omitNoncore: true,
+			wantError:   "missing or empty runtime evidence archive: dist/release/runtime-evidence/runtime-evidence-linux-amd64-ci-noncore-multi-package.tar.gz",
 		},
 	}
 
@@ -1014,9 +1206,14 @@ func TestReleaseWorkflowRuntimeEvidenceValidation(t *testing.T) {
 			records := map[string]map[string]any{
 				"linux/amd64": makeRecord("linux/amd64", "2026-08-03T00:00:00Z", 1785715200),
 				"linux/arm64": makeRecord("linux/arm64", "2026-08-03T00:00:00Z", 1785715200),
+				"noncore":     makeNoncoreRecord(),
 			}
+			materialization := makeMaterialization()
 			if tt.mutate != nil {
 				tt.mutate(records)
+			}
+			if tt.mutateMaterialization != nil {
+				tt.mutateMaterialization(materialization)
 			}
 			for _, platform := range []string{"linux/amd64", "linux/arm64"} {
 				if platform == tt.omitPlatform {
@@ -1036,17 +1233,44 @@ func TestReleaseWorkflowRuntimeEvidenceValidation(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if !tt.omitNoncore {
+				resolutionBody, err := json.Marshal(records["noncore"])
+				if err != nil {
+					t.Fatal(err)
+				}
+				materializationBody, err := json.Marshal(materialization)
+				if err != nil {
+					t.Fatal(err)
+				}
+				archive := writeRuntimeEvidenceArchive(t, []tarEntry{
+					{name: "./resolution.json", body: resolutionBody},
+					{name: "./materialization-v2.json", body: materializationBody},
+				})
+				archiveData, err := os.ReadFile(archive)
+				if err != nil {
+					t.Fatal(err)
+				}
+				name := "runtime-evidence-linux-amd64-ci-noncore-multi-package.tar.gz"
+				if err := os.WriteFile(filepath.Join(runtimeEvidenceDirectory, name), archiveData, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 
 			runnerTemp := filepath.Join(root, "runner-temp")
 			if err := os.MkdirAll(runnerTemp, 0o700); err != nil {
 				t.Fatal(err)
 			}
+			releaseSpecs := tt.releaseSpecs
+			if releaseSpecs == "" {
+				releaseSpecs = "live-test"
+			}
 			output, err := runWorkflowShellInDir(t, root, script, map[string]string{
 				"MAX_RELEASE_ASSET_BYTES":             strconv.Itoa(1 << 20),
 				"MAX_RUNTIME_EVIDENCE_EXPANDED_BYTES": strconv.Itoa(1 << 20),
 				"PATH":                                os.Getenv("PATH"),
+				"RELEASE_AMD64_ONLY_SPECS":            "ci-noncore-multi-package",
 				"RELEASE_SHA":                         strings.Repeat("f", 40),
-				"RELEASE_SPECS":                       "live-test",
+				"RELEASE_SPECS":                       releaseSpecs,
 				"RELEASE_TAG":                         "v0.1.4",
 				"RUNNER_TEMP":                         runnerTemp,
 			})
@@ -1068,15 +1292,39 @@ func TestReleaseWorkflowRuntimeEvidenceValidation(t *testing.T) {
 				t.Fatal(err)
 			}
 			var snapshot struct {
+				SchemaVersion    string `json:"schema_version"`
 				AcceptedSnapshot struct {
-					GeneratedAt string `json:"generated_at"`
+					GeneratedAt     string `json:"generated_at"`
+					SourceDateEpoch int64  `json:"source_date_epoch"`
 				} `json:"accepted_snapshot"`
+				Observations []struct {
+					Spec                      string `json:"spec"`
+					Platform                  string `json:"platform"`
+					GeneratedAt               string `json:"generated_at"`
+					CoreGeneratedAtEpoch      int64  `json:"core_generated_at_epoch"`
+					ResolutionSourceDateEpoch int64  `json:"resolution_source_date_epoch"`
+				} `json:"observations"`
 			}
 			if err := json.Unmarshal(data, &snapshot); err != nil {
 				t.Fatal(err)
 			}
+			if snapshot.SchemaVersion != "dalec-homebrew-release-metadata/v2" {
+				t.Fatalf("metadata snapshot schema = %q", snapshot.SchemaVersion)
+			}
 			if got, want := snapshot.AcceptedSnapshot.GeneratedAt, "2026-08-03T00:00:00Z"; got != want {
 				t.Fatalf("accepted snapshot generated_at = %q, want %q", got, want)
+			}
+			if snapshot.AcceptedSnapshot.SourceDateEpoch != 1785715200 {
+				t.Fatalf("accepted snapshot epoch = %d", snapshot.AcceptedSnapshot.SourceDateEpoch)
+			}
+			if len(snapshot.Observations) != 3 ||
+				snapshot.Observations[0].Spec != "live-test" || snapshot.Observations[0].Platform != "linux/amd64" ||
+				snapshot.Observations[1].Spec != "live-test" || snapshot.Observations[1].Platform != "linux/arm64" ||
+				snapshot.Observations[2].Spec != "ci-noncore-multi-package" || snapshot.Observations[2].Platform != "linux/amd64" {
+				t.Fatalf("metadata observations are not deterministic: %+v", snapshot.Observations)
+			}
+			if got, want := snapshot.Observations[1].GeneratedAt, coreSource(records["linux/arm64"])["generated_at"]; got != want {
+				t.Fatalf("arm64 metadata observation = %q, want %q", got, want)
 			}
 		})
 	}
@@ -1084,7 +1332,14 @@ func TestReleaseWorkflowRuntimeEvidenceValidation(t *testing.T) {
 
 func TestReleaseWorkflowResolutionBindingFilter(t *testing.T) {
 	filter := releaseWorkflowShellFilter(t, "resolution_binding_filter")
-	manifest := writeWorkflowFixture(t, "components.json", []byte(`{"policy_version":"policy-v1"}`))
+	manifest := writeWorkflowFixture(t, "components.json", []byte(`{
+		"policy_version":"homebrew-runtime-v2",
+		"tap_policy_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		"executable_runtime_policy_digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222",
+		"supported_catalog_policy_versions":["catalog-v1"],
+		"supported_fetch_policy_versions":["fetch-v1"],
+		"supported_provenance_policy_versions":["provenance-v1"]
+	}`))
 	inputs := writeWorkflowFixture(t, "inputs.json", []byte(`{
 		"homebrew_commit":"homebrew",
 		"portable_ruby_version":"ruby",
@@ -1093,8 +1348,11 @@ func TestReleaseWorkflowResolutionBindingFilter(t *testing.T) {
 		"buildkit_module":"buildkit"
 	}`))
 	frontend := "registry.example/frontend@sha256:" + strings.Repeat("a", 64)
+	frontendIndex := "registry.example/frontend@sha256:" + strings.Repeat("d", 64)
 	runtimeBase := "registry.example/runtime-base@sha256:" + strings.Repeat("b", 64)
 	materializer := "registry.example/materializer@sha256:" + strings.Repeat("c", 64)
+	bottleFetcher := "registry.example/bottle-fetcher@sha256:" + strings.Repeat("e", 64)
+	catalogExtractor := "registry.example/catalog-extractor@sha256:" + strings.Repeat("f", 64)
 
 	tests := []struct {
 		name     string
@@ -1111,18 +1369,28 @@ func TestReleaseWorkflowResolutionBindingFilter(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			record := map[string]any{
-				"schema_version": "dalec-homebrew-resolution/v1",
+				"schema_version": "dalec-homebrew-resolution/v2",
 				"input":          map[string]any{"platform": tt.platform},
-				"policy_version": "policy-v1",
+				"policy_version": "homebrew-runtime-v2",
 				"components": map[string]any{
-					"frontend_ref":             frontend,
-					"runtime_base_ref":         runtimeBase,
-					"materializer_ref":         materializer,
-					"homebrew_commit":          "homebrew",
-					"ruby_runtime":             "ruby",
-					"verification_keys_digest": "keys",
-					"dalec_module":             "dalec",
-					"buildkit_module":          "buildkit",
+					"frontend_index_ref":                   frontendIndex,
+					"frontend_ref":                         frontend,
+					"runtime_base_ref":                     runtimeBase,
+					"materializer_ref":                     materializer,
+					"bottle_fetcher_ref":                   bottleFetcher,
+					"catalog_extractor_ref":                catalogExtractor,
+					"catalog_service_origin":               "",
+					"ingestion_jws_key_policy_digest":      "",
+					"tap_policy_digest":                    "sha256:" + strings.Repeat("1", 64),
+					"executable_runtime_policy_digest":     "sha256:" + strings.Repeat("2", 64),
+					"homebrew_commit":                      "homebrew",
+					"ruby_runtime":                         "ruby",
+					"verification_keys_digest":             "keys",
+					"dalec_module":                         "dalec",
+					"buildkit_module":                      "buildkit",
+					"supported_catalog_policy_versions":    []any{"catalog-v1"},
+					"supported_fetch_policy_versions":      []any{"fetch-v1"},
+					"supported_provenance_policy_versions": []any{"provenance-v1"},
 				},
 			}
 			data, err := json.Marshal(record)
@@ -1132,9 +1400,12 @@ func TestReleaseWorkflowResolutionBindingFilter(t *testing.T) {
 			cmd := exec.Command(
 				"jq", "-e",
 				"--arg", "platform", "linux/amd64",
+				"--arg", "frontend_index", frontendIndex,
 				"--arg", "frontend", frontend,
 				"--arg", "runtime_base", runtimeBase,
 				"--arg", "materializer", materializer,
+				"--arg", "bottle_fetcher", bottleFetcher,
+				"--arg", "catalog_extractor", catalogExtractor,
 				"--slurpfile", "manifest", manifest,
 				"--slurpfile", "inputs", inputs,
 				filter,
@@ -1389,57 +1660,6 @@ func validVulnerabilityReport(subject string, result map[string]any) map[string]
 		"Metadata":      map[string]any{"RepoDigests": []any{subject}},
 		"Results":       []any{result},
 	}
-}
-
-func validResolutionMetadataRecord() map[string]any {
-	digest := "sha256:" + strings.Repeat("a", 64)
-	return map[string]any{
-		"schema_version": "dalec-homebrew-resolution/v1",
-		"metadata": map[string]any{
-			"digest":                     digest,
-			"formula_digest":             digest,
-			"migration_digest":           digest,
-			"formula_envelope_digest":    digest,
-			"migration_envelope_digest":  digest,
-			"formula_freshness_source":   "signed-payload",
-			"migration_freshness_source": "http-last-modified",
-			"generated_at":               "2026-08-03T00:00:00Z",
-			"fetched_at":                 "2026-08-03T00:00:01Z",
-			"formula_url":                "https://formulae.brew.sh/api/formula.jws.json",
-			"migration_url":              "https://formulae.brew.sh/api/formula_renames.jws.json",
-			"signatures":                 []any{},
-			"formula_signatures":         []any{},
-			"migration_signatures":       []any{},
-		},
-	}
-}
-
-func cloneJSONRecord(t *testing.T, value map[string]any) map[string]any {
-	t.Helper()
-	data, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var clone map[string]any
-	if err := json.Unmarshal(data, &clone); err != nil {
-		t.Fatal(err)
-	}
-	return clone
-}
-
-func runWorkflowJQ(t *testing.T, filter string, value map[string]any) []byte {
-	t.Helper()
-	data, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("jq", "-S", "-e", filter)
-	cmd.Stdin = bytes.NewReader(data)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("workflow jq filter failed: %v\n%s", err, output)
-	}
-	return output
 }
 
 func releaseWorkflowShellFilter(t *testing.T, variable string) string {

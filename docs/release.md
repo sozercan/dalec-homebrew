@@ -1,14 +1,16 @@
 # Release and rollback
 
-A release is an immutable tuple of repository-owned frontend, runtime-base, and
-materializer components together with the external upstream Dalec dispatcher,
-Homebrew, verification-key, module, builder, snapshot, Chisel, and policy
-inputs. Promotion adds references to already tested owned-component digests; it
-never rebuilds or re-resolves them.
+A release is an immutable tuple of repository-owned frontend, runtime-base,
+bottle-fetcher, catalog-extractor, and materializer components together with
+the external upstream Dalec dispatcher, Homebrew, verification-key, module,
+builder, snapshot, Chisel, and policy inputs. Promotion adds references to
+already tested owned-component digests; it never rebuilds or re-resolves them.
 
 ## Component tuple
 
-A release frontend must bind digest-pinned runtime-base and materializer images. The frontend itself must also be invoked by digest.
+A V2 release frontend must bind digest-pinned runtime-base, materializer,
+bottle-fetcher, and catalog-extractor images plus the exact non-core policy
+tuple. The frontend itself must also be invoked by digest.
 
 At invocation, the frontend accepts these gateway build options as bindings:
 
@@ -19,15 +21,38 @@ DALEC_HOMEBREW_FRONTEND_REF
 DALEC_HOMEBREW_COMMIT
 DALEC_HOMEBREW_KEYS_DIGEST
 DALEC_HOMEBREW_RUBY_VERSION
+DALEC_HOMEBREW_BOTTLE_FETCHER
+DALEC_HOMEBREW_CATALOG_EXTRACTOR
+DALEC_HOMEBREW_TAP_POLICY_DIGEST
+DALEC_HOMEBREW_EXECUTABLE_RUNTIME_POLICY_DIGEST
+DALEC_HOMEBREW_SUPPORTED_CATALOG_POLICY_VERSIONS
+DALEC_HOMEBREW_SUPPORTED_FETCH_POLICY_VERSIONS
+DALEC_HOMEBREW_SUPPORTED_PROVENANCE_POLICY_VERSIONS
 ```
 
-These options are not general overrides. Runtime-base, materializer, and Homebrew commit values may fill a binding only when that value was not compiled into the frontend; otherwise a supplied value must match the compiled value. Ruby falls back to `4.0.6` even when no value was compiled, and the key-set digest must match the embedded keys. To test different Ruby or key-set pins, rebuild the frontend with the Dockerfile arguments `HOMEBREW_RUBY_VERSION` and `HOMEBREW_KEYS_DIGEST`; a different key set also requires updating the embedded keys to match that digest.
+These options are not general overrides. Runtime-base, materializer, helper,
+policy, and Homebrew commit values may fill a binding only when the relevant
+value was not compiled into the frontend; otherwise a supplied value must match
+the compiled value. Invocation options cannot upgrade a core-only frontend into
+a non-core-capable one. Ruby falls back to `4.0.6` even when no value was
+compiled, and the key-set digest must match the embedded keys. To test different
+Ruby or key-set pins, rebuild the frontend with the Dockerfile arguments
+`HOMEBREW_RUBY_VERSION` and `HOMEBREW_KEYS_DIGEST`; a different key set also
+requires updating the embedded keys to match that digest.
 
-The frontend cannot bind its own final digest before it is published. `DALEC_HOMEBREW_FRONTEND_REF` therefore normally comes from BuildKit's digest-pinned gateway `source` option and must match it when explicitly supplied. Mutable tags are rejected. Each resolution record binds the frontend platform child returned by BuildKit and the immutable runtime-base and materializer indexes compiled into that frontend.
+The frontend cannot bind its own final digest before it is published.
+`DALEC_HOMEBREW_FRONTEND_REF` therefore normally comes from BuildKit's
+digest-pinned gateway `source` option and must match it when explicitly
+supplied. Mutable tags are rejected. Each V2 resolution record binds the
+frontend index and executing platform child, the selected runtime-base and
+materializer children, and the immutable bottle-fetcher and catalog-extractor
+indexes compiled into the frontend.
 
-See [`../release/components.example.json`](../release/components.example.json)
-for the canonical manifest shape. The checked-in file contains placeholders
-and is illustrative. Release automation generates the manifest with
+See [`../release/components-v2.example.json`](../release/components-v2.example.json)
+for the current canonical manifest shape. The checked-in file contains
+placeholders and is illustrative; the retained
+[`../release/components.example.json`](../release/components.example.json) is
+the V1 shape. Release automation generates the manifest with
 `cmd/release-manifest`. Validate a populated manifest with:
 
 ```console
@@ -93,10 +118,11 @@ tuple.
 Build and publish components in this order:
 
 1. `runtime-base-amd64` and `runtime-base-arm64`
-2. platform materializer children derived from the corresponding full Ubuntu children
-3. immutable multi-platform runtime-base and materializer indexes
-4. the frontend, bound to the released base and materializer identities
-5. the completed component manifest, after the frontend index and child digests are known
+2. the immutable multi-platform runtime-base index
+3. bottle-fetcher and catalog-extractor platform children and indexes
+4. platform materializer children bound to the helper indexes and corresponding full Ubuntu children, then the materializer index
+5. the frontend, bound to the released base, materializer, helper, and policy identities
+6. the completed component manifest, after every index and child digest is known
 
 [`../docker-bake.hcl`](../docker-bake.hcl) exposes the repository build targets. Signing, provenance, vulnerability scanning, OCI referrer publication, mirror retention, and promotion are release-pipeline responsibilities and are deliberately not performed by the frontend.
 
@@ -125,8 +151,9 @@ The repository currently pins:
 - `chisel-releases` commit `f42d76490045602d83de8afef5126987179a6693` and its archive SHA-256
 - verification-key set
   `sha256:ef2d2c9e0219d485df9f07fff7b037feadc36c93085be9ffefb1390f31a3de1d`
-- policy version `homebrew-runtime-v1`, summarized in
-  [`../policy/v1/policy.json`](../policy/v1/policy.json)
+- policy version `homebrew-runtime-v2`, summarized in
+  [`../policy/v2/policy.json`](../policy/v2/policy.json), with the non-core tap
+  policy in [`../policy/v2/tap-policy.json`](../policy/v2/tap-policy.json)
 
 [`../scripts/release-inputs.sh`](../scripts/release-inputs.sh) is the
 machine-readable inventory used by CI. It validates the Dockerfile and Bake
@@ -154,14 +181,14 @@ repository workflow automates steps 1-5 for a reusable component tuple;
 downstream product releases consume that signed tuple and complete steps 6-9.
 The example runtimes are integration fixtures and are not promoted.
 
-1. Build `amd64` and `arm64` runtime-base children from the pinned Chisel binary, immutable `chisel-releases` commit, and Ubuntu snapshot with `SOURCE_DATE_EPOCH` fixed.
-2. Build materializer children from the corresponding pinned full Ubuntu child images and copy only the matching Chisel runtime-base package and artifact evidence into them.
+1. Build `amd64` and `arm64` runtime-base children from the pinned Chisel binary, immutable `chisel-releases` commit, and Ubuntu snapshot with `SOURCE_DATE_EPOCH` fixed, then assemble their index.
+2. Build the bottle-fetcher and catalog-extractor children and indexes, then build materializer children from the corresponding pinned full Ubuntu child images with the exact helper and policy tuple compiled in.
 3. Smoke-test the runtime-base and materializer children, pour both the fixed
    `glibc` regression bottle and the currently authenticated `glibc` bottle
    offline with each materializer child, then assemble and verify their
    immutable multi-platform indexes.
-4. Build the frontend with the base, materializer, Homebrew, key-set, module, and policy inputs bound; publish its platform children and index by digest; generate and verify the completed component manifest; and run every focused runtime spec on native `amd64` and `arm64` workers while producing runtime evidence, component-child SPDX SBOMs, and vulnerability reports.
-5. Sign all six component children and three indexes, attach the exact SLSA predicate to every subject and the matching SPDX predicate to each child, then blob-sign the component manifest, accepted metadata snapshot, and checksum set.
+4. Build the frontend with the complete V2 tuple bound; publish its platform children and index by digest; generate and verify the completed component manifest; run every core-focused runtime spec on native `amd64` and `arm64` workers; and run the release-owned non-core fixture through the published helper tuple while producing runtime evidence, component-child SPDX SBOMs, and vulnerability reports.
+5. Sign all ten component children and five indexes, attach the exact SLSA predicate to every subject and the matching SPDX predicate to each child, then blob-sign the component manifest, accepted metadata snapshot, and checksum set.
 6. Resolve once, retain the signed metadata envelopes and resolution records, and mirror every selected layer by digest.
 7. Build platform runtime images, test and scan them by manifest digest, then assemble the final index from those exact manifests.
 8. Attach signed SPDX, provenance, resolution, inventory, prune, materialization, base evidence, and vulnerability or VEX evidence.
@@ -251,21 +278,24 @@ For a new tuple, the workflow:
 1. Runs normal CI, validates the tagged release inputs, and verifies that the
    pinned upstream Dalec index contains the recorded `amd64` and `arm64`
    dispatcher children.
-2. Builds and smoke-tests the `amd64` and `arm64` runtime-base and materializer
-   children, assembles and verifies their indexes, builds the frontend against
-   those exact indexes, and generates and verifies the completed component
-   manifest.
+2. Builds all `amd64` and `arm64` component children, smoke-tests the
+   runtime-base and materializer children, assembles and verifies all five
+   component indexes, builds the frontend against that exact V2 tuple, and
+   generates and verifies the completed component manifest. The published
+   bottle-fetcher and catalog-extractor are exercised by the `amd64` non-core
+   integration in the next step.
 3. Runs every focused integration spec through the pinned platform-specific
    upstream Dalec dispatcher on native `amd64` and `arm64` workers, requires one
-   authenticated Homebrew metadata snapshot across every spec and
-   platform, produces deterministic runtime evidence, and separately generates
-   SPDX SBOMs and vulnerability reports for each component child. Fixed
+   authenticated Homebrew metadata identity across every spec and platform,
+   and additionally runs the non-core helper fixture on `amd64`. It produces
+   deterministic runtime evidence and separately generates SPDX SBOMs and
+   vulnerability reports for each component child. Fixed
    `CRITICAL` findings are surfaced in the corresponding evidence job summary
    and retained in the reports without blocking the release.
 4. Generates provenance that includes the external dispatcher binding, signs
    every repository-owned component child and index with keyless Cosign,
-   attaches the exact SLSA predicate to all nine owned subjects and the matching
-   SPDX predicate to the six owned children, and signs the component manifest,
+   attaches the exact SLSA predicate to all fifteen owned subjects and the matching
+   SPDX predicate to the ten owned children, and signs the component manifest,
    metadata snapshot, and checksum set. The upstream Dalec image is neither
    signed nor promoted by this repository.
 
@@ -277,9 +307,17 @@ digest; the workflow creates only missing tags, verifies them, rechecks the
 draft, and then publishes it. It never rebuilds during promotion or publishes a
 `latest` tag.
 
-The workflow records the accepted metadata snapshot but does not compare it
-with earlier releases. See [`../SECURITY.md`](../SECURITY.md) for the resulting
-cross-release anti-rollback limitation.
+Every integration must report the same authenticated Homebrew commit, signer,
+payload digests, envelope digests, and rollback identity. When the controlling
+aggregate `generated_at` is fully signed, its timestamp must also be identical.
+When either signed document lacks that field, independent runners may observe
+slightly different unsigned HTTP `Last-Modified` timestamps for the same
+authenticated bytes. In that case only, the workflow retains every
+spec/platform observation and deterministically selects the earliest timestamp
+for `metadata-snapshot.json`; it does not treat the HTTP value as authenticated
+identity. The workflow does not compare the accepted snapshot with earlier
+releases. See [`../SECURITY.md`](../SECURITY.md) for the resulting trust and
+cross-release anti-rollback limitations.
 
 The GitHub `release` environment gates signing and promotion. Configure required
 reviewers, protect release-critical paths with branch rules, restrict release-tag
@@ -292,15 +330,15 @@ Release assets include:
 - `components.json`, `components.digest`, and `components.json.bundle`
 - `digests.json`, `inputs.json`, `metadata-snapshot.json`,
   `metadata-snapshot.json.bundle`, and `provenance.json`
-- six per-component, per-platform SPDX SBOMs and six vulnerability reports
+- ten per-component, per-platform SPDX SBOMs and ten vulnerability reports
 - one deterministic `runtime-evidence-<platform>-<spec>.tar.gz` archive for each
-  focused spec and platform
+  common focused spec and platform, plus the `amd64` non-core helper fixture
 - `SHA256SUMS` and `SHA256SUMS.bundle`
 
 The signed checksum set authenticates every non-bundle release asset. The
 component manifest and metadata snapshot also have direct Sigstore bundles.
-SLSA attestations are attached to all six component children and three indexes;
-SPDX attestations are attached to the six children. Vulnerability reports and
+SLSA attestations are attached to all ten component children and five indexes;
+SPDX attestations are attached to the ten children. Vulnerability reports and
 runtime evidence archives are checksum-authenticated release assets, not OCI
 attestations.
 

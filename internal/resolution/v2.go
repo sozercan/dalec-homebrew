@@ -25,6 +25,8 @@ const (
 	BuildLocalExtractionPolicyV1     = "build-local-tap-extraction-v1"
 	BuildLocalRollbackPolicyV1       = "build-local-exact-commit-no-cross-build-rollback-v1"
 	CoreMetadataRollbackPolicyV1     = "homebrew-core-generated-at-v1"
+	CoreGeneratedAtSignedPayload     = "signed-payload"
+	CoreGeneratedAtLastModified      = "http-last-modified"
 	HTTPSFetchPolicyVersionV1        = "homebrew-bottle-fetch-v1"
 	BuildLocalArtifactPolicyV1       = "build-local-artifact-v1"
 	VerifiedProvenancePolicyV1       = "sigstore-in-toto-v1"
@@ -110,6 +112,7 @@ type MetadataSource struct {
 	Extraction           *TapExtractionV2   `json:"extraction,omitempty"`
 	Documents            []MetadataDocument `json:"documents"`
 	GeneratedAt          time.Time          `json:"generated_at"`
+	GeneratedAtSource    string             `json:"generated_at_source,omitempty"`
 	FetchedAt            time.Time          `json:"fetched_at"`
 	Sequence             uint64             `json:"sequence"`
 	Rollback             RollbackEvidence   `json:"rollback"`
@@ -564,6 +567,17 @@ func ValidateV2(r *RecordV2) error {
 				errs = append(errs, err)
 			}
 		}
+		isCore := tapErr == nil && tap == formulaid.CoreTap()
+		if isCore {
+			// Empty is retained only for replay compatibility with V2 records
+			// created before the timestamp trust marker was added. New resolvers
+			// always emit an explicit value, and release signing requires it.
+			if source.GeneratedAtSource != "" && source.GeneratedAtSource != CoreGeneratedAtSignedPayload && source.GeneratedAtSource != CoreGeneratedAtLastModified {
+				errs = append(errs, fmt.Errorf("%s.generated_at_source %q is unsupported", label, source.GeneratedAtSource))
+			}
+		} else if source.GeneratedAtSource != "" {
+			errs = append(errs, fmt.Errorf("%s.generated_at_source is valid only for homebrew/core", label))
+		}
 		if source.GeneratedAt.IsZero() || source.FetchedAt.IsZero() {
 			errs = append(errs, fmt.Errorf("%s timestamps must be set", label))
 		} else {
@@ -585,7 +599,7 @@ func ValidateV2(r *RecordV2) error {
 			errs = append(errs, fmt.Errorf("%s.sequence must be positive", label))
 		}
 		expectedRollbackPolicy := MetadataRollbackPolicyV1
-		if source.Tap == TapID(formulaid.CoreTap().String()) {
+		if isCore {
 			expectedRollbackPolicy = CoreMetadataRollbackPolicyV1
 			if !source.GeneratedAt.IsZero() && source.Sequence != uint64(source.GeneratedAt.Unix()) {
 				errs = append(errs, fmt.Errorf("%s.sequence must equal authenticated core generated_at", label))
