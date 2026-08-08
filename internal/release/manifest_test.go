@@ -269,12 +269,13 @@ func TestDecodeRejectsDuplicateMembers(t *testing.T) {
 
 func TestBindingsForV2PreservesCompleteResolutionTuple(t *testing.T) {
 	manifest := validV2(t)
+	manifest.BottleFetcher.Index = "ghcr.io/x/fetcher@sha256:" + strings.Repeat("c", 64)
 	bindings, err := manifest.BindingsFor(resolution.Platform{OS: "linux", Architecture: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	components := bindings.ComponentsV2
-	if components.FrontendIndexRef != manifest.Frontend.Index || components.FrontendRef == "" || components.BottleFetcherRef == "" || components.CatalogServiceOrigin != manifest.CatalogServiceOrigin || components.IngestionJWSKeyPolicyDigest != manifest.IngestionJWSKeyPolicyDigest || components.TapPolicyDigest != manifest.TapPolicyDigest || components.ExecutableRuntimePolicyDigest != manifest.ExecutableRuntimePolicyDigest {
+	if components.FrontendIndexRef != manifest.Frontend.Index || components.FrontendRef == "" || components.BottleFetcherRef != manifest.BottleFetcher.Index || bindings.BottleFetcherRef != manifest.BottleFetcher.Index || components.CatalogServiceOrigin != manifest.CatalogServiceOrigin || components.IngestionJWSKeyPolicyDigest != manifest.IngestionJWSKeyPolicyDigest || components.TapPolicyDigest != manifest.TapPolicyDigest || components.ExecutableRuntimePolicyDigest != manifest.ExecutableRuntimePolicyDigest {
 		t.Fatalf("V2 components dropped bindings: %+v", components)
 	}
 	if len(components.SupportedCatalogPolicyVersions) == 0 || len(components.SupportedFetchPolicyVersions) == 0 || len(components.SupportedProvenancePolicyVersions) == 0 {
@@ -285,6 +286,7 @@ func TestBindingsForV2PreservesCompleteResolutionTuple(t *testing.T) {
 func TestV2BuildLocalManifestBindings(t *testing.T) {
 	m := validV2(t)
 	extractor := testComponent("catalog-extractor")
+	extractor.Index = "ghcr.io/x/catalog-extractor@sha256:" + strings.Repeat("c", 64)
 	m.CatalogExtractor = &extractor
 	m.CatalogServiceOrigin = ""
 	m.IngestionJWSKeyPolicyDigest = ""
@@ -295,7 +297,7 @@ func TestV2BuildLocalManifestBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bindings.CatalogExtractorRef == "" || bindings.ComponentsV2.CatalogExtractorRef != bindings.CatalogExtractorRef {
+	if bindings.CatalogExtractorRef != extractor.Index || bindings.ComponentsV2.CatalogExtractorRef != extractor.Index {
 		t.Fatalf("build-local bindings = %+v", bindings)
 	}
 	if bindings.ComponentsV2.CatalogServiceOrigin != "" || bindings.ComponentsV2.IngestionJWSKeyPolicyDigest != "" {

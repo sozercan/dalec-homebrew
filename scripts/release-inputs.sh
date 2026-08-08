@@ -77,6 +77,10 @@ dalec_frontend_arm64=$(jq -er '.platforms["linux/arm64"]' <<<"$dalec_frontend")
 targets=(
   runtime-base-amd64
   runtime-base-arm64
+  bottle-fetcher-amd64
+  bottle-fetcher-arm64
+  catalog-extractor-amd64
+  catalog-extractor-arm64
   materializer-amd64
   materializer-arm64
   frontend
@@ -87,6 +91,12 @@ bake=$(docker buildx bake --print \
   --var "REGISTRY=$release_registry" \
   --var "VERSION=$release_version" \
   "${targets[@]}")
+
+missing_target=$(jq -r --argjson targets "$targets_json" '
+  . as $bake
+  | first($targets[] as $target | select($bake.target[$target] == null) | $target) // ""
+' <<<"$bake")
+[[ -z "$missing_target" ]] || fail "release bake target is missing: $missing_target"
 
 source_date_epoch=$(jq -er --argjson targets "$targets_json" '
   . as $bake
@@ -135,9 +145,15 @@ if jq -e --argjson targets "$targets_json" '
   fail "release bake targets must not set DALEC_SKIP_TESTS"
 fi
 
-for name in FRONTEND_REF RUNTIME_BASE_REF MATERIALIZER_REF; do
+for name in FRONTEND_REF RUNTIME_BASE_REF MATERIALIZER_REF BOTTLE_FETCHER_REF CATALOG_EXTRACTOR_REF; do
   value=$(jq -r --arg name "$name" '.target.frontend.args[$name] // ""' <<<"$bake")
   [[ -z "$value" ]] || fail "default frontend $name must be empty; release CI supplies or derives the immutable reference"
+done
+for target in frontend materializer-amd64 materializer-arm64; do
+  for name in BOTTLE_FETCHER_REF CATALOG_EXTRACTOR_REF TAP_POLICY_DIGEST EXECUTABLE_RUNTIME_POLICY_DIGEST SUPPORTED_CATALOG_POLICY_VERSIONS SUPPORTED_FETCH_POLICY_VERSIONS SUPPORTED_PROVENANCE_POLICY_VERSIONS; do
+    value=$(jq -r --arg target "$target" --arg name "$name" '.target[$target].args[$name] // ""' <<<"$bake")
+    [[ -z "$value" ]] || fail "default $target $name must be empty; release CI supplies the immutable V2 binding"
+  done
 done
 
 validate_bake_target() {
@@ -167,6 +183,14 @@ validate_bake_target runtime-base-amd64 runtime-base '["linux/amd64"]' \
   "$release_registry/dalec-homebrew-runtime-base:${release_version}-amd64"
 validate_bake_target runtime-base-arm64 runtime-base '["linux/arm64"]' \
   "$release_registry/dalec-homebrew-runtime-base:${release_version}-arm64"
+validate_bake_target bottle-fetcher-amd64 bottle-fetcher '["linux/amd64"]' \
+  "$release_registry/dalec-homebrew-bottle-fetcher:${release_version}-amd64"
+validate_bake_target bottle-fetcher-arm64 bottle-fetcher '["linux/arm64"]' \
+  "$release_registry/dalec-homebrew-bottle-fetcher:${release_version}-arm64"
+validate_bake_target catalog-extractor-amd64 catalog-extractor '["linux/amd64"]' \
+  "$release_registry/dalec-homebrew-catalog-extractor:${release_version}-amd64"
+validate_bake_target catalog-extractor-arm64 catalog-extractor '["linux/arm64"]' \
+  "$release_registry/dalec-homebrew-catalog-extractor:${release_version}-arm64"
 validate_bake_target materializer-amd64 materializer '["linux/amd64"]' \
   "$release_registry/dalec-homebrew-materializer:${release_version}-amd64"
 validate_bake_target materializer-arm64 materializer '["linux/arm64"]' \
@@ -178,10 +202,16 @@ runtime_base_amd64=$(jq -er '.target["runtime-base-amd64"].args.RUNTIME_BASE' <<
 runtime_base_arm64=$(jq -er '.target["runtime-base-arm64"].args.RUNTIME_BASE' <<<"$bake")
 materializer_base_amd64=$(jq -er '.target["materializer-amd64"].args.RUNTIME_BASE' <<<"$bake")
 materializer_base_arm64=$(jq -er '.target["materializer-arm64"].args.RUNTIME_BASE' <<<"$bake")
+catalog_extractor_base_amd64=$(jq -er '.target["catalog-extractor-amd64"].args.RUNTIME_BASE' <<<"$bake")
+catalog_extractor_base_arm64=$(jq -er '.target["catalog-extractor-arm64"].args.RUNTIME_BASE' <<<"$bake")
 [[ "$materializer_base_amd64" == "$runtime_base_amd64" ]] || fail \
   "materializer-amd64 Ubuntu base differs from runtime-base-amd64"
 [[ "$materializer_base_arm64" == "$runtime_base_arm64" ]] || fail \
   "materializer-arm64 Ubuntu base differs from runtime-base-arm64"
+[[ "$catalog_extractor_base_amd64" == "$runtime_base_amd64" ]] || fail \
+  "catalog-extractor-amd64 Ubuntu base differs from runtime-base-amd64"
+[[ "$catalog_extractor_base_arm64" == "$runtime_base_arm64" ]] || fail \
+  "catalog-extractor-arm64 Ubuntu base differs from runtime-base-arm64"
 [[ "$runtime_base_amd64" != "$runtime_base_arm64" ]] || fail \
   "amd64 and arm64 runtime bases unexpectedly use the same manifest"
 

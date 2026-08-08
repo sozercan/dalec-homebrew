@@ -304,7 +304,7 @@ func metadataSourcesV2(opts V2Options) ([]resolution.MetadataSource, int64, erro
 		return nil, 0, errors.New("authenticated core metadata signer is missing")
 	}
 	coreSequence := uint64(info.GeneratedAt.Unix())
-	core := resolution.MetadataSource{Tap: "homebrew/core", Commit: opts.Components.HomebrewCommit, Signer: coreSignature, GeneratedAt: info.GeneratedAt, FetchedAt: info.FetchedAt, Sequence: coreSequence, Rollback: resolution.RollbackEvidence{Policy: resolution.CoreMetadataRollbackPolicyV1, SequenceFloor: opts.CoreRollbackFloor, StateDigest: info.Digest}, Documents: []resolution.MetadataDocument{{Name: "formula", Digest: info.FormulaDigest, EnvelopeDigest: info.Formula.EnvelopeDigest}, {Name: "migrations", Digest: info.MigrationDigest, EnvelopeDigest: info.Migrations.EnvelopeDigest}}}
+	core := resolution.MetadataSource{Tap: "homebrew/core", Commit: opts.Components.HomebrewCommit, Signer: coreSignature, GeneratedAt: info.GeneratedAt, GeneratedAtSource: coreGeneratedAtSource(info), FetchedAt: info.FetchedAt, Sequence: coreSequence, Rollback: resolution.RollbackEvidence{Policy: resolution.CoreMetadataRollbackPolicyV1, SequenceFloor: opts.CoreRollbackFloor, StateDigest: info.Digest}, Documents: []resolution.MetadataDocument{{Name: "formula", Digest: info.FormulaDigest, EnvelopeDigest: info.Formula.EnvelopeDigest}, {Name: "migrations", Digest: info.MigrationDigest, EnvelopeDigest: info.Migrations.EnvelopeDigest}}}
 	sources := []resolution.MetadataSource{core}
 	earliest := info.GeneratedAt.Unix()
 	policyVersion := catalog.TapCatalogPolicyVersion
@@ -426,10 +426,28 @@ func RecordV2FromCore(core *resolution.Record, components resolution.ComponentsV
 		return nil, errors.New("core metadata signer is missing")
 	}
 	sequence := uint64(coreMetadata.GeneratedAt.Unix())
-	source := resolution.MetadataSource{Tap: "homebrew/core", Commit: components.HomebrewCommit, Signer: coreSignature, Documents: []resolution.MetadataDocument{{Name: "formula", Digest: coreMetadata.FormulaDigest, EnvelopeDigest: coreMetadata.Formula.EnvelopeDigest}, {Name: "migrations", Digest: coreMetadata.MigrationDigest, EnvelopeDigest: coreMetadata.Migrations.EnvelopeDigest}}, GeneratedAt: coreMetadata.GeneratedAt, FetchedAt: coreMetadata.FetchedAt, Sequence: sequence, Rollback: resolution.RollbackEvidence{Policy: resolution.CoreMetadataRollbackPolicyV1, SequenceFloor: coreRollbackFloor, StateDigest: coreMetadata.Digest}}
+	source := resolution.MetadataSource{Tap: "homebrew/core", Commit: components.HomebrewCommit, Signer: coreSignature, Documents: []resolution.MetadataDocument{{Name: "formula", Digest: coreMetadata.FormulaDigest, EnvelopeDigest: coreMetadata.Formula.EnvelopeDigest}, {Name: "migrations", Digest: coreMetadata.MigrationDigest, EnvelopeDigest: coreMetadata.Migrations.EnvelopeDigest}}, GeneratedAt: coreMetadata.GeneratedAt, GeneratedAtSource: coreGeneratedAtSource(coreMetadata), FetchedAt: coreMetadata.FetchedAt, Sequence: sequence, Rollback: resolution.RollbackEvidence{Policy: resolution.CoreMetadataRollbackPolicyV1, SequenceFloor: coreRollbackFloor, StateDigest: coreMetadata.Digest}}
 	record := &resolution.RecordV2{SchemaVersion: resolution.SchemaVersionV2, PolicyVersion: resolution.PolicyVersionV2, Input: core.Input, MetadataSources: []resolution.MetadataSource{source}, ResolvedAt: core.ResolvedAt, SourceDateEpoch: core.SourceDateEpoch, Requested: requested, Nodes: nodes, InstallOrder: order, Components: components, Runtime: core.Runtime}
 	if err := resolution.ValidateV2(record); err != nil {
 		return nil, err
 	}
 	return record, nil
+}
+
+// coreGeneratedAtSource records whether the aggregate snapshot timestamp is
+// fully authenticated. Any HTTP-derived document makes the aggregate
+// transport-dependent even when the other document currently supplies the
+// earlier timestamp; this keeps the trust marker stable if that HTTP timestamp
+// later crosses the signed timestamp on another runner.
+func coreGeneratedAtSource(info metadata.SnapshotInfo) string {
+	for _, document := range []metadata.DocumentInfo{info.Formula, info.Migrations} {
+		switch document.GeneratedAtSource {
+		case metadata.GeneratedAtLastModified:
+			return resolution.CoreGeneratedAtLastModified
+		case metadata.GeneratedAtSignedPayload:
+		default:
+			return ""
+		}
+	}
+	return resolution.CoreGeneratedAtSignedPayload
 }

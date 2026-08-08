@@ -115,11 +115,13 @@ A resolution record binds:
 - the effective Dalec input digest and target platform
 - requested roots sorted lexicographically by canonical requested Formula ID,
   independent of YAML map ordering
-- Formula and migration payload and envelope digests, freshness sources, timestamps, URLs, and recorded signature-verification evidence
+- Formula and migration payload and envelope digests, timestamp trust source,
+  timestamps, and recorded signature-verification evidence
 - exact OCI index, manifest, config, and layer descriptor identities plus selected annotations
 - the resolved dependency closure
 - a separately computed deterministic topological installation order
-- frontend, runtime-base, and materializer component identities
+- frontend, runtime-base, materializer, bottle-fetcher, and catalog-extractor
+  component identities plus the complete V2 policy tuple
 - runtime, attestation-waiver, and pruning-policy inputs
 
 Requested-root order and installation order are distinct. Canonical root order
@@ -133,6 +135,15 @@ is not projected into the child-generated resolution as if the child had
 authenticated its parent.
 
 Formula and migration documents are fetched and verified separately because upstream does not provide a signed common snapshot identifier. The combined snapshot digest commits to the exact accepted payload pair, but does not prove that Homebrew published the pair atomically. An authenticated `generated_date` takes precedence over HTTP metadata for each document; otherwise freshness uses `Last-Modified`. The record's `generated_at` and `source_date_epoch` use the earlier accepted document timestamp.
+
+Within one frontend invocation the verified snapshot is shared immutably across
+platform callbacks. Release platform jobs are separate invocations and can
+observe different unsigned `Last-Modified` values for the same authenticated
+documents. V2 records mark the aggregate timestamp as fully signed only when
+both document timestamps are authenticated; release signing requires every
+authenticated identity field to match, rejects fully signed timestamp drift,
+and records all allowed HTTP-timestamp observations in the signed metadata
+snapshot.
 
 A record is immutable once passed to the materializer. Replaying the same authenticated record and component tuple never reads a mutable Formula tag; BuildKit fetches the exact recorded layer digest.
 

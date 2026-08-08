@@ -75,6 +75,7 @@ func TestReleaseInputsRejectsUnsafeFixtures(t *testing.T) {
 	setAMD64Base := func(f *bakeFixture, ref string) {
 		f.Target["runtime-base-amd64"].Args["RUNTIME_BASE"] = ref
 		f.Target["materializer-amd64"].Args["RUNTIME_BASE"] = ref
+		f.Target["catalog-extractor-amd64"].Args["RUNTIME_BASE"] = ref
 	}
 	tests := []struct {
 		name               string
@@ -89,6 +90,41 @@ func TestReleaseInputsRejectsUnsafeFixtures(t *testing.T) {
 				f.Target["materializer-arm64"].Args["SOURCE_DATE_EPOCH"] = "1781049601"
 			},
 			want: "release targets use conflicting SOURCE_DATE_EPOCH values",
+		},
+		{
+			name: "missing bottle fetcher target",
+			mutate: func(f *bakeFixture) {
+				delete(f.Target, "bottle-fetcher-arm64")
+			},
+			want: "release bake target is missing: bottle-fetcher-arm64",
+		},
+		{
+			name: "miswired catalog extractor target",
+			mutate: func(f *bakeFixture) {
+				f.Target["catalog-extractor-amd64"].Target = "frontend"
+			},
+			want: "catalog-extractor-amd64 must use context ., Dockerfile, target catalog-extractor",
+		},
+		{
+			name: "frontend helper binding default",
+			mutate: func(f *bakeFixture) {
+				f.Target["frontend"].Args["BOTTLE_FETCHER_REF"] = "registry.example/fetcher@sha256:" + strings.Repeat("a", 64)
+			},
+			want: "default frontend BOTTLE_FETCHER_REF must be empty",
+		},
+		{
+			name: "materializer policy binding default",
+			mutate: func(f *bakeFixture) {
+				f.Target["materializer-amd64"].Args["TAP_POLICY_DIGEST"] = "sha256:" + strings.Repeat("a", 64)
+			},
+			want: "default materializer-amd64 TAP_POLICY_DIGEST must be empty",
+		},
+		{
+			name: "catalog extractor runtime base mismatch",
+			mutate: func(f *bakeFixture) {
+				f.Target["catalog-extractor-amd64"].Args["RUNTIME_BASE"] = "docker.io/library/ubuntu@sha256:" + strings.Repeat("c", 64)
+			},
+			want: "catalog-extractor-amd64 Ubuntu base differs from runtime-base-amd64",
 		},
 		{
 			name: "mutable runtime base",
@@ -270,10 +306,14 @@ func validBakeFixture() bakeFixture {
 		}
 	}
 	return bakeFixture{Target: map[string]*bakeTarget{
-		"runtime-base-amd64": child("runtime-base", "linux/amd64", testRuntimeBaseAMD64, testRegistry+"/dalec-homebrew-runtime-base:"+testVersion+"-amd64"),
-		"runtime-base-arm64": child("runtime-base", "linux/arm64", testRuntimeBaseARM64, testRegistry+"/dalec-homebrew-runtime-base:"+testVersion+"-arm64"),
-		"materializer-amd64": child("materializer", "linux/amd64", testRuntimeBaseAMD64, testRegistry+"/dalec-homebrew-materializer:"+testVersion+"-amd64"),
-		"materializer-arm64": child("materializer", "linux/arm64", testRuntimeBaseARM64, testRegistry+"/dalec-homebrew-materializer:"+testVersion+"-arm64"),
+		"runtime-base-amd64":      child("runtime-base", "linux/amd64", testRuntimeBaseAMD64, testRegistry+"/dalec-homebrew-runtime-base:"+testVersion+"-amd64"),
+		"runtime-base-arm64":      child("runtime-base", "linux/arm64", testRuntimeBaseARM64, testRegistry+"/dalec-homebrew-runtime-base:"+testVersion+"-arm64"),
+		"bottle-fetcher-amd64":    child("bottle-fetcher", "linux/amd64", "", testRegistry+"/dalec-homebrew-bottle-fetcher:"+testVersion+"-amd64"),
+		"bottle-fetcher-arm64":    child("bottle-fetcher", "linux/arm64", "", testRegistry+"/dalec-homebrew-bottle-fetcher:"+testVersion+"-arm64"),
+		"catalog-extractor-amd64": child("catalog-extractor", "linux/amd64", testRuntimeBaseAMD64, testRegistry+"/dalec-homebrew-catalog-extractor:"+testVersion+"-amd64"),
+		"catalog-extractor-arm64": child("catalog-extractor", "linux/arm64", testRuntimeBaseARM64, testRegistry+"/dalec-homebrew-catalog-extractor:"+testVersion+"-arm64"),
+		"materializer-amd64":      child("materializer", "linux/amd64", testRuntimeBaseAMD64, testRegistry+"/dalec-homebrew-materializer:"+testVersion+"-amd64"),
+		"materializer-arm64":      child("materializer", "linux/arm64", testRuntimeBaseARM64, testRegistry+"/dalec-homebrew-materializer:"+testVersion+"-arm64"),
 		"frontend": {
 			Target:     "frontend",
 			Context:    ".",
@@ -325,7 +365,7 @@ func runReleaseInputsWithDalecVersion(t *testing.T, fixture bakeFixture, replace
 	}
 	writeExecutable(t, filepath.Join(bin, "docker"), `#!/usr/bin/env bash
 set -euo pipefail
-expected="buildx bake --print --var REGISTRY=$REGISTRY --var VERSION=$VERSION runtime-base-amd64 runtime-base-arm64 materializer-amd64 materializer-arm64 frontend"
+expected="buildx bake --print --var REGISTRY=$REGISTRY --var VERSION=$VERSION runtime-base-amd64 runtime-base-arm64 bottle-fetcher-amd64 bottle-fetcher-arm64 catalog-extractor-amd64 catalog-extractor-arm64 materializer-amd64 materializer-arm64 frontend"
 [[ "$*" == "$expected" ]] || {
   echo "unexpected docker command: $*" >&2
   exit 1
