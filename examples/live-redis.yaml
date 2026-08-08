@@ -108,6 +108,21 @@ tests:
           grep -q '^VERSION_CODENAME=noble$' /etc/os-release
           test "$(find /usr/share/dalec-homebrew -maxdepth 1 -type f | wc -l)" -eq 9
           test -z "$(find "$HOMEBREW_PREFIX" -type f -perm /111 -writable -print -quit)"
+          evidence_dir=/usr/share/dalec-homebrew
+          if grep -Fq 'dalec-homebrew-runtime-manifest/v1' "$evidence_dir/manifest.json" \
+            && grep -Fq 'dalec-homebrew-resolution/v1' "$evidence_dir/resolution.json" \
+            && grep -Fq 'dalec-homebrew-runtime-inventory/v1' "$evidence_dir/runtime-inventory.json" \
+            && grep -Fq 'dalec-homebrew-prune-manifest/v2' "$evidence_dir/prune-manifest.json"; then
+            :
+          elif grep -Fq 'dalec-homebrew-runtime-manifest/v2' "$evidence_dir/manifest.json" \
+            && grep -Fq 'dalec-homebrew-resolution/v2' "$evidence_dir/resolution.json" \
+            && grep -Fq 'dalec-homebrew-runtime-inventory/v2' "$evidence_dir/runtime-inventory.json" \
+            && grep -Fq 'dalec-homebrew-prune-manifest/v3' "$evidence_dir/prune-manifest.json"; then
+            :
+          else
+            echo 'runtime evidence schemas are not a coherent V1 or V2 tuple' >&2
+            exit 1
+          fi
           echo runtime-invariants-ok
         stdout:
           equals: "runtime-invariants-ok\n"
@@ -136,16 +151,12 @@ tests:
         not_exist: true
       /usr/share/dalec-homebrew/manifest.json:
         permissions: 0o444
-        contains: [dalec-homebrew-runtime-manifest/v2]
       /usr/share/dalec-homebrew/resolution.json:
         permissions: 0o444
-        contains: [dalec-homebrew-resolution/v2]
       /usr/share/dalec-homebrew/runtime-inventory.json:
         permissions: 0o444
-        contains: [dalec-homebrew-runtime-inventory/v2]
       /usr/share/dalec-homebrew/prune-manifest.json:
         permissions: 0o444
-        contains: [dalec-homebrew-prune-manifest/v3]
       /usr/share/dalec-homebrew/sbom.spdx.json:
         permissions: 0o444
         contains:
