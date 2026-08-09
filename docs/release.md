@@ -200,7 +200,14 @@ The example runtimes are integration fixtures and are not promoted.
    release-owned non-core fixture through the published helper tuple while
    producing runtime evidence, component-child SPDX SBOMs, and vulnerability
    reports.
-5. Sign all ten component children and five indexes, attach the exact SLSA predicate to every subject and the matching SPDX predicate to each child, then blob-sign the component manifest, accepted metadata snapshot, and checksum set.
+5. Sign all ten component children and five indexes, attach the SLSA v0.2
+   predicate to every subject and the matching SPDX predicate to each child,
+   then blob-sign the component manifest, accepted metadata snapshot, and
+   checksum set. Promotion compares the complete decoded SLSA predicate after
+   treating only the four boolean false-or-omitted fields that Cosign v3
+   normalizes (`metadata.completeness.parameters`, `environment`, `materials`,
+   and `metadata.reproducible`) as equivalent; every other value and field
+   remains exact.
 6. Resolve once, retain the signed metadata envelopes and resolution records, and mirror every selected layer by digest.
 7. Build platform runtime images, test and scan them by manifest digest, then assemble the final index from those exact manifests.
 8. Attach signed SPDX, provenance, resolution, inventory, prune, materialization, base evidence, and vulnerability or VEX evidence.
@@ -308,10 +315,12 @@ For a new tuple, the workflow:
    and retained in the reports without blocking the release.
 4. Generates provenance that includes the external dispatcher binding, signs
    every repository-owned component child and index with keyless Cosign,
-   attaches the exact SLSA predicate to all fifteen owned subjects and the matching
-   SPDX predicate to the ten owned children, and signs the component manifest,
-   metadata snapshot, and checksum set. The upstream Dalec image is neither
-   signed nor promoted by this repository.
+   attaches the SLSA v0.2 predicate to all fifteen owned subjects and the
+   matching SPDX predicate to the ten owned children, and signs the component
+   manifest, metadata snapshot, and checksum set. Promotion applies only the
+   documented Cosign v3 false-or-omitted normalization above before requiring
+   full SLSA predicate equality; SPDX predicates remain exact. The upstream
+   Dalec image is neither signed nor promoted by this repository.
 
 Promotion revalidates the tag and signed bundle, creates or resumes the draft,
 verifies its exact asset inventory, and validates each vulnerability report's

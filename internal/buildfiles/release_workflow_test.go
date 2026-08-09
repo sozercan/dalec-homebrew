@@ -1017,6 +1017,118 @@ func TestReleaseWorkflowDalecFrontendProvenance(t *testing.T) {
 	}
 }
 
+func TestReleaseWorkflowReverifiesCosignNormalizedPredicates(t *testing.T) {
+	workflow := workflowYAML(t, "release.yml")
+	step := workflowStepByName(t, workflow, "promote", "Reverify release signatures and attestations")
+	script := yamlScalarValue(t, yamlMappingValue(t, step, "run"))
+	start := strings.Index(script, "verify_attestation_predicate() {")
+	end := strings.Index(script, "\n\nsubjects_file=")
+	if start < 0 || end <= start {
+		t.Fatal("release workflow does not define a bounded attestation predicate verifier")
+	}
+	verifier := script[start:end]
+
+	temporary := t.TempDir()
+	fakeCosign := filepath.Join(temporary, "cosign")
+	if err := os.WriteFile(fakeCosign, []byte("#!/bin/sh\nset -eu\ncat \"$COSIGN_OUTPUT\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	expected := map[string]any{
+		"builder": map[string]any{"id": "https://github.com/actions/runner"},
+		"metadata": map[string]any{
+			"buildInvocationId": "https://example.invalid/build/1",
+			"completeness": map[string]any{
+				"parameters":  false,
+				"environment": false,
+				"materials":   false,
+			},
+			"reproducible": false,
+		},
+	}
+	normalized := map[string]any{
+		"builder": map[string]any{"id": "https://github.com/actions/runner"},
+		"metadata": map[string]any{
+			"buildInvocationId": "https://example.invalid/build/1",
+			"completeness":      map[string]any{},
+		},
+	}
+	trueDrift := map[string]any{
+		"builder": map[string]any{"id": "https://github.com/actions/runner"},
+		"metadata": map[string]any{
+			"buildInvocationId": "https://example.invalid/build/1",
+			"completeness": map[string]any{
+				"parameters": true,
+			},
+		},
+	}
+	nullDrift := map[string]any{
+		"builder": map[string]any{"id": "https://github.com/actions/runner"},
+		"metadata": map[string]any{
+			"buildInvocationId": "https://example.invalid/build/1",
+			"completeness": map[string]any{
+				"parameters": nil,
+			},
+		},
+	}
+	wrongTypeDrift := map[string]any{
+		"builder": map[string]any{"id": "https://github.com/actions/runner"},
+		"metadata": map[string]any{
+			"buildInvocationId": "https://example.invalid/build/1",
+			"completeness": map[string]any{
+				"parameters": "false",
+			},
+		},
+	}
+
+	tests := []struct {
+		name    string
+		typeID  string
+		actual  map[string]any
+		wantErr bool
+	}{
+		{name: "exact SLSA predicate", typeID: "slsaprovenance02", actual: expected},
+		{name: "Cosign omitted false SLSA defaults", typeID: "slsaprovenance02", actual: normalized},
+		{name: "true SLSA value", typeID: "slsaprovenance02", actual: trueDrift, wantErr: true},
+		{name: "null SLSA value", typeID: "slsaprovenance02", actual: nullDrift, wantErr: true},
+		{name: "wrong-type SLSA value", typeID: "slsaprovenance02", actual: wrongTypeDrift, wantErr: true},
+		{name: "SPDX omission stays exact", typeID: "spdxjson", actual: normalized, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			caseDir := t.TempDir()
+			expectedPath := filepath.Join(caseDir, "expected.json")
+			expectedData, err := json.Marshal(expected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(expectedPath, expectedData, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			outputPath := filepath.Join(caseDir, "cosign-output.json")
+			outputData, err := json.Marshal(map[string]any{"predicate": tt.actual})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(outputPath, outputData, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			output, err := runWorkflowShell(t, verifier+"\n"+`verify_attestation_predicate "$TEST_TYPE" "$TEST_SUBJECT" "$EXPECTED_PATH"`+"\n", map[string]string{
+				"COSIGN_OUTPUT": outputPath,
+				"EXPECTED_PATH": expectedPath,
+				"PATH":          temporary + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"RUNNER_TEMP":   caseDir,
+				"TEST_SUBJECT":  "example.invalid/component@sha256:" + strings.Repeat("a", 64),
+				"TEST_TYPE":     tt.typeID,
+			})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("predicate verification error = %v, wantErr %v\n%s", err, tt.wantErr, output)
+			}
+		})
+	}
+}
+
 func TestReleaseWorkflowStrictJSONGate(t *testing.T) {
 	script := releaseWorkflowPython(t, "PYJSON")
 	valid := writeWorkflowFixture(t, "valid.json", []byte(`{"ok":{"nested":true}}`))

@@ -2787,13 +2787,25 @@ jobs:
               --certificate-identity-regexp "$CERTIFICATE_IDENTITY_REGEXP" \
               --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
               "$subject" > "$output"
-            jq -s -e --slurpfile expected "$predicate" '
+            jq -s -e --arg type "$type" --slurpfile expected "$predicate" '
               def predicate:
                 if has("payload") then (.payload | @base64d | fromjson | .predicate)
                 elif has("predicate") then .predicate
                 else empty
                 end;
-              any(.[]; predicate == $expected[0])
+              # Cosign v3 decodes SLSA v0.2 predicates into typed Go structs and
+              # omits false zero values when it serializes the DSSE statement.
+              # Treat only those explicit false values and their omission as
+              # equivalent; true, null, and every other predicate field remain exact.
+              def normalize_cosign_predicate:
+                if $type == "slsaprovenance02" then
+                  (if (.metadata.completeness.parameters? == false) then del(.metadata.completeness.parameters) else . end)
+                  | (if (.metadata.completeness.environment? == false) then del(.metadata.completeness.environment) else . end)
+                  | (if (.metadata.completeness.materials? == false) then del(.metadata.completeness.materials) else . end)
+                  | (if (.metadata.reproducible? == false) then del(.metadata.reproducible) else . end)
+                else .
+                end;
+              any(.[]; (predicate | normalize_cosign_predicate) == ($expected[0] | normalize_cosign_predicate))
             ' "$output" >/dev/null || {
               echo "no verified $type attestation for $subject matches $predicate" >&2
               rm -f "$output"
