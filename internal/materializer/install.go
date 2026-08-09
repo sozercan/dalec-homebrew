@@ -1471,10 +1471,17 @@ func isControlledGdkPixbufLoadersCacheMutation(node resolution.Node, rel, kind s
 	if rel != gdkPixbufLoadersCachePath || !verifiedBottleMatchesNode(node, verified) {
 		return false
 	}
-	if formulaAllowsRule(node, "gdk-pixbuf-loader-cache", gdkPixbufFormula) {
+	if formulaOwnsGeneratedGlobalPath(node, gdkPixbufLoadersCachePath, gdkPixbufFormula) {
 		return kind == "created"
 	}
 	return kind == "modified" && formulaAllowsRule(node, "gdk-pixbuf-loader-cache", "") && nodeDependsOn(node, gdkPixbufFormula) && len(verifiedGdkPixbufLoaders(node, verified)) > 0
+}
+
+func formulaOwnsGeneratedGlobalPath(node resolution.Node, generatedPath, legacyName string) bool {
+	if node.PolicyFormulaID != "" {
+		return policyv2.HasEmbeddedGeneratedGlobalPath(node.PolicyFormulaID, generatedPath)
+	}
+	return node.Name == legacyName && node.FullName == "homebrew/core/"+legacyName
 }
 
 func formulaAllowsRule(node resolution.Node, rule, legacyName string) bool {

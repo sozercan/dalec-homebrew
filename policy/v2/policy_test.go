@@ -85,3 +85,19 @@ func TestRuntimeRulesAreExactFormulaIDs(t *testing.T) {
 		}
 	}
 }
+
+func TestGeneratedGlobalPathOwnersAreExactFormulaIDs(t *testing.T) {
+	policy, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const loadersCache = "lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+	if !policy.HasGeneratedGlobalPath("homebrew/core/gdk-pixbuf", loadersCache) {
+		t.Fatal("gdk-pixbuf does not own its generated loader cache")
+	}
+	for _, id := range []string{"homebrew/core/librsvg", "homebrew/core/webp-pixbuf-loader", "acme/tools/gdk-pixbuf"} {
+		if policy.HasGeneratedGlobalPath(id, loadersCache) {
+			t.Fatalf("%s unexpectedly owns the generated loader cache", id)
+		}
+	}
+}

@@ -200,6 +200,11 @@ func (p *Policy) HasRule(id, rule string) bool {
 	return ok && slices.Contains(caps.Rules, rule)
 }
 
+func (p *Policy) HasGeneratedGlobalPath(id, generatedPath string) bool {
+	caps, ok := p.ForFormula(id)
+	return ok && slices.Contains(caps.GeneratedGlobalPaths, generatedPath)
+}
+
 func canonicalize(p *Policy) {
 	for id, caps := range p.PackageCapabilities {
 		slices.Sort(caps.SharedEtc)
@@ -350,4 +355,12 @@ func walkUniqueJSON(dec *json.Decoder, token json.Token) error {
 func HasEmbeddedRule(id, rule string) bool {
 	policy, err := Load()
 	return err == nil && policy.HasRule(id, rule)
+}
+
+// HasEmbeddedGeneratedGlobalPath checks whether one exact Formula ID owns a
+// generated global path in the authoritative embedded policy. It fails closed
+// if the embedded document cannot load.
+func HasEmbeddedGeneratedGlobalPath(id, generatedPath string) bool {
+	policy, err := Load()
+	return err == nil && policy.HasGeneratedGlobalPath(id, generatedPath)
 }
