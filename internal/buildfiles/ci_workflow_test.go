@@ -23,6 +23,7 @@ func TestCIExercisesProductionPathNonCoreV2(t *testing.T) {
 		"Build and test upstream-forwarded build-local non-core V2",
 		"DALEC_HOMEBREW_E2E_DALEC_FRONTEND_PIN: release/dalec-frontend.json",
 		"DALEC_HOMEBREW_E2E_SPEC: examples/ci-noncore-multi-package.yaml",
+		"docker buildx bake --print release-children release-frontend frontend",
 		"run: ./scripts/noncore-e2e.sh",
 	} {
 		if !strings.Contains(text, want) {
@@ -63,6 +64,10 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 		"target homebrew dependencies.runtime must use map form and contain at least one entry",
 		`--catalog-extractor-ref "$EXTRACTOR_REF"`,
 		`--build-arg "CATALOG_EXTRACTOR_REF=$EXTRACTOR_REF"`,
+		`--build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$FRONTEND_INDEX_REF"`,
+		`DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF="$FRONTEND_INDEX_REF"`,
+		`.components.frontend_index_ref == $frontend_index`,
+		`.components.frontend_ref == $frontend`,
 		"docker run --rm --network none",
 		".components.catalog_extractor_ref as $extractor",
 		".extraction.policy_version == \"build-local-tap-extraction-v1\"",

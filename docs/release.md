@@ -43,10 +43,13 @@ requires updating the embedded keys to match that digest.
 The frontend cannot bind its own final digest before it is published.
 `DALEC_HOMEBREW_FRONTEND_REF` therefore normally comes from BuildKit's
 digest-pinned gateway `source` option and must match it when explicitly
-supplied. Mutable tags are rejected. Each V2 resolution record binds the
-frontend index and executing platform child, the selected runtime-base and
-materializer children, and the immutable bottle-fetcher and catalog-extractor
-indexes compiled into the frontend.
+supplied. `DALEC_HOMEBREW_FRONTEND_INDEX_REF` supplies the separately pinned
+parent index claim. Mutable tags and cross-repository index/child pairs are
+rejected. Release signing independently proves that the claimed index contains
+the executing platform child before accepting the evidence. Each V2 resolution
+record binds both identities, the selected runtime-base and materializer
+children, and the immutable bottle-fetcher and catalog-extractor indexes
+compiled into the frontend.
 
 See [`../release/components-v2.example.json`](../release/components-v2.example.json)
 for the current canonical manifest shape. The checked-in file contains
@@ -279,11 +282,11 @@ For a new tuple, the workflow:
    pinned upstream Dalec index contains the recorded `amd64` and `arm64`
    dispatcher children.
 2. Builds all `amd64` and `arm64` component children, smoke-tests the
-   runtime-base and materializer children, assembles and verifies all five
-   component indexes, builds the frontend against that exact V2 tuple, and
-   generates and verifies the completed component manifest. The published
-   bottle-fetcher and catalog-extractor are exercised by the `amd64` non-core
-   integration in the next step.
+   runtime-base and materializer children, compiles each frontend child against
+   the matching platform children, assembles and verifies all five component
+   indexes, and generates and verifies the completed component manifest. The
+   published bottle-fetcher and catalog-extractor are exercised by the `amd64`
+   non-core integration in the next step.
 3. Runs every focused integration spec through the pinned platform-specific
    upstream Dalec dispatcher on native `amd64` and `arm64` workers, requires one
    authenticated Homebrew metadata identity across every spec and platform,

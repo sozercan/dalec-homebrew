@@ -35,6 +35,13 @@ left when the exact pinned upstream Dalec v0.21.5 dispatcher drops legacy list
 syntax. Target frontend metadata is accepted only as routing metadata for this
 exact chain; nested forwarding remains rejected.
 
+The repository-owned V2 gateway executes as an exact platform-child digest.
+Its parent frontend index is supplied as a separate digest-pinned claim and is
+not treated as self-authenticating evidence. Release signing resolves the
+recorded index independently, requires the selected platform descriptor to
+equal the executing child, and rejects an index-as-child or cross-platform
+substitution before signing.
+
 The forwarded child does **not** receive an authenticated identity for the
 upstream Dalec parent. In the child solve, `source` identifies
 `dalec-homebrew`; `dalec.target` and any custom parent-reference option are

@@ -53,6 +53,7 @@ func (refs *namedPinnedRefs) Set(value string) error {
 type options struct {
 	runtimeBaseRef       string
 	materializerRef      string
+	frontendIndexRef     string
 	frontendRef          string
 	metadataNotBefore    string
 	dalecFrontendPinFile string
@@ -79,6 +80,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	flags.SetOutput(stderr)
 	flags.StringVar(&opts.runtimeBaseRef, "runtime-base-ref", "", "digest-pinned runtime-base reference")
 	flags.StringVar(&opts.materializerRef, "materializer-ref", "", "digest-pinned materializer reference")
+	flags.StringVar(&opts.frontendIndexRef, "frontend-index-ref", "", "digest-pinned parent frontend index reference")
 	flags.StringVar(&opts.frontendRef, "frontend-ref", "", "digest-pinned frontend reference")
 	flags.StringVar(&opts.metadataNotBefore, "metadata-not-before", "", "RFC3339 metadata rollback floor")
 	flags.StringVar(&opts.dalecFrontendPinFile, "dalec-frontend-file", "", "release-bound upstream Dalec frontend pin JSON")
@@ -97,6 +99,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	refs := []namedPinnedRef{
 		{name: "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF", value: opts.runtimeBaseRef},
 		{name: "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF", value: opts.materializerRef},
+		{name: "DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF", value: opts.frontendIndexRef},
 		{name: "DALEC_HOMEBREW_LIVE_FRONTEND_REF", value: opts.frontendRef},
 	}
 	set := 0
@@ -106,7 +109,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 	if set != 0 && set != len(refs) {
-		return errors.New("DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF, DALEC_HOMEBREW_LIVE_MATERIALIZER_REF, and DALEC_HOMEBREW_LIVE_FRONTEND_REF must be set together")
+		return errors.New("DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF, DALEC_HOMEBREW_LIVE_MATERIALIZER_REF, DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF, and DALEC_HOMEBREW_LIVE_FRONTEND_REF must be set together")
 	}
 	if set == len(refs) {
 		for _, ref := range refs {

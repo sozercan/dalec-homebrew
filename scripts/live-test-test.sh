@@ -73,6 +73,7 @@ DIGEST_G=sha256:1111111111111111111111111111111111111111111111111111111111111111
 BASE_REF=ghcr.io/example/runtime-base@$DIGEST_A
 MATERIALIZER_REF=ghcr.io/example/materializer@$DIGEST_B
 FRONTEND_REF=ghcr.io/example/frontend@$DIGEST_C
+FRONTEND_INDEX_REF=ghcr.io/example/frontend@$DIGEST_D
 DALEC_FRONTEND_REF=ghcr.io/project-dalec/dalec/frontend@$DIGEST_E
 DALEC_PIN="$TEST_ROOT/dalec-frontend.json"
 cat > "$DALEC_PIN" <<EOF_PIN
@@ -99,6 +100,7 @@ PUBLISHED_ENV=(
   "${COMMON_ENV[@]}"
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF"
   "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF"
+  "DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF=$FRONTEND_INDEX_REF"
   "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"
 )
 
@@ -157,10 +159,17 @@ expect_rejected partial-one "must be set together" \
   "${COMMON_ENV[@]}" \
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF"
 
+expect_rejected missing-frontend-index "must be set together" \
+  "${COMMON_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
+  "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
+  "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF"
+
 expect_rejected scheme-frontend "DALEC_HOMEBREW_LIVE_FRONTEND_REF must be a digest-pinned OCI reference" \
   "${COMMON_ENV[@]}" \
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
   "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
+  "DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF=$FRONTEND_INDEX_REF" \
   "DALEC_HOMEBREW_LIVE_FRONTEND_REF=https://ghcr.io/example/frontend@$DIGEST_C"
 
 expect_rejected invalid-metadata-not-before "DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE must be a valid RFC3339 timestamp" \
@@ -231,6 +240,7 @@ assert_contains "$DOCKER_LOG" "--target homebrew/image"
 for argument in \
   "DALEC_HOMEBREW_RUNTIME_BASE=$BASE_REF" \
   "DALEC_HOMEBREW_MATERIALIZER=$MATERIALIZER_REF" \
+  "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$FRONTEND_INDEX_REF" \
   "DALEC_HOMEBREW_FRONTEND_REF=$FRONTEND_REF" \
   "DALEC_HOMEBREW_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z"; do
   assert_contains "$DOCKER_LOG" "--build-arg $argument"
@@ -251,6 +261,7 @@ assert_not_contains "$CAPTURED_SPEC" "runtime_dependency_order"
 for result in \
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF" \
   "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF" \
+  "DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF=$FRONTEND_INDEX_REF" \
   "DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF" \
   "DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF=$DALEC_FRONTEND_REF" \
   "DALEC_HOMEBREW_LIVE_TARGET=homebrew/image" \
@@ -291,6 +302,7 @@ for argument in \
   assert_contains "$DOCKER_LOG" "--build-arg $argument"
 done
 assert_not_contains "$DOCKER_LOG" "--build-arg DALEC_HOMEBREW_METADATA_NOT_BEFORE="
+assert_not_contains "$DOCKER_LOG" "--build-arg DALEC_HOMEBREW_FRONTEND_INDEX_REF="
 for result in \
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=registry.example/dalec-homebrew-runtime-base@$DIGEST_A" \
   "DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=registry.example/dalec-homebrew-materializer@$DIGEST_B" \
