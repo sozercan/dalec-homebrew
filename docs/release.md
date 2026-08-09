@@ -311,16 +311,19 @@ draft, and then publishes it. It never rebuilds during promotion or publishes a
 `latest` tag.
 
 Every integration must report the same authenticated Homebrew commit, signer,
-payload digests, envelope digests, and rollback identity. When the controlling
-aggregate `generated_at` is fully signed, its timestamp must also be identical.
-When either signed document lacks that field, independent runners may observe
-slightly different unsigned HTTP `Last-Modified` timestamps for the same
-authenticated bytes. In that case only, the workflow retains every
-spec/platform observation and deterministically selects the earliest timestamp
-for `metadata-snapshot.json`; it does not treat the HTTP value as authenticated
-identity. The workflow does not compare the accepted snapshot with earlier
-releases. See [`../SECURITY.md`](../SECURITY.md) for the resulting trust and
-cross-release anti-rollback limitations.
+payload digests, and rollback identity. Independently issued PS512 envelopes
+may have different digests because RSA-PSS signatures are randomized; the
+workflow still requires and retains both envelope digests with every
+spec/platform observation. When the controlling aggregate `generated_at` is
+fully signed, its timestamp must be identical. When either signed document
+lacks that field, independent runners may observe slightly different unsigned
+HTTP `Last-Modified` timestamps for the same authenticated bytes. The workflow
+deterministically selects the earliest observation for
+`metadata-snapshot.json`, including that observation's exact envelope pair; it
+does not treat the HTTP value or randomized envelope bytes as authenticated
+cross-run identity. The workflow does not compare the accepted snapshot with
+earlier releases. See [`../SECURITY.md`](../SECURITY.md) for the resulting trust
+and cross-release anti-rollback limitations.
 
 The GitHub `release` environment gates signing and promotion. Configure required
 reviewers, protect release-critical paths with branch rules, restrict release-tag
