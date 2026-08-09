@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/distribution/reference"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/sozercan/dalec-homebrew/internal/catalog"
 	"github.com/sozercan/dalec-homebrew/internal/catalogkeys"
@@ -563,9 +562,7 @@ func parseBool(s string) bool {
 func validatePinnedRef(ref string) error { return resolution.ValidatePinnedReference(ref) }
 
 func sameReferenceRepository(a, b string) bool {
-	aNamed, aErr := reference.ParseNormalizedNamed(a)
-	bNamed, bErr := reference.ParseNormalizedNamed(b)
-	return aErr == nil && bErr == nil && reference.TrimNamed(aNamed).String() == reference.TrimNamed(bNamed).String()
+	return resolution.SameReferenceRepository(a, b)
 }
 
 func validateDigest(value string) error {

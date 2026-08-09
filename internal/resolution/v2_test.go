@@ -273,6 +273,12 @@ func TestValidateV2RequiresCompleteReleaseBindings(t *testing.T) {
 			mutate: func(record *RecordV2) { record.Components.FrontendRef = "" },
 			want:   "V2 frontend component",
 		},
+		"frontend repository": {
+			mutate: func(record *RecordV2) {
+				record.Components.FrontendRef = "ghcr.io/other/frontend@" + strings.SplitN(record.Components.FrontendRef, "@", 2)[1]
+			},
+			want: "frontend index and child use different repositories",
+		},
 		"bottle fetcher": {
 			mutate: func(record *RecordV2) { record.Components.BottleFetcherRef = "" },
 			want:   "V2 bottle fetcher component",
@@ -314,6 +320,15 @@ func TestValidateV2RequiresCompleteReleaseBindings(t *testing.T) {
 				t.Fatalf("ValidateV2() error = %v, want containing %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestValidateV2NormalizesFrontendRepositoryIdentity(t *testing.T) {
+	record := validRecordV2()
+	record.Components.FrontendIndexRef = "example/frontend@" + strings.SplitN(record.Components.FrontendIndexRef, "@", 2)[1]
+	record.Components.FrontendRef = "docker.io/example/frontend:platform-child@" + strings.SplitN(record.Components.FrontendRef, "@", 2)[1]
+	if err := ValidateV2(record); err != nil {
+		t.Fatalf("ValidateV2() rejected normalized matching frontend repositories: %v", err)
 	}
 }
 

@@ -117,6 +117,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 				return err
 			}
 		}
+		if !resolution.SameReferenceRepository(opts.frontendIndexRef, opts.frontendRef) {
+			return errors.New("DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF and DALEC_HOMEBREW_LIVE_FRONTEND_REF must use the same repository")
+		}
 	}
 	for _, ref := range opts.pinnedRefs {
 		if err := validatePinnedReference(ref); err != nil {
