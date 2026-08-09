@@ -34,6 +34,11 @@
   },
   "writable_path_template": "/home/linuxbrew/.linuxbrew/var/<rack-name>",
   "package_capabilities": {
+    "homebrew/core/certifi": {
+      "rules": [
+        "certifi-shared-ca-link-v1"
+      ]
+    },
     "homebrew/core/fontconfig": {
       "shared_etc": [
         "fonts"
@@ -118,6 +123,12 @@
       "rules": [
         "optional-llvm-tooling",
         "runtime-aux-llvm"
+      ]
+    },
+    "homebrew/core/libpsl": {
+      "rules": [
+        "optional-libpsl-tooling",
+        "runtime-aux-libpsl"
       ]
     },
     "homebrew/core/librsvg": {

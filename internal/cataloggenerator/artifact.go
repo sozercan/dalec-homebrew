@@ -358,7 +358,21 @@ func baseArtifact(node catalog.Node, platform catalog.Platform, currentDigest, s
 }
 
 func inspectionExpectation(node catalog.Node, tag, compressedDigest string, size int64, homebrewChecksum string, tab resolution.BottleTab) bottle.Expectation {
-	return bottle.Expectation{Name: node.Name, FullName: node.HomebrewFullName, FormulaVersion: node.FormulaVersion, FormulaRevision: node.FormulaRevision, PkgVersion: node.PkgVersion, VersionScheme: node.VersionScheme, BottleRebuild: node.BottleRebuild, BottleTag: tag, CompressedSHA256: compressedDigest, CompressedSize: size, HomebrewSHA256: homebrewChecksum, HomebrewVersion: tab.HomebrewVersion, Arch: tab.Arch, Compiler: tab.Compiler, ExpectedTap: string(node.Tap), FormulaIdentity: string(node.ID)}
+	allowed := make([]string, 0, len(node.Dependencies))
+	certifiSharedCA := false
+	for _, dependency := range node.Dependencies {
+		if !dependency.DeclaredDirectly {
+			continue
+		}
+		allowed = append(allowed, path.Base(string(dependency.ID)))
+		certifiSharedCA = certifiSharedCA || dependency.ID == "homebrew/core/ca-certificates"
+	}
+	slices.Sort(allowed)
+	var rules []bottle.ExternalSymlinkRule
+	if node.ID == "homebrew/core/certifi" && node.HomebrewFullName == "homebrew/core/certifi" && certifiSharedCA && policyv2.HasEmbeddedRule(string(node.ID), string(bottle.ExternalSymlinkRuleCertifiSharedCA)) {
+		rules = []bottle.ExternalSymlinkRule{bottle.ExternalSymlinkRuleCertifiSharedCA}
+	}
+	return bottle.Expectation{Name: node.Name, FullName: node.HomebrewFullName, FormulaVersion: node.FormulaVersion, FormulaRevision: node.FormulaRevision, PkgVersion: node.PkgVersion, VersionScheme: node.VersionScheme, BottleRebuild: node.BottleRebuild, BottleTag: tag, CompressedSHA256: compressedDigest, CompressedSize: size, HomebrewSHA256: homebrewChecksum, HomebrewVersion: tab.HomebrewVersion, Arch: tab.Arch, Compiler: tab.Compiler, ExpectedTap: string(node.Tap), FormulaIdentity: string(node.ID), AllowedExternalSymlinkFormulae: allowed, AllowedExternalSymlinkRules: rules}
 }
 
 func catalogDependencies(values []bottle.ReceiptDependency) ([]catalog.BottleRuntimeDependency, error) {

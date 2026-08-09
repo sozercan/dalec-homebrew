@@ -781,16 +781,13 @@ func validateSymlink(name, target string, expected Expectation, limits Limits) (
 	return "", "", verificationError(CodeUnsafeLink, name, "symlink target %q escapes keg %q", target, expectedKegPrefix(expected))
 }
 
-func allowedExternalSymlinkSource(name string, expected Expectation) bool {
+func externalSymlinkKegPath(name string, expected Expectation) (string, bool) {
 	kegPrefix := expectedKegPrefix(expected) + "/"
 	kegPath := strings.TrimPrefix(name, kegPrefix)
-	return kegPath != name && strings.HasPrefix(kegPath, "libexec/")
+	return kegPath, kegPath != name
 }
 
 func canonicalExternalSymlinkTarget(name, target string, expected Expectation) (string, bool) {
-	if !allowedExternalSymlinkSource(name, expected) {
-		return "", false
-	}
 	base := strings.Split(path.Join("Cellar", path.Dir(name)), "/")
 	components := strings.Split(target, "/")
 	if len(components) < len(base)+2 {
@@ -808,17 +805,24 @@ func canonicalExternalSymlinkTarget(name, target string, expected Expectation) (
 		}
 	}
 	candidate := strings.Join(components, "/")
-	return candidate, allowedExternalSymlinkTarget(candidate, expected)
+	return candidate, allowedExternalSymlink(name, candidate, expected)
 }
 
-func allowedExternalSymlinkTarget(target string, expected Expectation) bool {
-	for _, formula := range expected.AllowedExternalSymlinkFormulae {
-		root := path.Join("opt", formula)
-		if target == root || strings.HasPrefix(target, root+"/") {
-			return true
+func allowedExternalSymlink(name, target string, expected Expectation) bool {
+	kegPath, ok := externalSymlinkKegPath(name, expected)
+	if !ok {
+		return false
+	}
+	if strings.HasPrefix(kegPath, "libexec/") {
+		for _, formula := range expected.AllowedExternalSymlinkFormulae {
+			root := path.Join("opt", formula)
+			if target == root || strings.HasPrefix(target, root+"/") {
+				return true
+			}
 		}
 	}
-	return false
+	return slices.Contains(expected.AllowedExternalSymlinkRules, ExternalSymlinkRuleCertifiSharedCA) &&
+		IsCertifiSharedCACertKegPath(kegPath) && target == CertifiSharedCATarget
 }
 
 func validateHardlink(target string, expected Expectation, limits Limits) (string, error) {
@@ -998,8 +1002,8 @@ func validateCollisionsAndHardlinks(entries map[string]*scannedEntry, expected E
 		if err != nil {
 			return err
 		}
-		if prefixTarget != "" && !allowedExternalSymlinkSource(name, expected) {
-			return verificationError(CodeUnsafeLink, name, "symlink chain reaches a dependency opt target from outside libexec")
+		if prefixTarget != "" && !allowedExternalSymlink(name, prefixTarget, expected) {
+			return verificationError(CodeUnsafeLink, name, "symlink chain reaches an unauthorized prefix target")
 		}
 		entry.inventory.ResolvedTarget = resolved
 		entry.inventory.PrefixTarget = prefixTarget
@@ -1160,6 +1164,20 @@ func normalizeExpectation(e Expectation, limits Limits) (Expectation, error) {
 		if index > 0 && e.AllowedExternalSymlinkFormulae[index-1] == formula {
 			return e, fmt.Errorf("duplicate allowed external symlink Formula %q", formula)
 		}
+	}
+	e.AllowedExternalSymlinkRules = slices.Clone(e.AllowedExternalSymlinkRules)
+	slices.Sort(e.AllowedExternalSymlinkRules)
+	for index, rule := range e.AllowedExternalSymlinkRules {
+		if rule != ExternalSymlinkRuleCertifiSharedCA {
+			return e, fmt.Errorf("unknown allowed external symlink rule %q", rule)
+		}
+		if index > 0 && e.AllowedExternalSymlinkRules[index-1] == rule {
+			return e, fmt.Errorf("duplicate allowed external symlink rule %q", rule)
+		}
+	}
+	if slices.Contains(e.AllowedExternalSymlinkRules, ExternalSymlinkRuleCertifiSharedCA) &&
+		(e.Name != "certifi" || e.FullName != "homebrew/core/certifi" || !slices.Contains(e.AllowedExternalSymlinkFormulae, "ca-certificates")) {
+		return e, fmt.Errorf("external symlink rule %q requires exact core certifi with a signed direct ca-certificates dependency", ExternalSymlinkRuleCertifiSharedCA)
 	}
 
 	seenDeps := make(map[string]struct{}, len(e.Dependencies))

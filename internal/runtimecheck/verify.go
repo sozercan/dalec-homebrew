@@ -727,6 +727,13 @@ func runtimeScriptScope(root, prefix string, opts Options) (scriptScope, bool, e
 			if err := add(node, "share/doc/dbus/examples/GetAllMatchRules.py", "/usr/bin/env python"); err != nil {
 				return scriptScope{}, false, err
 			}
+		case runtimeRule(node, "runtime-aux-libpsl", func() bool { return node.Name == "libpsl" && node.FullName == "homebrew/core/libpsl" }):
+			if _, requested := requestedNames[node.Name]; requested {
+				continue
+			}
+			if err := add(node, "bin/psl-make-dafsa", "/usr/bin/env python"); err != nil {
+				return scriptScope{}, false, err
+			}
 		case runtimeRule(node, "runtime-aux-llvm", func() bool {
 			return (node.Name == "llvm" || strings.HasPrefix(node.Name, "llvm@")) && node.FullName == "homebrew/core/"+node.Name
 		}):
@@ -1068,7 +1075,19 @@ func readCargoContinuation(r io.ReaderAt, start, end int64) ([]byte, error) {
 }
 
 func cargoContinuationTraverses(data []byte) bool {
-	text := filepath.ToSlash(string(data))
+	// Rust may concatenate source locations with unrelated diagnostic strings in
+	// one read-only blob without NUL separators. Only the leading path-shaped
+	// token can continue the matched .rs path; scanning later prose can mistake
+	// an unrelated path such as a timezone lookup for Cargo traversal.
+	for i, value := range data {
+		pathByte := value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
+		pathByte = pathByte || strings.ContainsRune("._+~/-\\", rune(value))
+		if !pathByte {
+			data = data[:i]
+			break
+		}
+	}
+	text := strings.ReplaceAll(string(data), "\\", "/")
 	return strings.HasPrefix(text, "../") || strings.Contains(text, "/../") || strings.HasSuffix(text, "/..") ||
 		strings.HasPrefix(text, "./") || strings.Contains(text, "/./") || strings.HasSuffix(text, "/.")
 }

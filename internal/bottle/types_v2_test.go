@@ -28,6 +28,50 @@ func TestExpectationFromNodeV2RejectsRackCollision(t *testing.T) {
 	}
 }
 
+func TestExpectationFromNodeV2ProjectsExactCertifiSharedCARule(t *testing.T) {
+	caCertificates := resolution.NodeV2{ID: "homebrew/core/ca-certificates", Tap: "homebrew/core", Name: "ca-certificates", HomebrewFullName: "homebrew/core/ca-certificates", PkgVersion: "2026"}
+	certifi := resolution.NodeV2{
+		ID: "homebrew/core/certifi", Tap: "homebrew/core", Name: "certifi", HomebrewFullName: "homebrew/core/certifi", PkgVersion: "2026.7.22",
+		Dependencies: []resolution.RequirementV2{{ID: caCertificates.ID, Direct: true}},
+	}
+	expectation, err := ExpectationFromNodeV2(certifi, []resolution.NodeV2{caCertificates, certifi})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expectation.AllowedExternalSymlinkRules) != 1 || expectation.AllowedExternalSymlinkRules[0] != ExternalSymlinkRuleCertifiSharedCA {
+		t.Fatalf("certifi rules = %v", expectation.AllowedExternalSymlinkRules)
+	}
+
+	for name, mutate := range map[string]func(*resolution.NodeV2, *resolution.NodeV2){
+		"non-core owner": func(owner, _ *resolution.NodeV2) {
+			owner.ID, owner.Tap, owner.HomebrewFullName = "acme/tools/certifi", "acme/tools", "acme/tools/certifi"
+		},
+		"spoofed Homebrew owner": func(owner, _ *resolution.NodeV2) {
+			owner.HomebrewFullName = "acme/tools/certifi"
+		},
+		"indirect dependency": func(owner, _ *resolution.NodeV2) {
+			owner.Dependencies[0].Direct = false
+		},
+		"non-core dependency": func(owner, dependency *resolution.NodeV2) {
+			dependency.ID, dependency.Tap, dependency.HomebrewFullName = "acme/tools/ca-certificates", "acme/tools", "acme/tools/ca-certificates"
+			owner.Dependencies[0].ID = dependency.ID
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			owner, dependency := certifi, caCertificates
+			owner.Dependencies = append([]resolution.RequirementV2(nil), certifi.Dependencies...)
+			mutate(&owner, &dependency)
+			got, err := ExpectationFromNodeV2(owner, []resolution.NodeV2{dependency, owner})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.AllowedExternalSymlinkRules) != 0 {
+				t.Fatalf("unexpected certifi rules = %v", got.AllowedExternalSymlinkRules)
+			}
+		})
+	}
+}
+
 func TestResolvedInstalledDependenciesAcceptsCanonicalNonCoreIdentity(t *testing.T) {
 	node := resolution.Node{Name: "widget", FullName: "acme/tools/widget", FormulaVersion: "1", PkgVersion: "1"}
 	dependencies, err := resolvedInstalledDependencies(node, []resolution.Node{node})

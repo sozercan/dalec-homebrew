@@ -1,0 +1,64 @@
+# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
+# Base fixture: the integration helper injects targets.homebrew.frontend.image
+# before building homebrew/image.
+
+name: homebrew-live-hf-curl
+version: 0.1.0
+revision: 1
+description: Offline runtime validation for the Hugging Face CLI and curl closure
+website: https://huggingface.co/docs/huggingface_hub/
+license: Apache-2.0
+
+dependencies:
+  runtime:
+    curl: {}
+    hf: {}
+
+image:
+  entrypoint: /home/linuxbrew/.linuxbrew/bin/hf
+  user: linuxbrew
+
+tests:
+  - name: hf-curl-runtime-closure
+    env:
+      HOMEBREW_PREFIX: /home/linuxbrew/.linuxbrew
+      HF_HUB_OFFLINE: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - command: |
+          set -eu
+          hf --version > /tmp/hf-version
+          test -s /tmp/hf-version
+          curl --version > /tmp/curl-version
+          grep -q '^curl ' /tmp/curl-version
+          test "$(id -u):$(id -g)" = "1000:1000"
+
+          test ! -e "$HOMEBREW_PREFIX/bin/psl-make-dafsa"
+          helper="$(find "$HOMEBREW_PREFIX/Cellar/libpsl" -path '*/bin/psl-make-dafsa' -type f -print -quit)"
+          test -n "$helper"
+          test "$(sed -n '1p' "$helper")" = '#!/usr/bin/env python'
+
+          certifi_root="$(find "$HOMEBREW_PREFIX/Cellar/certifi" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$certifi_root"
+          for minor in 12 13; do
+            link="$certifi_root/lib/python3.$minor/site-packages/certifi/cacert.pem"
+            test -L "$link"
+            test "$(readlink "$link")" = '../../../python3.14/site-packages/certifi/cacert.pem'
+          done
+          shared_link="$certifi_root/lib/python3.14/site-packages/certifi/cacert.pem"
+          test -L "$shared_link"
+          test "$(readlink "$shared_link")" = '../../../../../../../etc/ca-certificates/cert.pem'
+          test -s "$HOMEBREW_PREFIX/etc/ca-certificates/cert.pem"
+          test ! -w "$HOMEBREW_PREFIX/etc/ca-certificates/cert.pem"
+          echo hf-curl-runtime-closure-ok
+        stdout:
+          equals: "hf-curl-runtime-closure-ok\n"
+    files:
+      /home/linuxbrew/.linuxbrew/bin/hf: {}
+      /home/linuxbrew/.linuxbrew/bin/curl: {}
+      /home/linuxbrew/.linuxbrew/bin/psl-make-dafsa:
+        not_exist: true
+      /home/linuxbrew/.linuxbrew/etc/ca-certificates/cert.pem:
+        permissions: 0o644
+      /home/linuxbrew/.linuxbrew/bin/brew:
+        not_exist: true

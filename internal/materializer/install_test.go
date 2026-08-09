@@ -261,7 +261,7 @@ func TestClassifyAllowsContainedIncludeLinks(t *testing.T) {
 func TestValidateExternalBottleSymlinkTargetsRequiresExactDependencyKeg(t *testing.T) {
 	node := resolution.Node{Name: "hello", PkgVersion: "1", Dependencies: []resolution.Requirement{{Name: "python@3.14", Direct: true}}}
 	python := resolution.Node{Name: "python@3.14", FullName: "homebrew/core/python@3.14", PkgVersion: "3.14.1"}
-	verified := bottle.Result{Inventory: []bottle.InventoryEntry{{Path: "hello/1/libexec/bin/python3.14", PrefixTarget: "opt/python@3.14/bin/python3.14"}}}
+	verified := bottle.Result{Inventory: []bottle.InventoryEntry{{Path: "hello/1/libexec/bin/python3.14", KegPath: "libexec/bin/python3.14", Type: bottle.EntrySymlink, PrefixTarget: "opt/python@3.14/bin/python3.14"}}}
 	snapshot := map[string]fileState{
 		"Cellar":                                   {Type: "directory"},
 		"Cellar/python@3.14":                       {Type: "directory"},
@@ -272,7 +272,7 @@ func TestValidateExternalBottleSymlinkTargetsRequiresExactDependencyKeg(t *testi
 		"opt/python@3.14": {Type: "symlink", Link: "../Cellar/python@3.14/3.14.1"},
 	}
 	closure := []resolution.Node{node, python}
-	if err := validateExternalBottleSymlinkTargets("/prefix", snapshot, node, verified, closure); err != nil {
+	if err := validateExternalBottleSymlinkTargets("/prefix", snapshot, node, verified, closure, 1000, 1000); err != nil {
 		t.Fatal(err)
 	}
 	redirected := maps.Clone(snapshot)
@@ -280,14 +280,279 @@ func TestValidateExternalBottleSymlinkTargetsRequiresExactDependencyKeg(t *testi
 	redirected["Cellar/python@3.14/9.9"] = fileState{Type: "directory"}
 	redirected["Cellar/python@3.14/9.9/bin"] = fileState{Type: "directory"}
 	redirected["Cellar/python@3.14/9.9/bin/python3.14"] = fileState{Type: "regular", Mode: 0o755}
-	if err := validateExternalBottleSymlinkTargets("/prefix", redirected, node, verified, closure); err == nil {
+	if err := validateExternalBottleSymlinkTargets("/prefix", redirected, node, verified, closure, 1000, 1000); err == nil {
 		t.Fatal("redirected dependency opt target accepted before pour")
 	}
 	unsigned := node
 	unsigned.Dependencies = []resolution.Requirement{{Name: "python@3.14", Direct: false}}
-	if err := validateExternalBottleSymlinkTargets("/prefix", snapshot, unsigned, verified, []resolution.Node{unsigned, python}); err == nil {
+	if err := validateExternalBottleSymlinkTargets("/prefix", snapshot, unsigned, verified, []resolution.Node{unsigned, python}, 1000, 1000); err == nil {
 		t.Fatal("external target without signed direct dependency accepted before pour")
 	}
+}
+
+func TestValidateAndReconcileCertifiSharedCALinks(t *testing.T) {
+	node, caCertificates, verified, state := certifiSharedCAFixture()
+	closure := []resolution.Node{caCertificates, node}
+	if err := validateExternalBottleSymlinkTargets("/prefix", state, node, verified, closure, 1000, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcileInstalledKeg("/prefix", node, verified, state, reconcileKegOptions{closure: closure, runtimeUID: 1000, runtimeGID: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	v2 := node
+	v2.PolicyFormulaID = "homebrew/core/certifi"
+	if err := validateExternalBottleSymlinkTargets("/prefix", state, v2, verified, []resolution.Node{caCertificates, v2}, 1000, 1000); err != nil {
+		t.Fatalf("V2 exact policy rule: %v", err)
+	}
+}
+
+func TestClassifyAllowsOnlyVerifiedCertifiSharedCAGlobalLinks(t *testing.T) {
+	node, caCertificates, verified, state := certifiSharedCAFixture()
+	for key, value := range map[string]fileState{
+		"var":         {Type: "directory"},
+		"opt":         {Type: "directory"},
+		"opt/certifi": {Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "../Cellar/certifi/2026.7.22"},
+		"lib":         {Type: "directory"},
+	} {
+		state[key] = value
+	}
+	for _, minor := range []string{"12", "13", "14"} {
+		root := "lib/python3." + minor + "/site-packages/certifi"
+		state["lib/python3."+minor] = fileState{Type: "directory"}
+		state["lib/python3."+minor+"/site-packages"] = fileState{Type: "directory"}
+		state[root] = fileState{Type: "directory"}
+		state[root+"/cacert.pem"] = fileState{
+			Type: "symlink", Mode: os.ModeSymlink | 0o777,
+			Link: "../../../../Cellar/certifi/2026.7.22/" + root + "/cacert.pem",
+		}
+	}
+	before := map[string]fileState{}
+	for _, rel := range []string{
+		"Cellar", "Cellar/ca-certificates", "Cellar/ca-certificates/2026",
+		"etc", "etc/ca-certificates", bottle.CertifiSharedCATarget, "var", "opt", "lib",
+	} {
+		before[rel] = state[rel]
+	}
+	options := classifyOptions{
+		closure:    []resolution.Node{caCertificates, node},
+		verified:   verified,
+		runtimeUID: 1000,
+		runtimeGID: 1000,
+	}
+	changes := diff(before, state)
+	if err := classify("/prefix", node, before, state, changes, options); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range changes {
+		if strings.HasSuffix(change.Path, "/certifi/cacert.pem") && !strings.HasPrefix(change.Path, "Cellar/") && change.Classification != "certifi-shared-ca-link" {
+			t.Fatalf("global CA link %q classification = %q", change.Path, change.Classification)
+		}
+	}
+
+	global12 := "lib/python3.12/site-packages/certifi/cacert.pem"
+	keg12 := "Cellar/certifi/2026.7.22/" + global12
+	tests := map[string]func(*resolution.Node, map[string]fileState){
+		"bypasses keg source": func(_ *resolution.Node, candidate map[string]fileState) {
+			value := candidate[global12]
+			value.Link = "/prefix/" + bottle.CertifiSharedCATarget
+			candidate[global12] = value
+		},
+		"targets different keg alias": func(_ *resolution.Node, candidate map[string]fileState) {
+			value := candidate[global12]
+			value.Link = "../../../../Cellar/certifi/2026.7.22/lib/python3.13/site-packages/certifi/cacert.pem"
+			candidate[global12] = value
+		},
+		"rewrites verified keg alias": func(_ *resolution.Node, candidate map[string]fileState) {
+			value := candidate[keg12]
+			value.Link = "../../../python3.14/site-packages/certifi/./cacert.pem"
+			candidate[keg12] = value
+		},
+		"non-core owner": func(candidateNode *resolution.Node, _ map[string]fileState) {
+			candidateNode.FullName = "acme/tools/certifi"
+		},
+		"indirect dependency": func(candidateNode *resolution.Node, _ map[string]fileState) {
+			candidateNode.Dependencies = []resolution.Requirement{{Name: "ca-certificates"}}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			candidateNode := node
+			candidate := maps.Clone(state)
+			mutate(&candidateNode, candidate)
+			candidateOptions := options
+			candidateOptions.closure = []resolution.Node{caCertificates, candidateNode}
+			if err := classify("/prefix", candidateNode, before, candidate, diff(before, candidate), candidateOptions); err == nil {
+				t.Fatal("unauthorized certifi global CA link accepted")
+			}
+		})
+	}
+}
+
+func TestValidateCertifiSharedCATargetRejectsUnsafeStateAndIdentity(t *testing.T) {
+	tests := map[string]func(*resolution.Node, *[]resolution.Node, *bottle.Result, map[string]fileState){
+		"missing target": func(_ *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, state map[string]fileState) {
+			delete(state, bottle.CertifiSharedCATarget)
+		},
+		"symlink target": func(_ *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, state map[string]fileState) {
+			state[bottle.CertifiSharedCATarget] = fileState{Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "/etc/shadow", Links: 1, OwnershipKnown: true, UID: 1000, GID: 1000}
+		},
+		"directory target": func(_ *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, state map[string]fileState) {
+			state[bottle.CertifiSharedCATarget] = fileState{Type: "directory", Mode: os.ModeDir | 0o755, Links: 1, OwnershipKnown: true, UID: 1000, GID: 1000}
+		},
+		"empty target": func(_ *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, state map[string]fileState) {
+			value := state[bottle.CertifiSharedCATarget]
+			value.Size = 0
+			state[bottle.CertifiSharedCATarget] = value
+		},
+		"oversize target": func(_ *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, state map[string]fileState) {
+			value := state[bottle.CertifiSharedCATarget]
+			value.Size = certifiSharedCAMaxBytes + 1
+			state[bottle.CertifiSharedCATarget] = value
+		},
+		"executable target": func(_ *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, state map[string]fileState) {
+			value := state[bottle.CertifiSharedCATarget]
+			value.Mode = 0o755
+			state[bottle.CertifiSharedCATarget] = value
+		},
+		"writable target": func(_ *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, state map[string]fileState) {
+			value := state[bottle.CertifiSharedCATarget]
+			value.Mode = 0o664
+			state[bottle.CertifiSharedCATarget] = value
+		},
+		"special target mode": func(_ *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, state map[string]fileState) {
+			value := state[bottle.CertifiSharedCATarget]
+			value.Mode = os.ModeSetuid | 0o644
+			state[bottle.CertifiSharedCATarget] = value
+		},
+		"hardlinked target": func(_ *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, state map[string]fileState) {
+			value := state[bottle.CertifiSharedCATarget]
+			value.Links = 2
+			state[bottle.CertifiSharedCATarget] = value
+		},
+		"missing digest": func(_ *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, state map[string]fileState) {
+			value := state[bottle.CertifiSharedCATarget]
+			value.Digest = ""
+			state[bottle.CertifiSharedCATarget] = value
+		},
+		"malformed digest": func(_ *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, state map[string]fileState) {
+			value := state[bottle.CertifiSharedCATarget]
+			value.Digest = strings.Repeat("z", 64)
+			state[bottle.CertifiSharedCATarget] = value
+		},
+		"unknown owner": func(_ *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, state map[string]fileState) {
+			value := state[bottle.CertifiSharedCATarget]
+			value.OwnershipKnown = false
+			state[bottle.CertifiSharedCATarget] = value
+		},
+		"wrong owner": func(_ *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, state map[string]fileState) {
+			value := state[bottle.CertifiSharedCATarget]
+			value.UID = 0
+			state[bottle.CertifiSharedCATarget] = value
+		},
+		"non-core certifi": func(node *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, _ map[string]fileState) {
+			node.FullName = "acme/tools/certifi"
+		},
+		"V2 policy spoof": func(node *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, _ map[string]fileState) {
+			node.PolicyFormulaID = "acme/tools/certifi"
+		},
+		"indirect dependency": func(node *resolution.Node, _ *[]resolution.Node, _ *bottle.Result, _ map[string]fileState) {
+			node.Dependencies[0].Direct = false
+		},
+		"missing closure dependency": func(_ *resolution.Node, closure *[]resolution.Node, _ *bottle.Result, _ map[string]fileState) {
+			*closure = (*closure)[1:]
+		},
+		"non-core closure dependency": func(_ *resolution.Node, closure *[]resolution.Node, _ *bottle.Result, _ map[string]fileState) {
+			(*closure)[0].FullName = "acme/tools/ca-certificates"
+		},
+		"duplicate closure rack": func(_ *resolution.Node, closure *[]resolution.Node, _ *bottle.Result, _ map[string]fileState) {
+			*closure = append(*closure, resolution.Node{Name: "ca-certificates", FullName: "homebrew/core/ca-certificates", PkgVersion: "other"})
+		},
+		"wrong source path": func(_ *resolution.Node, _ *[]resolution.Node, verified *bottle.Result, _ map[string]fileState) {
+			verified.Inventory[0].KegPath = "lib/python3.14/site-packages/certifi/other.pem"
+		},
+		"non-symlink inventory": func(_ *resolution.Node, _ *[]resolution.Node, verified *bottle.Result, _ map[string]fileState) {
+			verified.Inventory[0].Type = bottle.EntryRegular
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			node, caCertificates, verified, state := certifiSharedCAFixture()
+			closure := []resolution.Node{caCertificates, node}
+			node.Dependencies = append([]resolution.Requirement(nil), node.Dependencies...)
+			verified.Inventory = append([]bottle.InventoryEntry(nil), verified.Inventory...)
+			mutate(&node, &closure, &verified, state)
+			if err := validateExternalBottleSymlinkTargets("/prefix", state, node, verified, closure, 1000, 1000); err == nil {
+				t.Fatal("unsafe shared CA target accepted")
+			}
+		})
+	}
+}
+
+func TestReconcileCertifiSharedCALinkRejectsRewrites(t *testing.T) {
+	node, caCertificates, verified, state := certifiSharedCAFixture()
+	closure := []resolution.Node{caCertificates, node}
+	rewritten := maps.Clone(state)
+	direct := "Cellar/certifi/2026.7.22/lib/python3.14/site-packages/certifi/cacert.pem"
+	rewritten[direct] = fileState{Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "/prefix/etc/ca-certificates/cert.pem"}
+	changed := node
+	changed.Bottle.Tab.ChangedFiles = []string{"lib/python3.14/site-packages/certifi/cacert.pem"}
+	if err := reconcileInstalledKeg("/prefix", changed, verified, rewritten, reconcileKegOptions{closure: []resolution.Node{caCertificates, changed}, runtimeUID: 1000, runtimeGID: 1000}); err == nil {
+		t.Fatal("rewritten certifi CA link accepted as a changed file")
+	}
+	rewrittenAlias := maps.Clone(state)
+	alias := "Cellar/certifi/2026.7.22/lib/python3.13/site-packages/certifi/cacert.pem"
+	rewrittenAlias[alias] = fileState{Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "../../../python3.14/site-packages/certifi/./cacert.pem"}
+	if err := reconcileInstalledKeg("/prefix", node, verified, rewrittenAlias, reconcileKegOptions{closure: closure, runtimeUID: 1000, runtimeGID: 1000}); err == nil {
+		t.Fatal("rewritten certifi CA alias accepted")
+	}
+	unsafeTarget := maps.Clone(state)
+	value := unsafeTarget[bottle.CertifiSharedCATarget]
+	value.Mode = 0o666
+	unsafeTarget[bottle.CertifiSharedCATarget] = value
+	if err := reconcileInstalledKeg("/prefix", node, verified, unsafeTarget, reconcileKegOptions{closure: closure, runtimeUID: 1000, runtimeGID: 1000}); err == nil {
+		t.Fatal("unsafe post-pour shared CA target accepted")
+	}
+}
+
+func certifiSharedCAFixture() (resolution.Node, resolution.Node, bottle.Result, map[string]fileState) {
+	node := resolution.Node{
+		Name: "certifi", FullName: "homebrew/core/certifi", PkgVersion: "2026.7.22",
+		Dependencies: []resolution.Requirement{{Name: "ca-certificates", Direct: true}},
+	}
+	caCertificates := resolution.Node{Name: "ca-certificates", FullName: "homebrew/core/ca-certificates", PkgVersion: "2026"}
+	directTarget := "../../../../../../../" + bottle.CertifiSharedCATarget
+	verified := bottle.Result{
+		Name: "certifi", PkgVersion: "2026.7.22", KegPrefix: "certifi/2026.7.22",
+		Inventory: []bottle.InventoryEntry{
+			{Path: "certifi/2026.7.22/lib/python3.14/site-packages/certifi/cacert.pem", KegPath: "lib/python3.14/site-packages/certifi/cacert.pem", Type: bottle.EntrySymlink, SymlinkTarget: directTarget, PrefixTarget: bottle.CertifiSharedCATarget},
+			{Path: "certifi/2026.7.22/lib/python3.12/site-packages/certifi/cacert.pem", KegPath: "lib/python3.12/site-packages/certifi/cacert.pem", Type: bottle.EntrySymlink, SymlinkTarget: "../../../python3.14/site-packages/certifi/cacert.pem", PrefixTarget: bottle.CertifiSharedCATarget},
+			{Path: "certifi/2026.7.22/lib/python3.13/site-packages/certifi/cacert.pem", KegPath: "lib/python3.13/site-packages/certifi/cacert.pem", Type: bottle.EntrySymlink, SymlinkTarget: "../../../python3.14/site-packages/certifi/cacert.pem", PrefixTarget: bottle.CertifiSharedCATarget},
+		},
+	}
+	state := map[string]fileState{
+		"Cellar":                                  {Type: "directory"},
+		"Cellar/certifi":                          {Type: "directory"},
+		"Cellar/certifi/2026.7.22":                {Type: "directory"},
+		"Cellar/certifi/2026.7.22/lib":            {Type: "directory"},
+		"Cellar/certifi/2026.7.22/lib/python3.12": {Type: "directory"},
+		"Cellar/certifi/2026.7.22/lib/python3.12/site-packages":                    {Type: "directory"},
+		"Cellar/certifi/2026.7.22/lib/python3.12/site-packages/certifi":            {Type: "directory"},
+		"Cellar/certifi/2026.7.22/lib/python3.12/site-packages/certifi/cacert.pem": {Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "../../../python3.14/site-packages/certifi/cacert.pem"},
+		"Cellar/certifi/2026.7.22/lib/python3.13":                                  {Type: "directory"},
+		"Cellar/certifi/2026.7.22/lib/python3.13/site-packages":                    {Type: "directory"},
+		"Cellar/certifi/2026.7.22/lib/python3.13/site-packages/certifi":            {Type: "directory"},
+		"Cellar/certifi/2026.7.22/lib/python3.13/site-packages/certifi/cacert.pem": {Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: "../../../python3.14/site-packages/certifi/cacert.pem"},
+		"Cellar/certifi/2026.7.22/lib/python3.14":                                  {Type: "directory"},
+		"Cellar/certifi/2026.7.22/lib/python3.14/site-packages":                    {Type: "directory"},
+		"Cellar/certifi/2026.7.22/lib/python3.14/site-packages/certifi":            {Type: "directory"},
+		"Cellar/certifi/2026.7.22/lib/python3.14/site-packages/certifi/cacert.pem": {Type: "symlink", Mode: os.ModeSymlink | 0o777, Link: directTarget},
+		"Cellar/ca-certificates":                                                   {Type: "directory"},
+		"Cellar/ca-certificates/2026":                                              {Type: "directory"},
+		"etc":                                                                      {Type: "directory"},
+		"etc/ca-certificates":                                                      {Type: "directory"},
+		bottle.CertifiSharedCATarget:                                               {Type: "regular", Mode: 0o644, Size: 4, Digest: strings.Repeat("a", 64), Inode: "ca-certificates", Links: 1, UID: 1000, GID: 1000, OwnershipKnown: true},
+	}
+	return node, caCertificates, verified, state
 }
 
 func TestReconcileInstalledKegAllowsSignedDependencyOptSymlink(t *testing.T) {

@@ -238,7 +238,7 @@ func Install(ctx context.Context, cfg Config) (*Evidence, error) {
 			cancel()
 			return nil, fmt.Errorf("validate prefix before %q: %w", name, err)
 		}
-		if err := validateExternalBottleSymlinkTargets(cfg.Prefix, before, node, verifiedByName[name], cfg.Record.Nodes); err != nil {
+		if err := validateExternalBottleSymlinkTargets(cfg.Prefix, before, node, verifiedByName[name], cfg.Record.Nodes, uint32(cfg.Record.Runtime.UID), uint32(cfg.Record.Runtime.GID)); err != nil {
 			cancel()
 			return nil, fmt.Errorf("validate bottle dependency links before %q: %w", name, err)
 		}
@@ -297,6 +297,7 @@ func Install(ctx context.Context, cfg Config) (*Evidence, error) {
 		changes := diff(before, after)
 		if err := classify(cfg.Prefix, node, before, after, changes, classifyOptions{
 			optNames:            optNamesForNode(cfg.Record, node.Name),
+			closure:             cfg.Record.Nodes,
 			closureKegs:         resolvedClosureKegs(cfg.Record),
 			verified:            verifiedByName[name],
 			runtimeUID:          uint32(cfg.Record.Runtime.UID),
@@ -305,7 +306,7 @@ func Install(ctx context.Context, cfg Config) (*Evidence, error) {
 		}); err != nil {
 			return nil, fmt.Errorf("contain install %q: %w", name, err)
 		}
-		if err := reconcileInstalledKeg(cfg.Prefix, node, verifiedByName[name], after, reconcileKegOptions{closure: cfg.Record.Nodes}); err != nil {
+		if err := reconcileInstalledKeg(cfg.Prefix, node, verifiedByName[name], after, reconcileKegOptions{closure: cfg.Record.Nodes, runtimeUID: uint32(cfg.Record.Runtime.UID), runtimeGID: uint32(cfg.Record.Runtime.GID)}); err != nil {
 			return nil, fmt.Errorf("reconcile installed keg %q: %w", name, err)
 		}
 		evidence.InstallDeltas = append(evidence.InstallDeltas, InstallDelta{Formula: name, Changes: changes})
@@ -734,6 +735,7 @@ func sameSnapshotOwnership(expected, actual fileState) bool {
 
 type classifyOptions struct {
 	optNames            map[string]struct{}
+	closure             []resolution.Node
 	closureKegs         map[string]struct{}
 	verified            bottle.Result
 	runtimeUID          uint32
@@ -904,11 +906,14 @@ func classify(prefix string, node resolution.Node, before, after map[string]file
 				resolved, err := resolveSnapshotPath(prefix, after, p)
 				_, preservedByExpansion := expandedSharedPaths[p]
 				nodeNPMLink := err == nil && isNodeNPMGlobalLink(prefix, node, keg, p, resolved, after, nodeNPMGenerated)
-				if err != nil || (!snapshotPathWithin(resolved, keg) && !preservedByExpansion && !nodeNPMLink) {
+				certifiSharedCALink := err == nil && isCurrentCertifiSharedCAGlobalLink(prefix, node, options.verified, after, p, resolved, keg, options.closure, options.runtimeUID, options.runtimeGID)
+				if err != nil || (!snapshotPathWithin(resolved, keg) && !preservedByExpansion && !nodeNPMLink && !certifiSharedCALink) {
 					return fmt.Errorf("global link %s does not resolve into current keg", p)
 				}
 				if nodeNPMLink {
 					c.Classification = "node-npm-link"
+				} else if certifiSharedCALink {
+					c.Classification = "certifi-shared-ca-link"
 				}
 			}
 		default:
@@ -2235,29 +2240,109 @@ func isValidatedNodeNPMKegLink(prefix string, node resolution.Node, verified bot
 	return ok && source.Type == "regular" && source.Digest == global.Digest && source.Size == global.Size && source.Mode == global.Mode && sameSnapshotOwnership(source, global)
 }
 
-func validateExternalBottleSymlinkTargets(prefix string, snapshot map[string]fileState, node resolution.Node, verified bottle.Result, closure []resolution.Node) error {
-	seen := map[string]struct{}{}
+func validateExternalBottleSymlinkTargets(prefix string, snapshot map[string]fileState, node resolution.Node, verified bottle.Result, closure []resolution.Node, runtimeUID, runtimeGID uint32) error {
 	for _, entry := range verified.Inventory {
 		if entry.PrefixTarget == "" {
 			continue
 		}
-		if _, ok := seen[entry.PrefixTarget]; ok {
-			continue
-		}
-		seen[entry.PrefixTarget] = struct{}{}
-		dependencyKeg, err := externalSymlinkDependencyKeg(node, closure, entry.PrefixTarget)
-		if err != nil {
+		if _, err := validateExternalBottleSymlinkTarget(prefix, snapshot, node, closure, entry, runtimeUID, runtimeGID); err != nil {
 			return fmt.Errorf("%s: %w", entry.Path, err)
-		}
-		resolved, err := resolveSnapshotPath(prefix, snapshot, entry.PrefixTarget)
-		if err != nil {
-			return fmt.Errorf("%s: resolve dependency target: %w", entry.Path, err)
-		}
-		if !snapshotPathWithin(resolved, dependencyKeg) {
-			return fmt.Errorf("%s: dependency target resolves outside %s", entry.Path, dependencyKeg)
 		}
 	}
 	return nil
+}
+
+const certifiSharedCAMaxBytes int64 = 1 << 20
+
+func validateExternalBottleSymlinkTarget(prefix string, snapshot map[string]fileState, node resolution.Node, closure []resolution.Node, entry bottle.InventoryEntry, runtimeUID, runtimeGID uint32) (string, error) {
+	if entry.Type != bottle.EntrySymlink || entry.KegPath == "" {
+		return "", fmt.Errorf("external target is attached to a non-symlink or empty keg path")
+	}
+	if entry.PrefixTarget == bottle.CertifiSharedCATarget {
+		return validateCertifiSharedCATarget(prefix, snapshot, node, closure, entry, runtimeUID, runtimeGID)
+	}
+	if !strings.HasPrefix(entry.KegPath, "libexec/") {
+		return "", fmt.Errorf("dependency opt target is linked from outside libexec")
+	}
+	dependencyKeg, err := externalSymlinkDependencyKeg(node, closure, entry.PrefixTarget)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := resolveSnapshotPath(prefix, snapshot, entry.PrefixTarget)
+	if err != nil {
+		return "", fmt.Errorf("resolve dependency target: %w", err)
+	}
+	if !snapshotPathWithin(resolved, dependencyKeg) {
+		return "", fmt.Errorf("dependency target resolves outside %s", dependencyKeg)
+	}
+	return resolved, nil
+}
+
+func validateCertifiSharedCATarget(prefix string, snapshot map[string]fileState, node resolution.Node, closure []resolution.Node, entry bottle.InventoryEntry, runtimeUID, runtimeGID uint32) (string, error) {
+	if !bottle.IsCertifiSharedCACertKegPath(entry.KegPath) || !formulaAllowsRule(node, string(bottle.ExternalSymlinkRuleCertifiSharedCA), "certifi") {
+		return "", fmt.Errorf("shared CA target is not authorized for %q at %q", node.FullName, entry.KegPath)
+	}
+	if !nodeHasDirectDependency(node, "ca-certificates") {
+		return "", fmt.Errorf("shared CA target requires a signed direct ca-certificates dependency")
+	}
+	found := false
+	for _, dependency := range closure {
+		if dependency.Name != "ca-certificates" {
+			continue
+		}
+		if found {
+			return "", fmt.Errorf("duplicate ca-certificates rack in resolved closure")
+		}
+		found = true
+		if dependency.FullName != "homebrew/core/ca-certificates" || dependency.PkgVersion == "" {
+			return "", fmt.Errorf("ca-certificates closure node is not exact core identity with a selected version")
+		}
+	}
+	if !found {
+		return "", fmt.Errorf("ca-certificates is absent from the resolved closure")
+	}
+	target, ok := snapshot[bottle.CertifiSharedCATarget]
+	if !ok {
+		return "", fmt.Errorf("shared CA target is missing")
+	}
+	if target.Type != "regular" || !target.Mode.IsRegular() {
+		return "", fmt.Errorf("shared CA target is not an ordinary regular file")
+	}
+	if target.Size <= 0 || target.Size > certifiSharedCAMaxBytes {
+		return "", fmt.Errorf("shared CA target size %d is outside 1..%d bytes", target.Size, certifiSharedCAMaxBytes)
+	}
+	if target.Mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || target.Mode.Perm()&0o111 != 0 || target.Mode.Perm()&0o022 != 0 {
+		return "", fmt.Errorf("shared CA target has unsafe permissions")
+	}
+	if target.Links != 1 {
+		return "", fmt.Errorf("shared CA target link count is %d, expected 1", target.Links)
+	}
+	if !target.OwnershipKnown || target.UID != runtimeUID || target.GID != runtimeGID {
+		return "", fmt.Errorf("shared CA target owner does not match authenticated runtime uid/gid %d:%d", runtimeUID, runtimeGID)
+	}
+	if len(target.Digest) != sha256.Size*2 {
+		return "", fmt.Errorf("shared CA target digest is absent or malformed")
+	}
+	if _, err := hex.DecodeString(target.Digest); err != nil {
+		return "", fmt.Errorf("shared CA target digest is malformed: %w", err)
+	}
+	resolved, err := resolveSnapshotPath(prefix, snapshot, bottle.CertifiSharedCATarget)
+	if err != nil {
+		return "", fmt.Errorf("resolve shared CA target: %w", err)
+	}
+	if resolved != bottle.CertifiSharedCATarget {
+		return "", fmt.Errorf("shared CA target resolves to %q", resolved)
+	}
+	return resolved, nil
+}
+
+func nodeHasDirectDependency(node resolution.Node, name string) bool {
+	for _, dependency := range node.Dependencies {
+		if dependency.Name == name && dependency.Direct {
+			return true
+		}
+	}
+	return false
 }
 
 func externalSymlinkDependencyKeg(node resolution.Node, closure []resolution.Node, target string) (string, error) {
@@ -2333,6 +2418,41 @@ func isCurrentGlibcLoaderConfigurationLink(prefix string, node resolution.Node, 
 	return false
 }
 
+func isCurrentCertifiSharedCAGlobalLink(prefix string, node resolution.Node, verified bottle.Result, snapshot map[string]fileState, linkPath, resolved, keg string, closure []resolution.Node, runtimeUID, runtimeGID uint32) bool {
+	if !bottle.IsCertifiSharedCACertKegPath(linkPath) || !verifiedBottleMatchesNode(node, verified) {
+		return false
+	}
+	var inventory *bottle.InventoryEntry
+	for i := range verified.Inventory {
+		entry := &verified.Inventory[i]
+		if entry.KegPath != linkPath {
+			continue
+		}
+		if inventory != nil || entry.Type != bottle.EntrySymlink || entry.PrefixTarget != bottle.CertifiSharedCATarget {
+			return false
+		}
+		inventory = entry
+	}
+	if inventory == nil {
+		return false
+	}
+	sourcePath := path.Join(keg, linkPath)
+	direct, err := directSnapshotSymlinkTarget(prefix, snapshot, linkPath)
+	if err != nil || direct != sourcePath {
+		return false
+	}
+	source, ok := snapshot[sourcePath]
+	if !ok || source.Type != "symlink" || source.Link != inventory.SymlinkTarget {
+		return false
+	}
+	expected, err := validateExternalBottleSymlinkTarget(prefix, snapshot, node, closure, *inventory, runtimeUID, runtimeGID)
+	if err != nil || resolved != expected {
+		return false
+	}
+	sourceResolved, err := resolveSnapshotPath(prefix, snapshot, sourcePath)
+	return err == nil && sourceResolved == expected
+}
+
 func directSnapshotSymlinkTarget(prefix string, snapshot map[string]fileState, linkPath string) (string, error) {
 	state, ok := snapshot[linkPath]
 	if !ok || state.Type != "symlink" {
@@ -2366,7 +2486,9 @@ func isGlobalRoot(p string) bool {
 }
 
 type reconcileKegOptions struct {
-	closure []resolution.Node
+	closure    []resolution.Node
+	runtimeUID uint32
+	runtimeGID uint32
 }
 
 func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.Result, after map[string]fileState, optional ...reconcileKegOptions) error {
@@ -2439,16 +2561,12 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 					return fmt.Errorf("verified bottle symlink %s escapes installed keg", rel)
 				}
 			} else {
-				dependencyKeg, err := externalSymlinkDependencyKeg(node, options.closure, entry.PrefixTarget)
+				expectedResolved, err := validateExternalBottleSymlinkTarget(prefix, after, node, options.closure, entry, options.runtimeUID, options.runtimeGID)
 				if err != nil {
 					return fmt.Errorf("verified bottle symlink %s: %w", rel, err)
 				}
-				expectedResolved, err := resolveSnapshotPath(prefix, after, entry.PrefixTarget)
-				if err != nil {
-					return fmt.Errorf("resolve verified bottle symlink %s dependency target: %w", rel, err)
-				}
-				if resolved != expectedResolved || !snapshotPathWithin(resolved, dependencyKeg) {
-					return fmt.Errorf("verified bottle symlink %s does not resolve inside dependency keg %s", rel, dependencyKeg)
+				if resolved != expectedResolved {
+					return fmt.Errorf("verified bottle symlink %s resolves to %s, expected %s", rel, resolved, expectedResolved)
 				}
 			}
 		}

@@ -1103,6 +1103,128 @@ func TestVerifyRejectsOptSymlinkTraversalOutsideDependency(t *testing.T) {
 	assertErrorCode(t, err, CodeUnsafeLink)
 }
 
+func TestExpectationFromNodeAllowsCertifiSharedCAOnlyForExactCoreDirectDependency(t *testing.T) {
+	valid := resolution.Node{Name: "certifi", FullName: "homebrew/core/certifi", Dependencies: []resolution.Requirement{{Name: "ca-certificates", Direct: true}}}
+	if rules := ExpectationFromNode(valid).AllowedExternalSymlinkRules; !slices.Equal(rules, []ExternalSymlinkRule{ExternalSymlinkRuleCertifiSharedCA}) {
+		t.Fatalf("certifi rules = %v", rules)
+	}
+	for name, node := range map[string]resolution.Node{
+		"non-core owner":      {Name: "certifi", FullName: "acme/tools/certifi", Dependencies: []resolution.Requirement{{Name: "ca-certificates", Direct: true}}},
+		"indirect dependency": {Name: "certifi", FullName: "homebrew/core/certifi", Dependencies: []resolution.Requirement{{Name: "ca-certificates"}}},
+		"wrong dependency":    {Name: "certifi", FullName: "homebrew/core/certifi", Dependencies: []resolution.Requirement{{Name: "other", Direct: true}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if rules := ExpectationFromNode(node).AllowedExternalSymlinkRules; len(rules) != 0 {
+				t.Fatalf("unexpected certifi rules = %v", rules)
+			}
+		})
+	}
+}
+
+func TestVerifyAllowsCertifiSharedCALinkAndVersionAliases(t *testing.T) {
+	t.Parallel()
+	direct := "certifi/2026.7.22/lib/python3.14/site-packages/certifi/cacert.pem"
+	links := []archiveMember{
+		symlinkMember(direct, "../../../../../../../"+CertifiSharedCATarget),
+		symlinkMember("certifi/2026.7.22/lib/python3.12/site-packages/certifi/cacert.pem", "../../../python3.14/site-packages/certifi/cacert.pem"),
+		symlinkMember("certifi/2026.7.22/lib/python3.13/site-packages/certifi/cacert.pem", "../../../python3.14/site-packages/certifi/cacert.pem"),
+	}
+	blob := makeArchive(t, certifiMembers(links...))
+	result, err := Verify(bytes.NewReader(blob), certifiExpectationFor(blob), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, link := range links {
+		entry := findInventoryEntry(t, result.Inventory, link.header.Name)
+		if entry.PrefixTarget != CertifiSharedCATarget || entry.SymlinkTarget != link.header.Linkname {
+			t.Fatalf("entry %q = %+v", link.header.Name, entry)
+		}
+	}
+}
+
+func TestVerifyRejectsUnauthorizedCertifiSharedCALinks(t *testing.T) {
+	t.Parallel()
+	const source = "certifi/2026.7.22/lib/python3.14/site-packages/certifi/cacert.pem"
+	const target = "../../../../../../../" + CertifiSharedCATarget
+	tests := []struct {
+		name       string
+		source     string
+		target     string
+		mutate     func(*Expectation)
+		want       ErrorCode
+		extraLinks []archiveMember
+	}{
+		{name: "missing rule", source: source, target: target, mutate: func(e *Expectation) { e.AllowedExternalSymlinkRules = nil }, want: CodeUnsafeLink},
+		{name: "unknown rule", source: source, target: target, mutate: func(e *Expectation) { e.AllowedExternalSymlinkRules = []ExternalSymlinkRule{"other-rule"} }, want: CodeInvalidExpectation},
+		{name: "non-core owner", source: source, target: target, mutate: func(e *Expectation) { e.FullName, e.ExpectedTap = "acme/tools/certifi", "acme/tools" }, want: CodeInvalidExpectation},
+		{name: "missing dependency", source: source, target: target, mutate: func(e *Expectation) { e.AllowedExternalSymlinkFormulae = nil }, want: CodeInvalidExpectation},
+		{name: "python ABI missing minor", source: "certifi/2026.7.22/lib/python3/site-packages/certifi/cacert.pem", target: target, want: CodeUnsafeLink},
+		{name: "python ABI leading zero", source: "certifi/2026.7.22/lib/python3.014/site-packages/certifi/cacert.pem", target: target, want: CodeUnsafeLink},
+		{name: "python ABI too long", source: "certifi/2026.7.22/lib/python3.123/site-packages/certifi/cacert.pem", target: target, want: CodeUnsafeLink},
+		{name: "dist packages", source: "certifi/2026.7.22/lib/python3.14/dist-packages/certifi/cacert.pem", target: target, want: CodeUnsafeLink},
+		{name: "wrong filename", source: "certifi/2026.7.22/lib/python3.14/site-packages/certifi/bundle.pem", target: target, want: CodeUnsafeLink},
+		{name: "extra source segment", source: "certifi/2026.7.22/lib/python3.14/site-packages/certifi/data/cacert.pem", target: target, want: CodeUnsafeLink},
+		{name: "wrong CA filename", source: source, target: "../../../../../../../etc/ca-certificates/other.pem", want: CodeUnsafeLink},
+		{name: "wrong CA root", source: source, target: "../../../../../../../etc/ssl/cert.pem", want: CodeUnsafeLink},
+		{name: "too little traversal", source: source, target: "../../../../../../" + CertifiSharedCATarget, want: CodeUnsafeLink},
+		{name: "too much traversal", source: source, target: "../../../../../../../../" + CertifiSharedCATarget, want: CodeUnsafeLink},
+		{name: "dot target component", source: source, target: "../../../../../../../etc/ca-certificates/./cert.pem", want: CodeUnsafeLink},
+		{name: "target traversal suffix", source: source, target: "../../../../../../../etc/ca-certificates/x/../cert.pem", want: CodeUnsafeLink},
+		{name: "absolute target", source: source, target: "/etc/ca-certificates/cert.pem", want: CodeUnsafeLink},
+		{name: "backslash target", source: source, target: `..\..\etc\ca-certificates\cert.pem`, want: CodeUnsafeLink},
+		{
+			name:   "unrelated alias source",
+			source: source,
+			target: target,
+			extraLinks: []archiveMember{
+				symlinkMember("certifi/2026.7.22/share/cacert.pem", "../lib/python3.14/site-packages/certifi/cacert.pem"),
+			},
+			want: CodeUnsafeLink,
+		},
+		{
+			name:   "unresolved suffix after external link",
+			source: source,
+			target: target,
+			extraLinks: []archiveMember{
+				symlinkMember("certifi/2026.7.22/lib/python3.13/site-packages/certifi/cacert.pem", "../../../python3.14/site-packages/certifi/cacert.pem/extra"),
+			},
+			want: CodeUnsafeLink,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			links := append([]archiveMember{symlinkMember(test.source, test.target)}, test.extraLinks...)
+			blob := makeArchive(t, certifiMembers(links...))
+			expected := certifiExpectationFor(blob)
+			if test.mutate != nil {
+				test.mutate(&expected)
+			}
+			_, err := Verify(bytes.NewReader(blob), expected, Options{})
+			assertErrorCode(t, err, test.want)
+		})
+	}
+}
+
+func certifiMembers(links ...archiveMember) []archiveMember {
+	members := []archiveMember{
+		regularMember("certifi/2026.7.22/.brew/certifi.rb", 0o644, "class Certifi < Formula\n  desc \"CA bundle\"\n  url \"https://example.invalid/certifi-2026.7.22.tar.gz\"\n  version \"2026.7.22\"\nend\n"),
+		regularMember("certifi/2026.7.22/lib/python3.14/site-packages/certifi/core.py", 0o644, "def where(): pass\n"),
+	}
+	return append(members, links...)
+}
+
+func certifiExpectationFor(blob []byte) Expectation {
+	expected := expectationFor(blob)
+	expected.Name = "certifi"
+	expected.FullName = "homebrew/core/certifi"
+	expected.FormulaVersion = "2026.7.22"
+	expected.PkgVersion = "2026.7.22"
+	expected.Dependencies = nil
+	expected.AllowedExternalSymlinkFormulae = []string{"ca-certificates"}
+	expected.AllowedExternalSymlinkRules = []ExternalSymlinkRule{ExternalSymlinkRuleCertifiSharedCA}
+	return expected
+}
+
 func TestRejectsSymlinkEscapeThroughIntermediateSymlink(t *testing.T) {
 	members := validMembers(false)
 	members = append(members,

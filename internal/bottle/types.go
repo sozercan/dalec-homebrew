@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
+	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
 // Limits bounds all attacker-controlled archive structures. Zero-valued
@@ -89,7 +90,18 @@ type Expectation struct {
 	Dependencies                   []ReceiptDependency
 	FormulaIdentity                string
 	AllowedExternalSymlinkFormulae []string
+	AllowedExternalSymlinkRules    []ExternalSymlinkRule
 }
+
+// ExternalSymlinkRule identifies a narrow, versioned exception to keg-local
+// symlink containment. Rules remain subject to exact owner, dependency, source,
+// target, and post-install validation.
+type ExternalSymlinkRule string
+
+const (
+	ExternalSymlinkRuleCertifiSharedCA ExternalSymlinkRule = "certifi-shared-ca-link-v1"
+	CertifiSharedCATarget                                  = "etc/ca-certificates/cert.pem"
+)
 
 // ReceiptDependency is the subset of bottle receipt dependency identity that
 // is authenticated by the resolution record.
@@ -125,6 +137,10 @@ func ExpectationFromNode(node resolution.Node) Expectation {
 		}
 	}
 	slices.Sort(allowedExternalSymlinkFormulae)
+	var allowedExternalSymlinkRules []ExternalSymlinkRule
+	if node.Name == "certifi" && node.FullName == "homebrew/core/certifi" && directDependencyByName(node.Dependencies, "ca-certificates") {
+		allowedExternalSymlinkRules = []ExternalSymlinkRule{ExternalSymlinkRuleCertifiSharedCA}
+	}
 	return Expectation{
 		Name:                           node.Name,
 		FullName:                       node.FullName,
@@ -144,7 +160,17 @@ func ExpectationFromNode(node resolution.Node) Expectation {
 		Dependencies:                   deps,
 		FormulaIdentity:                node.UpstreamFormulaID,
 		AllowedExternalSymlinkFormulae: allowedExternalSymlinkFormulae,
+		AllowedExternalSymlinkRules:    allowedExternalSymlinkRules,
 	}
+}
+
+func directDependencyByName(dependencies []resolution.Requirement, name string) bool {
+	for _, dependency := range dependencies {
+		if dependency.Name == name && dependency.Direct {
+			return true
+		}
+	}
+	return false
 }
 
 // VerifyNode verifies a fetched bottle against a resolution Node.
@@ -173,7 +199,7 @@ type Xattr struct {
 // Path and HardlinkTarget are archive-root-relative. SymlinkTarget preserves
 // the link text that the materializer must create. ResolvedTarget records a
 // containment-checked in-keg archive path; PrefixTarget records a narrowly
-// allowed prefix-relative opt path for a signed dependency.
+// allowed prefix-relative path bound to a signed dependency and policy rule.
 type InventoryEntry struct {
 	Path           string    `json:"path"`
 	KegPath        string    `json:"keg_path"`
@@ -323,6 +349,14 @@ func ExpectationFromNodeV2(node resolution.NodeV2, closure []resolution.NodeV2) 
 		allowed = append(allowed, dependency.Name)
 	}
 	slices.Sort(allowed)
+	var allowedExternalSymlinkRules []ExternalSymlinkRule
+	caCertificates, hasCACertificates := byID["homebrew/core/ca-certificates"]
+	if node.ID == "homebrew/core/certifi" && node.HomebrewFullName == "homebrew/core/certifi" &&
+		directDependencyByID(node.Dependencies, "homebrew/core/ca-certificates") && hasCACertificates &&
+		caCertificates.Name == "ca-certificates" && caCertificates.HomebrewFullName == "homebrew/core/ca-certificates" &&
+		policyv2.HasEmbeddedRule(node.ID.String(), string(ExternalSymlinkRuleCertifiSharedCA)) {
+		allowedExternalSymlinkRules = []ExternalSymlinkRule{ExternalSymlinkRuleCertifiSharedCA}
+	}
 	compressedDigest := node.Bottle.SHA256
 	compressedSize := node.Bottle.Size
 	if node.Bottle.Transport.OCI != nil {
@@ -340,7 +374,37 @@ func ExpectationFromNodeV2(node resolution.NodeV2, closure []resolution.NodeV2) 
 		CompressedSize: compressedSize, HomebrewSHA256: node.Bottle.SHA256, HomebrewVersion: node.Bottle.Tab.HomebrewVersion,
 		Arch: node.Bottle.Tab.Arch, Compiler: node.Bottle.Tab.Compiler, ExpectedTap: node.Tap.String(), Dependencies: deps,
 		FormulaIdentity: formulaIdentity, AllowedExternalSymlinkFormulae: allowed,
+		AllowedExternalSymlinkRules: allowedExternalSymlinkRules,
 	}, nil
+}
+
+func directDependencyByID(dependencies []resolution.RequirementV2, id resolution.FormulaID) bool {
+	for _, dependency := range dependencies {
+		if dependency.ID == id && dependency.Direct {
+			return true
+		}
+	}
+	return false
+}
+
+// IsCertifiSharedCACertKegPath recognizes only the Python-versioned certifi
+// bundle aliases emitted by the core certifi bottle. The decimal minor is
+// bounded to two digits and may not contain a leading zero.
+func IsCertifiSharedCACertKegPath(kegPath string) bool {
+	parts := strings.Split(kegPath, "/")
+	if len(parts) != 5 || parts[0] != "lib" || parts[2] != "site-packages" || parts[3] != "certifi" || parts[4] != "cacert.pem" {
+		return false
+	}
+	minor, ok := strings.CutPrefix(parts[1], "python3.")
+	if !ok || len(minor) < 1 || len(minor) > 2 || (len(minor) > 1 && minor[0] == '0') {
+		return false
+	}
+	for index := range minor {
+		if minor[index] < '0' || minor[index] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // VerifyNodeV2 verifies a fetched V2 bottle against its exact graph and rack

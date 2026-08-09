@@ -624,18 +624,30 @@ func runtimeFSRule(node resolution.Node, rule string, legacy func() bool) bool {
 	return legacy()
 }
 
+func optionalDependencyTooling(node resolution.Node, rel string) bool {
+	// libpsl exposes a Python-only data-generation helper from its keg even when
+	// it is merely transitive. Keep the authenticated keg copy as auxiliary data
+	// and omit only this exact global link.
+	if rel == "bin/psl-make-dafsa" {
+		return runtimeFSRule(node, "optional-libpsl-tooling", func() bool {
+			return node.Name == "libpsl" && node.FullName == "homebrew/core/libpsl"
+		})
+	}
+	if _, optional := optionalLLVMGlobalExecutables[rel]; !optional {
+		return false
+	}
+	return runtimeFSRule(node, "optional-llvm-tooling", func() bool {
+		return (node.Name == "llvm" || strings.HasPrefix(node.Name, "llvm@")) && node.FullName == "homebrew/core/"+node.Name
+	})
+}
+
 func pruneOptionalDependencyTooling(scan *sourceScan, policy *normalizedPolicy) {
 	for _, entry := range scan.entries {
 		if !entry.retain || entry.typeName != TypeSymlink {
 			continue
 		}
-		if _, optional := optionalLLVMGlobalExecutables[entry.rel]; !optional {
-			continue
-		}
 		node, ok := policy.nodes[entry.packageName]
-		if !ok || !runtimeFSRule(node, "optional-llvm-tooling", func() bool {
-			return (node.Name == "llvm" || strings.HasPrefix(node.Name, "llvm@")) && node.FullName == "homebrew/core/"+node.Name
-		}) {
+		if !ok || !optionalDependencyTooling(node, entry.rel) {
 			continue
 		}
 		if _, requested := policy.requested[entry.packageName]; requested {

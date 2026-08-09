@@ -72,11 +72,15 @@ func TestRuntimeRulesAreExactFormulaIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !policy.HasRule("homebrew/core/python@3.14", "python-venv-template") || !policy.HasRule("homebrew/core/llvm@21", "runtime-aux-llvm") {
+	if !policy.HasRule("homebrew/core/python@3.14", "python-venv-template") ||
+		!policy.HasRule("homebrew/core/llvm@21", "runtime-aux-llvm") ||
+		!policy.HasRule("homebrew/core/libpsl", "optional-libpsl-tooling") ||
+		!policy.HasRule("homebrew/core/libpsl", "runtime-aux-libpsl") ||
+		!policy.HasRule("homebrew/core/certifi", "certifi-shared-ca-link-v1") {
 		t.Fatal("expected exact core runtime rules are absent")
 	}
-	for _, id := range []string{"acme/tools/python@3.14", "acme/tools/llvm@21", "homebrew/core/llvm@22"} {
-		if policy.HasRule(id, "runtime-aux-llvm") || policy.HasRule(id, "python-venv-template") {
+	for _, id := range []string{"acme/tools/python@3.14", "acme/tools/llvm@21", "homebrew/core/llvm@22", "acme/tools/libpsl", "acme/tools/certifi"} {
+		if policy.HasRule(id, "runtime-aux-llvm") || policy.HasRule(id, "python-venv-template") || policy.HasRule(id, "optional-libpsl-tooling") || policy.HasRule(id, "runtime-aux-libpsl") || policy.HasRule(id, "certifi-shared-ca-link-v1") {
 			t.Fatalf("unexpected rule for %s", id)
 		}
 	}

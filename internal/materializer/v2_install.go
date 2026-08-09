@@ -171,7 +171,7 @@ func InstallOneV2(ctx context.Context, cfg InstallOneV2Config) (*InstallDeltaV2,
 	if err := validatePreinstallSymlinks(cfg.Prefix, before, legacy); err != nil {
 		return nil, err
 	}
-	if err := validateExternalBottleSymlinkTargets(cfg.Prefix, before, legacyNode, *verified, legacy.Nodes); err != nil {
+	if err := validateExternalBottleSymlinkTargets(cfg.Prefix, before, legacyNode, *verified, legacy.Nodes, uint32(legacy.Runtime.UID), uint32(legacy.Runtime.GID)); err != nil {
 		return nil, err
 	}
 	var priorGdkPixbufCache []byte
@@ -213,10 +213,10 @@ func InstallOneV2(ctx context.Context, cfg InstallOneV2Config) (*InstallDeltaV2,
 	// OSRunner returns only after the Linux subreaper has killed and reaped
 	// the complete installer process tree.
 	changes := diff(before, after)
-	if err := classify(cfg.Prefix, legacyNode, before, after, changes, classifyOptions{optNames: optNamesForNode(legacy, legacyNode.Name), closureKegs: resolvedClosureKegs(legacy), verified: *verified, runtimeUID: uint32(cfg.Record.Runtime.UID), runtimeGID: uint32(cfg.Record.Runtime.GID), priorGdkPixbufCache: priorGdkPixbufCache}); err != nil {
+	if err := classify(cfg.Prefix, legacyNode, before, after, changes, classifyOptions{optNames: optNamesForNode(legacy, legacyNode.Name), closure: legacy.Nodes, closureKegs: resolvedClosureKegs(legacy), verified: *verified, runtimeUID: uint32(cfg.Record.Runtime.UID), runtimeGID: uint32(cfg.Record.Runtime.GID), priorGdkPixbufCache: priorGdkPixbufCache}); err != nil {
 		return nil, fmt.Errorf("contain install %q: %w", cfg.ID, err)
 	}
-	if err := reconcileInstalledKeg(cfg.Prefix, legacyNode, *verified, after, reconcileKegOptions{closure: legacy.Nodes}); err != nil {
+	if err := reconcileInstalledKeg(cfg.Prefix, legacyNode, *verified, after, reconcileKegOptions{closure: legacy.Nodes, runtimeUID: uint32(legacy.Runtime.UID), runtimeGID: uint32(legacy.Runtime.GID)}); err != nil {
 		return nil, err
 	}
 	if err := verifyInstalledSubset(cfg.Prefix, legacy, rackByID[cfg.ID]); err != nil {

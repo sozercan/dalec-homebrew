@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,35 @@ func TestV2FormulaCapabilitiesDoNotUseShortNames(t *testing.T) {
 			t.Fatal(err)
 		}
 		if ok || len(caps.GeneratedGlobalPaths) != 0 {
+			t.Fatalf("spoof %q received capabilities %+v", id, caps)
+		}
+	}
+}
+
+func TestV2FormulaCapabilitiesBindIssue18RulesToExactCoreIDs(t *testing.T) {
+	for id, rules := range map[string][]string{
+		"homebrew/core/certifi": {"certifi-shared-ca-link-v1"},
+		"homebrew/core/libpsl":  {"optional-libpsl-tooling", "runtime-aux-libpsl"},
+	} {
+		caps, ok, err := V2FormulaCapabilities(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			t.Fatalf("missing capabilities for %s", id)
+		}
+		for _, rule := range rules {
+			if !slices.Contains(caps.Rules, rule) {
+				t.Fatalf("capabilities for %s lack %q: %+v", id, rule, caps)
+			}
+		}
+	}
+	for _, id := range []string{"certifi", "libpsl", "acme/tools/certifi", "acme/tools/libpsl"} {
+		caps, ok, err := V2FormulaCapabilities(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok || len(caps.Rules) != 0 {
 			t.Fatalf("spoof %q received capabilities %+v", id, caps)
 		}
 	}
