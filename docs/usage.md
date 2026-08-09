@@ -9,6 +9,8 @@
 - An upstream Dalec frontend reference pinned by digest
 - A `dalec-homebrew` parent index and exact platform child reference, both
   pinned by digest and taken from the same trusted release evidence
+- The authenticated Homebrew metadata bundle and manifest digest from that
+  same release
 - Network access from the BuildKit daemon to both frontend images and the child
   frontend's bound components, `formulae.brew.sh`, `ghcr.io`, public
   default-GitHub taps, and selected public bottle or prebuilt-archive hosts
@@ -22,6 +24,20 @@ runtime policy remain one separate release component tuple. Mutable image tags
 are not accepted as trusted inputs.
 
 ## Build an image
+
+Before using a released child frontend, verify the release's signed
+`SHA256SUMS`, reconstruct its fixed three-file metadata context, and verify the
+manifest digest recorded by the release:
+
+```console
+RELEASE_ASSETS=/path/to/verified/release-assets
+DALEC_HOMEBREW_METADATA_BUNDLE=$(mktemp -d)
+install -m 0444 "$RELEASE_ASSETS/metadata-bundle-manifest.json" "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json"
+install -m 0444 "$RELEASE_ASSETS/metadata-formula.jws.json" "$DALEC_HOMEBREW_METADATA_BUNDLE/formula.jws.json"
+install -m 0444 "$RELEASE_ASSETS/metadata-migrations.jws.json" "$DALEC_HOMEBREW_METADATA_BUNDLE/formula_tap_migrations.jws.json"
+DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$(tr -d '\n' < "$RELEASE_ASSETS/metadata-bundle.digest")
+test "$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" = "sha256:$(sha256sum "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json" | awk '{print $1}')"
+```
 
 The supported production spec uses upstream Dalec as its syntax frontend and
 selects `dalec-homebrew` through the `homebrew` target:
@@ -52,6 +68,8 @@ DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-inde
 
 docker buildx build \
   --build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX" \
+  --build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" \
+  --build-context "dalec-homebrew-metadata=$DALEC_HOMEBREW_METADATA_BUNDLE" \
   --target homebrew/image \
   --platform linux/amd64 \
   --file examples/forwarded-hello.yaml \
@@ -131,6 +149,8 @@ DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-inde
 
 docker buildx build \
   --build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX" \
+  --build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" \
+  --build-context "dalec-homebrew-metadata=$DALEC_HOMEBREW_METADATA_BUNDLE" \
   --target homebrew/image \
   --platform linux/amd64 \
   --file spec.yaml \

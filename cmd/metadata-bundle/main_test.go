@@ -24,8 +24,74 @@ func TestRunRejectsInvalidArgumentsBeforeCapture(t *testing.T) {
 		t.Fatalf("positional argument error = %v", err)
 	}
 	stderr.Reset()
-	if err := run(t.Context(), []string{"--output", "bundle", "--digest-output", "bundle/digest"}, &stderr); err == nil || !strings.Contains(err.Error(), "outside") {
+	if err := run(t.Context(), []string{"--output", "bundle", "--digest-output", "bundle/digest"}, &stderr); err == nil || !strings.Contains(err.Error(), "exact sibling") {
 		t.Fatalf("nested digest error = %v", err)
+	}
+	stderr.Reset()
+	if err := run(t.Context(), []string{"--output", "bundle", "--digest-output", "other.digest"}, &stderr); err == nil || !strings.Contains(err.Error(), "exact sibling") {
+		t.Fatalf("non-sibling digest error = %v", err)
+	}
+}
+
+func TestRunVerifyRejectsInvalidInputsBeforeAuthentication(t *testing.T) {
+	root := t.TempDir()
+	manifest := filepath.Join(root, "manifest.json")
+	if err := os.WriteFile(manifest, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	formula := filepath.Join(root, "formula.jws.json")
+	if err := os.WriteFile(formula, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	migrations := filepath.Join(root, "formula_tap_migrations.jws.json")
+	if err := os.WriteFile(migrations, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	validArgs := []string{
+		"--manifest", manifest,
+		"--formula", formula,
+		"--migrations", migrations,
+		"--expected-digest", sha256Digest([]byte("{}")),
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runVerify(withoutMetadataBundleFlag(validArgs, "--manifest"), &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "--manifest is required") {
+		t.Fatalf("missing manifest error = %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := runVerify(setMetadataBundleFlag(validArgs, "--expected-digest", "sha256:nope"), &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "canonical sha256") {
+		t.Fatalf("invalid digest error = %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := runVerify(setMetadataBundleFlag(validArgs, "--expected-digest", sha256Digest([]byte("different"))), &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched digest error = %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunVerifyRejectsSymlinkedMember(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(root, "manifest.json")
+	if err := os.Symlink(target, manifest); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	err := runVerify([]string{
+		"--manifest", manifest,
+		"--formula", target,
+		"--migrations", target,
+		"--expected-digest", sha256Digest([]byte("{}")),
+	}, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -116,7 +182,7 @@ func TestWriteBundleDirectoryRejectsOverwritesAndSymlinks(t *testing.T) {
 	t.Run("existing digest", func(t *testing.T) {
 		root := t.TempDir()
 		output := filepath.Join(root, "bundle")
-		digestOutput := filepath.Join(root, "digest")
+		digestOutput := output + ".digest"
 		if err := os.WriteFile(digestOutput, []byte("preserve"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -136,7 +202,7 @@ func TestWriteBundleDirectoryRejectsOverwritesAndSymlinks(t *testing.T) {
 		if err := os.WriteFile(target, []byte("preserve"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		digestOutput := filepath.Join(root, "digest")
+		digestOutput := output + ".digest"
 		if err := os.Symlink(target, digestOutput); err != nil {
 			t.Fatal(err)
 		}
@@ -150,15 +216,54 @@ func TestWriteBundleDirectoryRejectsOverwritesAndSymlinks(t *testing.T) {
 	})
 }
 
-func TestWriteBundleDirectoryRejectsDigestInsideBundle(t *testing.T) {
+func withoutMetadataBundleFlag(args []string, name string) []string {
+	result := make([]string, 0, len(args)-2)
+	for i := 0; i < len(args); i += 2 {
+		if args[i] != name {
+			result = append(result, args[i], args[i+1])
+		}
+	}
+	return result
+}
+
+func setMetadataBundleFlag(args []string, name, value string) []string {
+	result := append([]string(nil), args...)
+	for i := 0; i < len(result); i += 2 {
+		if result[i] == name {
+			result[i+1] = value
+			return result
+		}
+	}
+	return append(result, name, value)
+}
+
+func TestWriteBundleDirectoryRequiresExactSiblingDigest(t *testing.T) {
 	root := t.TempDir()
 	output := filepath.Join(root, "bundle")
-	digestOutput := filepath.Join(output, "nested", "digest")
-	if err := writeBundleDirectory(output, digestOutput, commandTestBundle(t)); err == nil || !strings.Contains(err.Error(), "outside") {
-		t.Fatalf("error = %v", err)
+	tests := []struct {
+		name         string
+		digestOutput func() string
+	}{
+		{name: "inside bundle", digestOutput: func() string { return filepath.Join(output, "nested", "digest") }},
+		{name: "other outside path", digestOutput: func() string { return filepath.Join(root, "other.digest") }},
+		{name: "symlink alias into bundle", digestOutput: func() string {
+			alias := filepath.Join(root, "alias")
+			if err := os.Symlink(output, alias); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(alias, "digest")
+		}},
 	}
-	if _, err := os.Lstat(output); !os.IsNotExist(err) {
-		t.Fatalf("output created after validation failure: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			digestOutput := tt.digestOutput()
+			if err := writeBundleDirectory(output, digestOutput, commandTestBundle(t)); err == nil || !strings.Contains(err.Error(), "exact sibling") {
+				t.Fatalf("error = %v", err)
+			}
+			if _, err := os.Lstat(output); !os.IsNotExist(err) {
+				t.Fatalf("output created after validation failure: %v", err)
+			}
+		})
 	}
 }
 

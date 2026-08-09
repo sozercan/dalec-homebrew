@@ -28,6 +28,7 @@ type options struct {
 	homebrewCommit                    string
 	portableRubyVersion               string
 	verificationKeysDigest            string
+	metadataBundleDigest              string
 	dalecModule                       string
 	buildKitModule                    string
 	tapPolicyDigest                   string
@@ -62,6 +63,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	flags.StringVar(&opts.homebrewCommit, "homebrew-commit", "", "immutable Homebrew commit")
 	flags.StringVar(&opts.portableRubyVersion, "portable-ruby-version", "", "portable Ruby version")
 	flags.StringVar(&opts.verificationKeysDigest, "verification-keys-digest", "", "sha256 digest of the Homebrew verification key set")
+	flags.StringVar(&opts.metadataBundleDigest, "metadata-bundle-digest", "", "sha256 digest of the authenticated Homebrew metadata bundle manifest")
 	flags.StringVar(&opts.dalecModule, "dalec-module", "", "Dalec Go module version")
 	flags.StringVar(&opts.buildKitModule, "buildkit-module", "", "BuildKit Go module version")
 	flags.StringVar(&opts.tapPolicyDigest, "tap-policy-digest", "", "V2 embedded tap-policy sha256 digest")
@@ -90,6 +92,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		HomebrewCommit:         opts.homebrewCommit,
 		PortableRubyVersion:    opts.portableRubyVersion,
 		VerificationKeysDigest: opts.verificationKeysDigest,
+		MetadataBundleDigest:   opts.metadataBundleDigest,
 		DalecModule:            opts.dalecModule,
 		BuildKitModule:         opts.buildKitModule,
 	}
@@ -149,6 +152,7 @@ func splitPolicyVersions(value string) []string {
 func (opts options) hasV2Inputs() bool {
 	return opts.bottleFetcher.configured() ||
 		opts.catalogExtractor.configured() ||
+		opts.metadataBundleDigest != "" ||
 		opts.tapPolicyDigest != "" ||
 		opts.executableRuntimePolicyDigest != "" ||
 		opts.supportedCatalogPolicyVersions != "" ||

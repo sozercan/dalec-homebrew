@@ -43,6 +43,7 @@ type Manifest struct {
 	HomebrewCommit         string     `json:"homebrew_commit"`
 	PortableRubyVersion    string     `json:"portable_ruby_version"`
 	VerificationKeysDigest string     `json:"verification_keys_digest"`
+	MetadataBundleDigest   string     `json:"metadata_bundle_digest,omitempty"`
 	DalecModule            string     `json:"dalec_module"`
 	BuildKitModule         string     `json:"buildkit_module"`
 
@@ -76,6 +77,7 @@ type Bindings struct {
 
 	BottleFetcherRef                  string
 	CatalogExtractorRef               string
+	MetadataBundleDigest              string
 	CatalogServiceOrigin              string
 	IngestionJWSKeyPolicyDigest       string
 	TapPolicyDigest                   string
@@ -224,6 +226,7 @@ func (m *Manifest) BindingsFor(platform resolution.Platform) (Bindings, error) {
 			BuildKitModule:   m.BuildKitModule,
 		},
 		CatalogServiceOrigin:              m.CatalogServiceOrigin,
+		MetadataBundleDigest:              m.MetadataBundleDigest,
 		IngestionJWSKeyPolicyDigest:       m.IngestionJWSKeyPolicyDigest,
 		TapPolicyDigest:                   m.TapPolicyDigest,
 		ExecutableRuntimePolicyDigest:     m.ExecutableRuntimePolicyDigest,
@@ -289,6 +292,9 @@ func (m *Manifest) SupportsNonCoreTaps() bool {
 
 func validateV2Bindings(m *Manifest) error {
 	var errs []error
+	if err := validateDigest(m.MetadataBundleDigest); err != nil {
+		errs = append(errs, fmt.Errorf("metadata bundle: %w", err))
+	}
 	if m.BottleFetcher == nil {
 		errs = append(errs, errors.New("V2 bottle fetcher component is required"))
 	} else if err := validateComponent("bottle_fetcher", *m.BottleFetcher); err != nil {
@@ -365,6 +371,7 @@ func validateV2Bindings(m *Manifest) error {
 func hasV2Bindings(m *Manifest) bool {
 	return m.BottleFetcher != nil ||
 		m.CatalogExtractor != nil ||
+		m.MetadataBundleDigest != "" ||
 		m.CatalogServiceOrigin != "" ||
 		m.IngestionJWSKeyPolicyDigest != "" ||
 		m.TapPolicyDigest != "" ||

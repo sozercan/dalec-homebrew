@@ -27,6 +27,16 @@ fail_usage() {
   exit 64
 }
 
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    fail_usage "sha256sum or shasum is required to validate the metadata bundle"
+  fi
+}
+
 USE_PUBLISHED_COMPONENTS=0
 if [[ -n "$BASE_REF" || -n "$MATERIALIZER_REF" || -n "$FRONTEND_INDEX_REF" || -n "$FRONTEND_REF" ]]; then
   USE_PUBLISHED_COMPONENTS=1
@@ -55,18 +65,27 @@ DALEC_FRONTEND_REF=$(jq -er '.index | select(type == "string" and length > 0)' <
 DALEC_ROUTE=$(jq -er '.route | select(type == "string" and length > 0)' <<<"$DALEC_SELECTION") ||
   fail_usage "validated upstream Dalec frontend pin did not contain a route"
 METADATA_BUNDLE_DIGEST=
+if (( USE_PUBLISHED_COMPONENTS == 1 )) && [[ -z "$METADATA_BUNDLE" ]]; then
+  fail_usage "DALEC_HOMEBREW_LIVE_METADATA_BUNDLE is required for a published component tuple"
+fi
 if [[ -n "$METADATA_BUNDLE" ]]; then
   METADATA_BUNDLE=${METADATA_BUNDLE%/}
   [[ -n "$METADATA_BUNDLE" && -d "$METADATA_BUNDLE" ]] ||
     fail_usage "DALEC_HOMEBREW_LIVE_METADATA_BUNDLE must name a metadata bundle directory"
+  metadata_bundle_manifest="$METADATA_BUNDLE/manifest.json"
+  [[ -f "$metadata_bundle_manifest" && ! -L "$metadata_bundle_manifest" ]] ||
+    fail_usage "metadata bundle manifest must be a regular file"
   metadata_bundle_digest_file="${METADATA_BUNDLE}.digest"
-  [[ -f "$metadata_bundle_digest_file" ]] ||
+  [[ -f "$metadata_bundle_digest_file" && ! -L "$metadata_bundle_digest_file" ]] ||
     fail_usage "DALEC_HOMEBREW_LIVE_METADATA_BUNDLE requires sibling digest file ${metadata_bundle_digest_file}"
   [[ $(awk 'END { print NR }' "$metadata_bundle_digest_file") -eq 1 ]] ||
     fail_usage "metadata bundle digest file must contain exactly one line"
   METADATA_BUNDLE_DIGEST=$(<"$metadata_bundle_digest_file")
   [[ "$METADATA_BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] ||
     fail_usage "metadata bundle digest file must contain one sha256 digest"
+  actual_metadata_bundle_digest="sha256:$(sha256_file "$metadata_bundle_manifest")"
+  [[ "$actual_metadata_bundle_digest" == "$METADATA_BUNDLE_DIGEST" ]] ||
+    fail_usage "metadata bundle digest does not match manifest.json"
 fi
 if [[ -z "$BUILDER" || -z "$PLATFORM" || ( "$USE_PUBLISHED_COMPONENTS" -eq 0 && -z "$REGISTRY" ) ]]; then
   cat >&2 <<'USAGE'
@@ -83,6 +102,7 @@ usage: rebuild components:
          DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=<image@sha256:digest> \
          DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF=<image@sha256:digest> \
          DALEC_HOMEBREW_LIVE_FRONTEND_REF=<image@sha256:digest> \
+         DALEC_HOMEBREW_LIVE_METADATA_BUNDLE=<captured-metadata-directory> \
          ./scripts/live-test.sh
 
 Optional settings for either mode:
@@ -90,7 +110,6 @@ Optional settings for either mode:
        DALEC_HOMEBREW_LIVE_IMAGE=dalec-homebrew-live:dev
        DALEC_HOMEBREW_LIVE_OUTPUT=load|push
        DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=<RFC3339 timestamp>
-       DALEC_HOMEBREW_LIVE_METADATA_BUNDLE=<captured-metadata-directory>
        DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN=release/dalec-frontend.json
        DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF=<index-or-platform-child@sha256:digest>
        DALEC_HOMEBREW_LIVE_TARGET=homebrew/image

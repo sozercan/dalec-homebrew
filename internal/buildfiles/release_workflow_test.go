@@ -803,11 +803,21 @@ func TestReleaseWorkflowPinsMetadataBundle(t *testing.T) {
 		`--digest-output dist/release/metadata-bundle.digest`,
 		`METADATA_BUNDLE_DIGEST=$(<dist/release/metadata-bundle.digest)`,
 		`[[ "$METADATA_BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]`,
+		`actual_metadata_bundle_digest="sha256:$(sha256sum dist/release/metadata-bundle/manifest.json | awk '{print $1}')"`,
+		`[[ "$actual_metadata_bundle_digest" == "$METADATA_BUNDLE_DIGEST" ]]`,
+		`inputs_candidate=$(mktemp dist/release/inputs.json.XXXXXX)`,
+		`'.metadata_bundle_digest = $digest'`,
+		`mv "$inputs_candidate" dist/release/inputs.json`,
 		`export METADATA_BUNDLE_DIGEST`,
 	} {
 		if !strings.Contains(buildScript, want) {
 			t.Fatalf("release frontend build does not bind captured metadata with %q", want)
 		}
+	}
+
+	manifestScript := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "build", "Generate and verify component manifest"), "run"))
+	if want := `--metadata-bundle-digest "$(jq -er .metadata_bundle_digest dist/release/inputs.json)"`; !strings.Contains(manifestScript, want) {
+		t.Fatalf("release component manifest does not bind the metadata bundle with %q", want)
 	}
 
 	upload := yamlMappingValue(t, workflowStepByName(t, workflow, "build", "Upload immutable build tuple"), "with")
@@ -843,6 +853,75 @@ func TestReleaseWorkflowPinsMetadataBundle(t *testing.T) {
 			t.Fatalf("release recovery asset contract is missing %q", name)
 		}
 	}
+
+	for _, job := range []string{"sign", "promote"} {
+		checkout := workflowStepByName(t, workflow, job, "Check out trusted verifier source")
+		if got := yamlScalarValue(t, yamlMappingValue(t, checkout, "uses")); got != "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" {
+			t.Fatalf("%s verifier checkout = %q", job, got)
+		}
+		checkoutWith := yamlMappingValue(t, checkout, "with")
+		if got := yamlScalarValue(t, yamlMappingValue(t, checkoutWith, "ref")); got != "${{ github.workflow_sha }}" {
+			t.Fatalf("%s verifier checkout ref = %q", job, got)
+		}
+		if got := yamlScalarValue(t, yamlMappingValue(t, checkoutWith, "persist-credentials")); got != "false" {
+			t.Fatalf("%s verifier checkout persists credentials = %q", job, got)
+		}
+		setup := workflowStepByName(t, workflow, job, "Set up Go")
+		if got := yamlScalarValue(t, yamlMappingValue(t, setup, "uses")); got != "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e" {
+			t.Fatalf("%s verifier Go setup = %q", job, got)
+		}
+		setupWith := yamlMappingValue(t, setup, "with")
+		if got := yamlScalarValue(t, yamlMappingValue(t, setupWith, "go-version-file")); got != "go.mod" {
+			t.Fatalf("%s verifier Go version file = %q", job, got)
+		}
+		if got := yamlScalarValue(t, yamlMappingValue(t, setupWith, "cache")); got != "false" {
+			t.Fatalf("%s verifier Go cache = %q", job, got)
+		}
+	}
+
+	signRun := yamlMappingValue(t, workflowStepByName(t, workflow, "sign", "Validate release tuple before signing"), "run")
+	if signRun.Anchor != "validate-release-tuple" {
+		t.Fatalf("release tuple validation anchor = %q", signRun.Anchor)
+	}
+	promoteRun := yamlMappingValue(t, workflowStepByName(t, workflow, "promote", "Validate signed release tuple"), "run")
+	if promoteRun.Kind != yaml.AliasNode || promoteRun.Value != "validate-release-tuple" || promoteRun.Alias != signRun {
+		t.Fatal("promotion does not reuse the exact release tuple validation anchor")
+	}
+	validationScript := yamlScalarValue(t, signRun)
+	for _, want := range []string{
+		`nested_manifest=dist/release/metadata-bundle/manifest.json`,
+		`nested_formula=dist/release/metadata-bundle/formula.jws.json`,
+		`nested_migrations=dist/release/metadata-bundle/formula_tap_migrations.jws.json`,
+		`flat_manifest=dist/release/metadata-bundle-manifest.json`,
+		`flat_formula=dist/release/metadata-formula.jws.json`,
+		`flat_migrations=dist/release/metadata-migrations.jws.json`,
+		`if (( nested_count == 3 && flat_count == 0 )); then`,
+		`elif (( nested_count == 0 && flat_count == 3 )); then`,
+		`[[ -f dist/release/metadata-bundle.digest && ! -L dist/release/metadata-bundle.digest ]]`,
+		`(( ${#metadata_bundle_digest_lines[@]} == 1 ))`,
+		`go run ./cmd/metadata-bundle verify`,
+		`--manifest "$metadata_bundle_manifest"`,
+		`--formula "$metadata_bundle_formula"`,
+		`--migrations "$metadata_bundle_migrations"`,
+		`--expected-digest "$metadata_bundle_digest"`,
+		`--slurpfile bundle "$metadata_bundle_verification"`,
+		`($bundle[0].bundle_digest == $inputs[0].metadata_bundle_digest)`,
+		`.accepted_snapshot.digest == $bundle_snapshot.digest`,
+		`.accepted_snapshot.formula_digest == $bundle_snapshot.formula_digest`,
+		`.accepted_snapshot.migration_digest == $bundle_snapshot.migration_digest`,
+		`.accepted_snapshot.formula_envelope_digest == $bundle_snapshot.formula.envelope_digest`,
+		`.accepted_snapshot.migration_envelope_digest == $bundle_snapshot.migrations.envelope_digest`,
+		`.accepted_snapshot.generated_at == $bundle_snapshot.generated_at`,
+		`.accepted_snapshot.signer.key_id == $bundle_signer.key_id`,
+		`.formula_envelope_digest == $bundle_snapshot.formula.envelope_digest`,
+		`.migration_envelope_digest == $bundle_snapshot.migrations.envelope_digest`,
+		`.metadata_bundle_digest == $inputs[0].metadata_bundle_digest`,
+		`.invocation.parameters.metadata_bundle_digest == $inputs[0].metadata_bundle_digest`,
+	} {
+		if !strings.Contains(validationScript, want) {
+			t.Fatalf("release tuple validation does not bind authenticated metadata with %q", want)
+		}
+	}
 }
 
 func TestReleaseWorkflowDalecFrontendProvenance(t *testing.T) {
@@ -876,8 +955,9 @@ func TestReleaseWorkflowDalecFrontendProvenance(t *testing.T) {
 		}
 	}
 	write("inputs.json", map[string]any{
-		"source_date_epoch": "1781049600",
-		"dalec_frontend":    pin,
+		"source_date_epoch":      "1781049600",
+		"metadata_bundle_digest": "sha256:" + strings.Repeat("9", 64),
+		"dalec_frontend":         pin,
 	})
 	write("digests.json", map[string]any{
 		"source": map[string]any{
@@ -924,6 +1004,9 @@ func TestReleaseWorkflowDalecFrontendProvenance(t *testing.T) {
 	}
 	if !reflect.DeepEqual(provenance.Invocation.Parameters["dalec_frontend"], pin) {
 		t.Fatalf("provenance Dalec frontend parameter = %#v, want %#v", provenance.Invocation.Parameters["dalec_frontend"], pin)
+	}
+	if got, want := provenance.Invocation.Parameters["metadata_bundle_digest"], "sha256:"+strings.Repeat("9", 64); got != want {
+		t.Fatalf("provenance metadata bundle digest = %#v, want %q", got, want)
 	}
 	if len(provenance.Materials) != 2 {
 		t.Fatalf("provenance materials = %#v", provenance.Materials)

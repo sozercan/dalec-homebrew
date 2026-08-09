@@ -159,10 +159,14 @@ func TestNonCoreE2ESpecContainsQualifiedAndCoreRoots(t *testing.T) {
 func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
 	root := repositoryRoot(t)
 	const (
-		indexAssignment = "DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>"
-		indexBuildArg   = `--build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX"`
-		indexReference  = "DALEC_HOMEBREW_FRONTEND_INDEX_REF=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>"
-		childReference  = "ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>"
+		indexAssignment      = "DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>"
+		indexBuildArg        = `--build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX"`
+		metadataBuildArg     = `--build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST"`
+		metadataBuildContext = `--build-context "dalec-homebrew-metadata=$DALEC_HOMEBREW_METADATA_BUNDLE"`
+		indexReference       = "DALEC_HOMEBREW_FRONTEND_INDEX_REF=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>"
+		metadataReference    = "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=sha256:<metadata-bundle-manifest-digest>"
+		metadataContext      = "--build-context dalec-homebrew-metadata=/path/to/verified/metadata-bundle"
+		childReference       = "ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>"
 	)
 
 	for _, relative := range []string{"README.md", filepath.Join("docs", "usage.md")} {
@@ -170,14 +174,36 @@ func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		text := string(data)
+		for _, want := range []string{
+			"metadata-bundle-manifest.json",
+			"metadata-formula.jws.json",
+			"metadata-migrations.jws.json",
+			"metadata-bundle.digest",
+			`DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json`,
+			`DALEC_HOMEBREW_METADATA_BUNDLE/formula.jws.json`,
+			`DALEC_HOMEBREW_METADATA_BUNDLE/formula_tap_migrations.jws.json`,
+			`test "$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" = "sha256:$(sha256sum "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json" | awk '{print $1}')"`,
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s metadata bundle preparation is missing %q", relative, want)
+			}
+		}
+
 		found := 0
-		for _, tail := range strings.Split(string(data), "```console")[1:] {
+		for _, tail := range strings.Split(text, "```console")[1:] {
 			block, _, ok := strings.Cut(tail, "```")
 			if !ok || !strings.Contains(block, "docker buildx build") {
 				continue
 			}
 			found++
-			for _, want := range []string{"--target homebrew/image", indexAssignment, indexBuildArg} {
+			for _, want := range []string{
+				"--target homebrew/image",
+				indexAssignment,
+				indexBuildArg,
+				metadataBuildArg,
+				metadataBuildContext,
+			} {
 				if !strings.Contains(block, want) {
 					t.Errorf("%s production command is missing %q:\n%s", relative, want, block)
 				}
@@ -194,7 +220,7 @@ func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := string(data)
-		for _, want := range []string{indexReference, childReference} {
+		for _, want := range []string{indexReference, metadataReference, metadataContext, childReference} {
 			if !strings.Contains(text, want) {
 				t.Errorf("%s is missing %q", relative, want)
 			}
