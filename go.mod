@@ -12,6 +12,7 @@ require (
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/project-dalec/dalec v0.21.5-0.20260728234020-5fa2c46d716b
 	github.com/sigstore/sigstore-go v1.2.1
+	github.com/tonistiigi/fsutil v0.0.0-20260716115106-30cd4fc5d911
 	golang.org/x/sys v0.46.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
@@ -87,7 +88,6 @@ require (
 	github.com/sigstore/timestamp-authority/v2 v2.1.2 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/theupdateframework/go-tuf/v2 v2.4.2 // indirect
-	github.com/tonistiigi/fsutil v0.0.0-20260716115106-30cd4fc5d911 // indirect
 	github.com/tonistiigi/go-csvvalue v0.0.0-20240814133006-030d3b2625d0 // indirect
 	github.com/transparency-dev/formats v0.1.1 // indirect
 	github.com/transparency-dev/merkle v0.0.2 // indirect
