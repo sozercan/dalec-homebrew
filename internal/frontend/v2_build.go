@@ -102,10 +102,6 @@ func buildV2(ctx context.Context, client gwclient.Client, dc *dockerui.Client, c
 		input := preflight[idx]
 		p := input.platform
 		key := p.OS + "/" + p.Architecture
-		frontendChildRef, _, err := resolveImageConfig(ctx, client, invokingFrontend, p, dc.ImageResolveMode.String(), "frontend child")
-		if err != nil {
-			return nil, err
-		}
 		baseRef, baseImage, err := resolveImageConfig(ctx, client, cfg.RuntimeBaseRef, p, dc.ImageResolveMode.String(), "runtime base")
 		if err != nil {
 			return nil, err
@@ -125,7 +121,7 @@ func buildV2(ctx context.Context, client gwclient.Client, dc *dockerui.Client, c
 		if p.Architecture == "arm64" {
 			cpuBaseline = "armv8"
 		}
-		components := newComponentsV2(cfg, invokingFrontend, frontendChildRef, baseRef, materializerRef)
+		components := newComponentsV2(cfg, invokingFrontend, baseRef, materializerRef)
 		var record *resolution.RecordV2
 		if nonCore != nil {
 			platformResult, ok := verifiedResults[key]
@@ -146,7 +142,7 @@ func buildV2(ctx context.Context, client gwclient.Client, dc *dockerui.Client, c
 			for i, root := range input.selection.Roots {
 				rootNames[i] = root.Name
 			}
-			legacyComponents := resolution.Components{FrontendRef: frontendChildRef, RuntimeBaseRef: baseRef, MaterializerRef: materializerRef, HomebrewCommit: cfg.HomebrewCommit, RubyRuntime: cfg.PortableRubyVersion, VerificationKeys: cfg.VerificationKeysDigest, DalecModule: components.DalecModule, BuildKitModule: components.BuildKitModule}
+			legacyComponents := resolution.Components{FrontendRef: invokingFrontend, RuntimeBaseRef: baseRef, MaterializerRef: materializerRef, HomebrewCommit: cfg.HomebrewCommit, RubyRuntime: cfg.PortableRubyVersion, VerificationKeys: cfg.VerificationKeysDigest, DalecModule: components.DalecModule, BuildKitModule: components.BuildKitModule}
 			legacy, resolveErr := resolver.Resolve(ctx, snapshot, registry, rootNames, p, resolver.Options{SpecDigest: "sha256:" + sha256Hex(input.effectiveSpec), TargetKey: targetKey, Now: time.Now().UTC().Round(0), Metadata: snapshot.Info(), Components: legacyComponents, Runtime: resolution.RuntimePolicy{User: identity.User, UID: identity.UID, GID: identity.GID, CPUBaseline: cpuBaseline}, Attestation: resolution.AttestationPolicy{Waiver: cfg.AttestationWaiver}})
 			if resolveErr != nil {
 				return nil, resolveErr
@@ -223,9 +219,9 @@ func buildV2(ctx context.Context, client gwclient.Client, dc *dockerui.Client, c
 	return rb.Finalize()
 }
 
-func newComponentsV2(cfg config.Config, invokingFrontend, frontendChildRef, baseRef, materializerRef string) resolution.ComponentsV2 {
+func newComponentsV2(cfg config.Config, frontendChildRef, baseRef, materializerRef string) resolution.ComponentsV2 {
 	return resolution.ComponentsV2{
-		FrontendIndexRef: invokingFrontend, FrontendRef: frontendChildRef, RuntimeBaseRef: baseRef, MaterializerRef: materializerRef, BottleFetcherRef: cfg.BottleFetcherRef,
+		FrontendIndexRef: cfg.FrontendIndexRef, FrontendRef: frontendChildRef, RuntimeBaseRef: baseRef, MaterializerRef: materializerRef, BottleFetcherRef: cfg.BottleFetcherRef,
 		CatalogExtractorRef: cfg.CatalogExtractorRef, CatalogServiceOrigin: cfg.CatalogServiceOrigin, IngestionJWSKeyPolicyDigest: cfg.IngestionJWSKeyPolicyDigest,
 		TapPolicyDigest: cfg.TapPolicyDigest, ExecutableRuntimePolicyDigest: cfg.ExecutableRuntimePolicyDigest,
 		HomebrewCommit: cfg.HomebrewCommit, RubyRuntime: cfg.PortableRubyVersion, VerificationKeys: cfg.VerificationKeysDigest,

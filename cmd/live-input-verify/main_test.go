@@ -19,6 +19,7 @@ func TestRun(t *testing.T) {
 	validRefs := []string{
 		"--runtime-base-ref", "GHCR.IO/example/runtime-base@" + digest,
 		"--materializer-ref", "localhost:5000/example/materializer.v2@" + digest,
+		"--frontend-index-ref", "example/frontend_name@" + digest,
 		"--frontend-ref", "example/frontend_name:release-1@" + digest,
 	}
 	tests := []struct {
@@ -33,9 +34,10 @@ func TestRun(t *testing.T) {
 		{name: "additional ref scheme", args: []string{"--pinned-ref", "GO_IMAGE=https://ghcr.io/example/go@" + digest}, want: "GO_IMAGE must be a digest-pinned OCI reference"},
 		{name: "malformed additional ref", args: []string{"--pinned-ref", "ghcr.io/example/go@" + digest}, want: "NAME=REFERENCE"},
 		{name: "partial refs", args: []string{"--runtime-base-ref", "ghcr.io/example/base@" + digest}, want: "must be set together"},
-		{name: "scheme", args: []string{"--runtime-base-ref", "https://ghcr.io/example/base@" + digest, "--materializer-ref", "ghcr.io/example/materializer@" + digest, "--frontend-ref", "ghcr.io/example/frontend@" + digest}, want: "invalid OCI reference"},
-		{name: "empty segment", args: []string{"--runtime-base-ref", "ghcr.io//base@" + digest, "--materializer-ref", "ghcr.io/example/materializer@" + digest, "--frontend-ref", "ghcr.io/example/frontend@" + digest}, want: "invalid OCI reference"},
-		{name: "malformed tag", args: []string{"--runtime-base-ref", "ghcr.io/example/base@" + digest, "--materializer-ref", "ghcr.io/example/materializer:bad:tag@" + digest, "--frontend-ref", "ghcr.io/example/frontend@" + digest}, want: "invalid OCI reference"},
+		{name: "scheme", args: []string{"--runtime-base-ref", "https://ghcr.io/example/base@" + digest, "--materializer-ref", "ghcr.io/example/materializer@" + digest, "--frontend-index-ref", "ghcr.io/example/frontend@" + digest, "--frontend-ref", "ghcr.io/example/frontend@" + digest}, want: "invalid OCI reference"},
+		{name: "empty segment", args: []string{"--runtime-base-ref", "ghcr.io//base@" + digest, "--materializer-ref", "ghcr.io/example/materializer@" + digest, "--frontend-index-ref", "ghcr.io/example/frontend@" + digest, "--frontend-ref", "ghcr.io/example/frontend@" + digest}, want: "invalid OCI reference"},
+		{name: "malformed tag", args: []string{"--runtime-base-ref", "ghcr.io/example/base@" + digest, "--materializer-ref", "ghcr.io/example/materializer:bad:tag@" + digest, "--frontend-index-ref", "ghcr.io/example/frontend@" + digest, "--frontend-ref", "ghcr.io/example/frontend@" + digest}, want: "invalid OCI reference"},
+		{name: "cross-repository frontend", args: []string{"--runtime-base-ref", "ghcr.io/example/base@" + digest, "--materializer-ref", "ghcr.io/example/materializer@" + digest, "--frontend-index-ref", "ghcr.io/example/frontend@" + digest, "--frontend-ref", "ghcr.io/other/frontend@" + digest}, want: "must use the same repository"},
 		{name: "invalid date", args: []string{"--metadata-not-before", "2026-02-31T00:00:00Z"}, want: "valid RFC3339"},
 		{name: "invalid hour", args: []string{"--metadata-not-before", "2026-08-02T24:00:00Z"}, want: "valid RFC3339"},
 		{name: "invalid offset", args: []string{"--metadata-not-before", "2026-08-02T00:00:00+01:60"}, want: "valid RFC3339"},

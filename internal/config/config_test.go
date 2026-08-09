@@ -171,11 +171,18 @@ func setCompiledBuildLocalV2(t *testing.T) {
 	SupportedProvenancePolicyVersions = ChecksumWaiverPolicyVersionV1 + "," + CoreWaiverPolicyVersionV1 + "," + HTTPSSourceWaiverPolicyVersionV1 + "," + PrebuiltWaiverPolicyVersionV1 + "," + SigstoreProvenancePolicyVersionV1
 }
 
+func compiledV2InvocationOpts() map[string]string {
+	return map[string]string{
+		"source":                                "example/frontend@" + testDigestA,
+		"build-arg:" + FrontendIndexRefBuildArg: "example/frontend@" + testDigestB,
+	}
+}
+
 func TestCompiledBuildLocalV2BindingsEnableCapability(t *testing.T) {
 	resetCompiledBindings(t)
 	setCompiledV1()
 	setCompiledBuildLocalV2(t)
-	cfg, err := FromBuildOpts(map[string]string{"source": "example/frontend@" + testDigestA})
+	cfg, err := FromBuildOpts(compiledV2InvocationOpts())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +315,7 @@ func TestCompiledV2BindingsEnableAndLockCapability(t *testing.T) {
 	resetCompiledBindings(t)
 	setCompiledV1()
 	setCompiledV2(t)
-	cfg, err := FromBuildOpts(map[string]string{"source": "example/frontend@" + testDigestA})
+	cfg, err := FromBuildOpts(compiledV2InvocationOpts())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,11 +329,44 @@ func TestCompiledV2BindingsEnableAndLockCapability(t *testing.T) {
 	}
 
 	_, err = FromBuildOpts(map[string]string{
-		"source": "example/frontend@" + testDigestA,
+		"source":                                    "example/frontend@" + testDigestA,
+		"build-arg:" + FrontendIndexRefBuildArg:     "example/frontend@" + testDigestB,
 		"build-arg:" + CatalogServiceOriginBuildArg: "https://other.example.com",
 	})
 	if err == nil || !strings.Contains(err.Error(), CatalogServiceOriginBuildArg) {
 		t.Fatalf("override err=%v", err)
+	}
+}
+
+func TestCompiledV2RequiresFrontendIndexBinding(t *testing.T) {
+	resetCompiledBindings(t)
+	setCompiledV1()
+	setCompiledV2(t)
+
+	_, err := FromBuildOpts(map[string]string{"source": "example/frontend@" + testDigestA})
+	if err == nil || !strings.Contains(err.Error(), "frontend index") {
+		t.Fatalf("missing index err=%v", err)
+	}
+
+	opts := compiledV2InvocationOpts()
+	opts["build-arg:"+FrontendIndexRefBuildArg] = "other.example/frontend@" + testDigestB
+	_, err = FromBuildOpts(opts)
+	if err == nil || !strings.Contains(err.Error(), "must use the same repository") {
+		t.Fatalf("cross-repository index err=%v", err)
+	}
+
+	opts = compiledV2InvocationOpts()
+	opts["build-arg:"+FrontendIndexRefBuildArg] = "example/frontend:latest"
+	_, err = FromBuildOpts(opts)
+	if err == nil || !strings.Contains(err.Error(), "frontend index") {
+		t.Fatalf("mutable index err=%v", err)
+	}
+
+	opts = compiledV2InvocationOpts()
+	opts["source"] = "example/frontend:platform-child@" + testDigestA
+	cfg, err := FromBuildOpts(opts)
+	if err != nil || !cfg.SupportsNonCoreTaps() {
+		t.Fatalf("tagged child with normalized matching index repository was rejected: cfg=%+v err=%v", cfg, err)
 	}
 }
 

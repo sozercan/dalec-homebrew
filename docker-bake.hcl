@@ -5,6 +5,10 @@ variable "RUNTIME_BASE_AMD64" { default = "docker.io/library/ubuntu@sha256:52df9
 variable "RUNTIME_BASE_ARM64" { default = "docker.io/library/ubuntu@sha256:7f622ca8766bccb22f04242ecb6f19f770b2f08827dc4b8c707de5e78a6da7ab" }
 variable "RUNTIME_BASE_REF" { default = "" }
 variable "MATERIALIZER_REF" { default = "" }
+variable "RUNTIME_BASE_REF_AMD64" { default = "" }
+variable "RUNTIME_BASE_REF_ARM64" { default = "" }
+variable "MATERIALIZER_REF_AMD64" { default = "" }
+variable "MATERIALIZER_REF_ARM64" { default = "" }
 variable "FRONTEND_REF" { default = "" }
 variable "BOTTLE_FETCHER_REF" { default = "" }
 variable "CATALOG_EXTRACTOR_REF" { default = "" }
@@ -16,6 +20,7 @@ variable "SUPPORTED_PROVENANCE_POLICY_VERSIONS" { default = "" }
 
 group "default" { targets = ["frontend"] }
 group "release-children" { targets = ["runtime-base-amd64", "runtime-base-arm64", "bottle-fetcher-amd64", "bottle-fetcher-arm64", "catalog-extractor-amd64", "catalog-extractor-arm64", "materializer-amd64", "materializer-arm64"] }
+group "release-frontend" { targets = ["frontend-amd64", "frontend-arm64"] }
 
 target "runtime-base-amd64" {
   target = "runtime-base"
@@ -121,4 +126,42 @@ target "frontend" {
     SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH
   }
   tags = ["${REGISTRY}/dalec-homebrew:${VERSION}"]
+}
+
+target "frontend-amd64" {
+  target = "frontend"
+  platforms = ["linux/amd64"]
+  args = {
+    RUNTIME_BASE_REF = RUNTIME_BASE_REF_AMD64
+    MATERIALIZER_REF = MATERIALIZER_REF_AMD64
+    FRONTEND_REF = FRONTEND_REF
+    BOTTLE_FETCHER_REF = BOTTLE_FETCHER_REF
+    CATALOG_EXTRACTOR_REF = CATALOG_EXTRACTOR_REF
+    TAP_POLICY_DIGEST = TAP_POLICY_DIGEST
+    EXECUTABLE_RUNTIME_POLICY_DIGEST = EXECUTABLE_RUNTIME_POLICY_DIGEST
+    SUPPORTED_CATALOG_POLICY_VERSIONS = SUPPORTED_CATALOG_POLICY_VERSIONS
+    SUPPORTED_FETCH_POLICY_VERSIONS = SUPPORTED_FETCH_POLICY_VERSIONS
+    SUPPORTED_PROVENANCE_POLICY_VERSIONS = SUPPORTED_PROVENANCE_POLICY_VERSIONS
+    SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH
+  }
+  tags = ["${REGISTRY}/dalec-homebrew:${VERSION}-amd64"]
+}
+
+target "frontend-arm64" {
+  target = "frontend"
+  platforms = ["linux/arm64"]
+  args = {
+    RUNTIME_BASE_REF = RUNTIME_BASE_REF_ARM64
+    MATERIALIZER_REF = MATERIALIZER_REF_ARM64
+    FRONTEND_REF = FRONTEND_REF
+    BOTTLE_FETCHER_REF = BOTTLE_FETCHER_REF
+    CATALOG_EXTRACTOR_REF = CATALOG_EXTRACTOR_REF
+    TAP_POLICY_DIGEST = TAP_POLICY_DIGEST
+    EXECUTABLE_RUNTIME_POLICY_DIGEST = EXECUTABLE_RUNTIME_POLICY_DIGEST
+    SUPPORTED_CATALOG_POLICY_VERSIONS = SUPPORTED_CATALOG_POLICY_VERSIONS
+    SUPPORTED_FETCH_POLICY_VERSIONS = SUPPORTED_FETCH_POLICY_VERSIONS
+    SUPPORTED_PROVENANCE_POLICY_VERSIONS = SUPPORTED_PROVENANCE_POLICY_VERSIONS
+    SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH
+  }
+  tags = ["${REGISTRY}/dalec-homebrew:${VERSION}-arm64"]
 }

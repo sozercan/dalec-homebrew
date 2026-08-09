@@ -35,6 +35,7 @@ const (
 	IngestionJWSKeyPolicyDigestBuildArg       = "DALEC_HOMEBREW_INGESTION_JWS_KEY_POLICY_DIGEST"
 	TapPolicyDigestBuildArg                   = "DALEC_HOMEBREW_TAP_POLICY_DIGEST"
 	ExecutableRuntimePolicyDigestBuildArg     = "DALEC_HOMEBREW_EXECUTABLE_RUNTIME_POLICY_DIGEST"
+	FrontendIndexRefBuildArg                  = "DALEC_HOMEBREW_FRONTEND_INDEX_REF"
 	SupportedCatalogPolicyVersionsBuildArg    = "DALEC_HOMEBREW_SUPPORTED_CATALOG_POLICY_VERSIONS"
 	SupportedFetchPolicyVersionsBuildArg      = "DALEC_HOMEBREW_SUPPORTED_FETCH_POLICY_VERSIONS"
 	SupportedProvenancePolicyVersionsBuildArg = "DALEC_HOMEBREW_SUPPORTED_PROVENANCE_POLICY_VERSIONS"
@@ -54,6 +55,7 @@ var dalecBuildArgs = []string{
 	"DALEC_HOMEBREW_COMMIT",
 	ExecutableRuntimePolicyDigestBuildArg,
 	"DALEC_HOMEBREW_FRONTEND_REF",
+	FrontendIndexRefBuildArg,
 	IngestionJWSKeyPolicyDigestBuildArg,
 	"DALEC_HOMEBREW_KEYS_DIGEST",
 	"DALEC_HOMEBREW_MATERIALIZER",
@@ -114,6 +116,7 @@ type Config struct {
 	MetadataNotBefore      time.Time
 	RuntimeBaseRef         string
 	MaterializerRef        string
+	FrontendIndexRef       string
 	FrontendRef            string
 	HomebrewCommit         string
 	VerificationKeysDigest string
@@ -192,6 +195,7 @@ func FromBuildOpts(opts map[string]string) (Config, error) {
 		MetadataMaxAge:         7 * 24 * time.Hour,
 		RuntimeBaseRef:         bind("DALEC_HOMEBREW_RUNTIME_BASE", RuntimeBaseRef),
 		MaterializerRef:        bind("DALEC_HOMEBREW_MATERIALIZER", MaterializerRef),
+		FrontendIndexRef:       opts["build-arg:"+FrontendIndexRefBuildArg],
 		FrontendRef:            bind("DALEC_HOMEBREW_FRONTEND_REF", frontendBinding),
 		HomebrewCommit:         bind("DALEC_HOMEBREW_COMMIT", HomebrewCommit),
 		VerificationKeysDigest: bind("DALEC_HOMEBREW_KEYS_DIGEST", VerificationKeysDigest),
@@ -249,6 +253,14 @@ func FromBuildOpts(opts map[string]string) (Config, error) {
 			errs = append(errs, fmt.Errorf("frontend: %w", err))
 		}
 	}
+	if SupportsCompiledNonCoreTaps() {
+		if err := validatePinnedRef(cfg.FrontendIndexRef); err != nil {
+			errs = append(errs, fmt.Errorf("frontend index: %w", err))
+		}
+		if !sameReferenceRepository(cfg.FrontendRef, cfg.FrontendIndexRef) {
+			errs = append(errs, errors.New("frontend platform child and index must use the same repository"))
+		}
+	}
 	if cfg.PortableRubyVersion == "" {
 		errs = append(errs, errors.New("portable Ruby version is not bound into the component tuple"))
 	}
@@ -288,6 +300,8 @@ func (c Config) SupportsNonCoreTaps() bool {
 	return ok &&
 		c.RuntimeBaseRef == compiled.RuntimeBaseRef &&
 		c.MaterializerRef == compiled.MaterializerRef &&
+		c.FrontendIndexRef != "" &&
+		sameReferenceRepository(c.FrontendRef, c.FrontendIndexRef) &&
 		c.HomebrewCommit == compiled.HomebrewCommit &&
 		c.VerificationKeysDigest == compiled.VerificationKeysDigest &&
 		c.PortableRubyVersion == compiled.PortableRubyVersion &&
@@ -546,6 +560,10 @@ func parseBool(s string) bool {
 }
 
 func validatePinnedRef(ref string) error { return resolution.ValidatePinnedReference(ref) }
+
+func sameReferenceRepository(a, b string) bool {
+	return resolution.SameReferenceRepository(a, b)
+}
 
 func validateDigest(value string) error {
 	if value == "" {

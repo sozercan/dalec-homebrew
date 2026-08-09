@@ -531,31 +531,28 @@ jobs:
           [[ $(platform_digest "$materializer_repo@$materializer_index" linux/amd64) == "$materializer_amd64" ]]
           [[ $(platform_digest "$materializer_repo@$materializer_index" linux/arm64) == "$materializer_arm64" ]]
 
-          RUNTIME_BASE_REF="$runtime_base_repo@$runtime_base_index" \
-          MATERIALIZER_REF="$materializer_repo@$materializer_index" \
-          FRONTEND_REF='' \
-          REGISTRY="$REGISTRY" \
-          VERSION="$VERSION" \
-            docker buildx bake frontend \
-              --metadata-file "$RUNNER_TEMP/build-frontend.json" \
-              --push \
-              --provenance=false \
-              --sbom=false >&2
+          export RUNTIME_BASE_REF_AMD64="$runtime_base_repo@$runtime_base_amd64"
+          export RUNTIME_BASE_REF_ARM64="$runtime_base_repo@$runtime_base_arm64"
+          export MATERIALIZER_REF_AMD64="$materializer_repo@$materializer_amd64"
+          export MATERIALIZER_REF_ARM64="$materializer_repo@$materializer_arm64"
+          export FRONTEND_REF=''
+          for target in frontend-amd64 frontend-arm64; do
+            digest=$(build_target "$target")
+            tag=$(target_tag "$target")
+            published=$(inspect_digest "$tag")
+            [[ "$published" == "$digest" ]] || {
+              echo "$target tag $tag resolved to $published, not exporter digest $digest" >&2
+              exit 1
+            }
+            printf '%s=%s\n' "$target" "$digest"
+            printf -v "${target//-/_}" '%s' "$digest"
+          done
 
-          frontend_index=$(jq -er '
-            .frontend as $result
-            | $result["containerimage.digest"] as $digest
-            | select($digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
-            | select($result["containerimage.descriptor"].digest == $digest)
-            | $digest
-          ' "$RUNNER_TEMP/build-frontend.json")
-          published=$(inspect_digest "$frontend_repo:$VERSION")
-          [[ "$published" == "$frontend_index" ]] || {
-            echo "frontend tag $frontend_repo:$VERSION resolved to $published, not exporter digest $frontend_index" >&2
-            exit 1
-          }
-          frontend_amd64=$(platform_digest "$frontend_repo@$frontend_index" linux/amd64)
-          frontend_arm64=$(platform_digest "$frontend_repo@$frontend_index" linux/arm64)
+          frontend_index=$(create_index \
+            "$frontend_repo" "$VERSION" \
+            "$frontend_amd64" "$frontend_arm64")
+          [[ $(platform_digest "$frontend_repo@$frontend_index" linux/amd64) == "$frontend_amd64" ]]
+          [[ $(platform_digest "$frontend_repo@$frontend_index" linux/arm64) == "$frontend_arm64" ]]
 
           jq -n \
             --arg release_tag "$RELEASE_TAG" \
@@ -759,9 +756,10 @@ jobs:
             ' dist/release/digests.json
           }
 
-          runtime_base_ref=$(component_ref runtime-base)
-          materializer_ref=$(component_ref materializer)
-          frontend_ref=$(component_ref frontend)
+          runtime_base_ref=$(component_ref runtime-base "$PLATFORM")
+          materializer_ref=$(component_ref materializer "$PLATFORM")
+          frontend_index_ref=$(component_ref frontend)
+          frontend_ref=$(component_ref frontend "$PLATFORM")
           dalec_frontend_ref=$(jq -er --arg platform "$PLATFORM" '.dalec_frontend.platforms[$platform]' dist/release/inputs.json)
           dalec_frontend_route=$(jq -er .dalec_frontend.route dist/release/inputs.json)
           source_date_epoch=$(jq -er .source.source_date_epoch dist/release/digests.json)
@@ -781,6 +779,7 @@ jobs:
             DALEC_HOMEBREW_LIVE_SPEC="examples/${spec}.yaml" \
             DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF="$runtime_base_ref" \
             DALEC_HOMEBREW_LIVE_MATERIALIZER_REF="$materializer_ref" \
+            DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF="$frontend_index_ref" \
             DALEC_HOMEBREW_LIVE_FRONTEND_REF="$frontend_ref" \
             DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF="$dalec_frontend_ref" \
             DALEC_HOMEBREW_LIVE_TARGET="$dalec_frontend_route" \

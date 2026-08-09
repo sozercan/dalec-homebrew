@@ -1,4 +1,6 @@
 # syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
+# Also pass the matching parent index from trusted release evidence:
+# --build-arg DALEC_HOMEBREW_FRONTEND_INDEX_REF=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>
 name: homebrew-forwarded-hello
 version: 0.1.0
 revision: 1
@@ -17,4 +19,4 @@ image:
 targets:
   homebrew:
     frontend:
-      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-digest>
+      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>

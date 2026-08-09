@@ -16,6 +16,7 @@ METADATA_NOT_BEFORE=${DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE:-}
 BASE_REF=${DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF:-}
 MATERIALIZER_REF=${DALEC_HOMEBREW_LIVE_MATERIALIZER_REF:-}
 FRONTEND_REF=${DALEC_HOMEBREW_LIVE_FRONTEND_REF:-}
+FRONTEND_INDEX_REF=${DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF:-}
 DALEC_FRONTEND_PIN=${DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN:-release/dalec-frontend.json}
 DALEC_FRONTEND_OVERRIDE=${DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF:-}
 DALEC_TARGET_OVERRIDE=${DALEC_HOMEBREW_LIVE_TARGET:-}
@@ -26,23 +27,26 @@ fail_usage() {
 }
 
 USE_PUBLISHED_COMPONENTS=0
-if [[ -n "$BASE_REF" || -n "$MATERIALIZER_REF" || -n "$FRONTEND_REF" ]]; then
+if [[ -n "$BASE_REF" || -n "$MATERIALIZER_REF" || -n "$FRONTEND_INDEX_REF" || -n "$FRONTEND_REF" ]]; then
   USE_PUBLISHED_COMPONENTS=1
 fi
 for tool in go jq; do
   command -v "$tool" >/dev/null 2>&1 ||
     fail_usage "$tool is required to validate live-test inputs"
 done
-if ! DALEC_SELECTION=$(GOWORK=off GOFLAGS='' go run ./cmd/live-input-verify \
+VERIFY_ARGS=(
   --runtime-base-ref "$BASE_REF" \
   --materializer-ref "$MATERIALIZER_REF" \
+  --frontend-index-ref "$FRONTEND_INDEX_REF" \
   --frontend-ref "$FRONTEND_REF" \
   --metadata-not-before "$METADATA_NOT_BEFORE" \
   --dalec-frontend-file "$DALEC_FRONTEND_PIN" \
   --dalec-frontend-ref "$DALEC_FRONTEND_OVERRIDE" \
   --dalec-route "$DALEC_TARGET_OVERRIDE" \
   --platform "$PLATFORM" \
-  --base-spec-file "$SPEC"); then
+  --base-spec-file "$SPEC"
+)
+if ! DALEC_SELECTION=$(GOWORK=off GOFLAGS='' go run ./cmd/live-input-verify "${VERIFY_ARGS[@]}"); then
   exit 64
 fi
 DALEC_FRONTEND_REF=$(jq -er '.index | select(type == "string" and length > 0)' <<<"$DALEC_SELECTION") ||
@@ -62,6 +66,7 @@ usage: rebuild components:
          DALEC_HOMEBREW_LIVE_PLATFORM=linux/<amd64|arm64> \
          DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=<image@sha256:digest> \
          DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=<image@sha256:digest> \
+         DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF=<image@sha256:digest> \
          DALEC_HOMEBREW_LIVE_FRONTEND_REF=<image@sha256:digest> \
          ./scripts/live-test.sh
 
@@ -77,7 +82,9 @@ Optional settings for either mode:
 The registry must be reachable from the selected builder and configured as an
 insecure HTTP registry when appropriate when rebuilding components. Component
 and frontend references are always consumed by digest even though temporary
-tags are used for publication. The upstream Dalec index and the fixed
+tags are used for publication. Published tuples provide the parent frontend
+index separately from the exact platform child used to execute the gateway.
+The upstream Dalec index and the fixed
 homebrew/image route come from the validated external pin file. The optional
 upstream reference and target overrides must be supplied together and match
 that pin. The base fixture must define dependencies.runtime in map form and must
@@ -184,6 +191,9 @@ FINAL_BUILD_ARGS=(
   --build-arg "DALEC_HOMEBREW_MATERIALIZER=$MATERIALIZER_REF"
   --build-arg "DALEC_HOMEBREW_FRONTEND_REF=$FRONTEND_REF"
 )
+if [[ -n "$FRONTEND_INDEX_REF" ]]; then
+  FINAL_BUILD_ARGS+=(--build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$FRONTEND_INDEX_REF")
+fi
 if [[ -n "$METADATA_NOT_BEFORE" ]]; then
   FINAL_BUILD_ARGS+=(--build-arg "DALEC_HOMEBREW_METADATA_NOT_BEFORE=$METADATA_NOT_BEFORE")
 fi
@@ -204,6 +214,7 @@ FINAL_REF="$(repository_from_ref "$FINAL_IMAGE")@$FINAL_DIGEST"
 cat <<RESULT
 DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=$BASE_REF
 DALEC_HOMEBREW_LIVE_MATERIALIZER_REF=$MATERIALIZER_REF
+DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF=$FRONTEND_INDEX_REF
 DALEC_HOMEBREW_LIVE_FRONTEND_REF=$FRONTEND_REF
 DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF=$DALEC_FRONTEND_REF
 DALEC_HOMEBREW_LIVE_TARGET=$DALEC_ROUTE

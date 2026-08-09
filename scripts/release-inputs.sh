@@ -84,6 +84,8 @@ targets=(
   materializer-amd64
   materializer-arm64
   frontend
+  frontend-amd64
+  frontend-arm64
 )
 targets_json=$(printf '%s\n' "${targets[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
 unset BUILDX_BAKE_FILE BUILDX_BAKE_PATH_SEPARATOR
@@ -145,11 +147,13 @@ if jq -e --argjson targets "$targets_json" '
   fail "release bake targets must not set DALEC_SKIP_TESTS"
 fi
 
-for name in FRONTEND_REF RUNTIME_BASE_REF MATERIALIZER_REF BOTTLE_FETCHER_REF CATALOG_EXTRACTOR_REF; do
-  value=$(jq -r --arg name "$name" '.target.frontend.args[$name] // ""' <<<"$bake")
-  [[ -z "$value" ]] || fail "default frontend $name must be empty; release CI supplies or derives the immutable reference"
+for target in frontend frontend-amd64 frontend-arm64; do
+  for name in FRONTEND_REF RUNTIME_BASE_REF MATERIALIZER_REF BOTTLE_FETCHER_REF CATALOG_EXTRACTOR_REF; do
+    value=$(jq -r --arg target "$target" --arg name "$name" '.target[$target].args[$name] // ""' <<<"$bake")
+    [[ -z "$value" ]] || fail "default $target $name must be empty; release CI supplies or derives the immutable reference"
+  done
 done
-for target in frontend materializer-amd64 materializer-arm64; do
+for target in frontend frontend-amd64 frontend-arm64 materializer-amd64 materializer-arm64; do
   for name in BOTTLE_FETCHER_REF CATALOG_EXTRACTOR_REF TAP_POLICY_DIGEST EXECUTABLE_RUNTIME_POLICY_DIGEST SUPPORTED_CATALOG_POLICY_VERSIONS SUPPORTED_FETCH_POLICY_VERSIONS SUPPORTED_PROVENANCE_POLICY_VERSIONS; do
     value=$(jq -r --arg target "$target" --arg name "$name" '.target[$target].args[$name] // ""' <<<"$bake")
     [[ -z "$value" ]] || fail "default $target $name must be empty; release CI supplies the immutable V2 binding"
@@ -197,6 +201,10 @@ validate_bake_target materializer-arm64 materializer '["linux/arm64"]' \
   "$release_registry/dalec-homebrew-materializer:${release_version}-arm64"
 validate_bake_target frontend frontend '["linux/amd64","linux/arm64"]' \
   "$release_registry/dalec-homebrew:$release_version"
+validate_bake_target frontend-amd64 frontend '["linux/amd64"]' \
+  "$release_registry/dalec-homebrew:${release_version}-amd64"
+validate_bake_target frontend-arm64 frontend '["linux/arm64"]' \
+  "$release_registry/dalec-homebrew:${release_version}-arm64"
 
 runtime_base_amd64=$(jq -er '.target["runtime-base-amd64"].args.RUNTIME_BASE' <<<"$bake")
 runtime_base_arm64=$(jq -er '.target["runtime-base-arm64"].args.RUNTIME_BASE' <<<"$bake")

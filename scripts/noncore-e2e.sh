@@ -104,6 +104,9 @@ cat > "$WORK/buildkitd.toml" <<EOF_CONFIG
 [registry."$REGISTRY"]
   http = true
   insecure = true
+[registry."$HOST_REGISTRY"]
+  http = true
+  insecure = true
 EOF_CONFIG
 
 docker network create "$NETWORK" >/dev/null
@@ -161,6 +164,25 @@ FRONTEND_REF=$(build_component "V2 frontend" frontend dalec-homebrew \
   --build-arg "RUNTIME_BASE_REF=$RUNTIME_BASE_REF" \
   --build-arg "MATERIALIZER_REF=$MATERIALIZER_REF" \
   "${V2_BUILD_ARGS[@]}")
+FRONTEND_CHILD_DIGEST=${FRONTEND_REF##*@}
+docker buildx imagetools create \
+  --tag "$HOST_REGISTRY/dalec-homebrew:$RUN_ID-index" \
+  --metadata-file "$WORK/frontend-index.metadata.json" \
+  "$HOST_REGISTRY/dalec-homebrew@$FRONTEND_CHILD_DIGEST" >&2
+FRONTEND_INDEX_DIGEST=$(jq -er '
+  .["containerimage.descriptor"].digest
+  | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))
+' "$WORK/frontend-index.metadata.json")
+docker buildx imagetools inspect --raw "$HOST_REGISTRY/dalec-homebrew@$FRONTEND_INDEX_DIGEST" \
+  | jq -e --arg platform "$PLATFORM" --arg digest "$FRONTEND_CHILD_DIGEST" '
+      .mediaType == "application/vnd.oci.image.index.v1+json" and
+      ([.manifests[] | select(
+        ((.platform.os // "") + "/" + (.platform.architecture // "")) == $platform and
+        .digest == $digest
+      )] | length) == 1 and
+      ([.manifests[] | select((.platform.os // "") != "unknown")] | length) == 1
+    ' >/dev/null
+FRONTEND_INDEX_REF="$REGISTRY/dalec-homebrew@$FRONTEND_INDEX_DIGEST"
 
 expect_forwarding_rejection() {
   local name=$1
@@ -170,6 +192,7 @@ expect_forwarding_rejection() {
     --platform "$PLATFORM" \
     --progress="$PROGRESS" \
     --target "$DALEC_ROUTE" \
+    --build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$FRONTEND_INDEX_REF" \
     --file "$WORK/$name.yaml" \
     . >"$WORK/$name.log" 2>&1; then
     echo "upstream Dalec accepted unsupported dependency shape $name" >&2
@@ -230,6 +253,7 @@ DALEC_HOMEBREW_LIVE_PLATFORM="$PLATFORM" \
 DALEC_HOMEBREW_LIVE_SPEC="$SPEC" \
 DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF="$RUNTIME_BASE_REF" \
 DALEC_HOMEBREW_LIVE_MATERIALIZER_REF="$MATERIALIZER_REF" \
+DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF="$FRONTEND_INDEX_REF" \
 DALEC_HOMEBREW_LIVE_FRONTEND_REF="$FRONTEND_REF" \
 DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN="$DALEC_FRONTEND_PIN" \
 DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
@@ -256,6 +280,11 @@ jq -e '
     "sozercan/repo/a365",
     "svt/avtools/libdf"
   ]
+' "$WORK/resolution.json" >/dev/null
+
+jq -e --arg frontend_index "$FRONTEND_INDEX_REF" --arg frontend "$FRONTEND_REF" '
+  .components.frontend_index_ref == $frontend_index and
+  .components.frontend_ref == $frontend
 ' "$WORK/resolution.json" >/dev/null
 
 LIBDF_ID=svt/avtools/libdf
@@ -368,6 +397,7 @@ DALEC_HOMEBREW_E2E_RUNTIME_BASE_REF=$RUNTIME_BASE_REF
 DALEC_HOMEBREW_E2E_BOTTLE_FETCHER_REF=$BOTTLE_FETCHER_REF
 DALEC_HOMEBREW_E2E_CATALOG_EXTRACTOR_REF=$EXTRACTOR_REF
 DALEC_HOMEBREW_E2E_MATERIALIZER_REF=$MATERIALIZER_REF
+DALEC_HOMEBREW_E2E_FRONTEND_INDEX_REF=$FRONTEND_INDEX_REF
 DALEC_HOMEBREW_E2E_FRONTEND_REF=$FRONTEND_REF
 DALEC_HOMEBREW_E2E_DALEC_FRONTEND_REF=$DALEC_FRONTEND_REF
 DALEC_HOMEBREW_E2E_DALEC_ROUTE=$DALEC_ROUTE

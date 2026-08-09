@@ -76,6 +76,29 @@ func TestValidatePinnedReferenceParsesWholeReference(t *testing.T) {
 	}
 }
 
+func TestSameReferenceRepository(t *testing.T) {
+	d := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	tests := []struct {
+		name string
+		a    string
+		b    string
+		want bool
+	}{
+		{name: "registry host case", a: "GHCR.IO/example/frontend@" + d, b: "ghcr.io/example/frontend:child@" + d, want: true},
+		{name: "normalized Docker Hub", a: "example/frontend@" + d, b: "docker.io/example/frontend:child@" + d, want: true},
+		{name: "different path", a: "ghcr.io/example/frontend@" + d, b: "ghcr.io/other/frontend@" + d},
+		{name: "different port", a: "registry.example:5000/example/frontend@" + d, b: "registry.example:5001/example/frontend@" + d},
+		{name: "invalid", a: "not a reference", b: "ghcr.io/example/frontend@" + d},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SameReferenceRepository(tt.a, tt.b); got != tt.want {
+				t.Fatalf("SameReferenceRepository(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCanonicalSortsWritablePathSet(t *testing.T) {
 	r := validRecord()
 	r.Runtime.WritablePaths = []string{"/b", "/a"}

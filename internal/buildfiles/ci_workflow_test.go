@@ -23,6 +23,7 @@ func TestCIExercisesProductionPathNonCoreV2(t *testing.T) {
 		"Build and test upstream-forwarded build-local non-core V2",
 		"DALEC_HOMEBREW_E2E_DALEC_FRONTEND_PIN: release/dalec-frontend.json",
 		"DALEC_HOMEBREW_E2E_SPEC: examples/ci-noncore-multi-package.yaml",
+		"docker buildx bake --print release-children release-frontend frontend",
 		"run: ./scripts/noncore-e2e.sh",
 	} {
 		if !strings.Contains(text, want) {
@@ -63,6 +64,10 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 		"target homebrew dependencies.runtime must use map form and contain at least one entry",
 		`--catalog-extractor-ref "$EXTRACTOR_REF"`,
 		`--build-arg "CATALOG_EXTRACTOR_REF=$EXTRACTOR_REF"`,
+		`--build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$FRONTEND_INDEX_REF"`,
+		`DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF="$FRONTEND_INDEX_REF"`,
+		`.components.frontend_index_ref == $frontend_index`,
+		`.components.frontend_ref == $frontend`,
 		"docker run --rm --network none",
 		".components.catalog_extractor_ref as $extractor",
 		".extraction.policy_version == \"build-local-tap-extraction-v1\"",
@@ -148,5 +153,51 @@ func TestNonCoreE2ESpecContainsQualifiedAndCoreRoots(t *testing.T) {
 	versionCheck := decoded.Tests[0].Steps[2]
 	if versionCheck.Command != "a365 --version" || len(versionCheck.Stdout.Matches) != 1 || versionCheck.Stdout.Matches[0] != `[0-9]+\.[0-9]+\.[0-9]+` {
 		t.Fatalf("a365 version smoke test must use a version-shape regex: %+v", versionCheck)
+	}
+}
+
+func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
+	root := repositoryRoot(t)
+	const (
+		indexAssignment = "DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>"
+		indexBuildArg   = `--build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX"`
+		indexReference  = "DALEC_HOMEBREW_FRONTEND_INDEX_REF=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>"
+		childReference  = "ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>"
+	)
+
+	for _, relative := range []string{"README.md", filepath.Join("docs", "usage.md")} {
+		data, err := os.ReadFile(filepath.Join(root, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := 0
+		for _, tail := range strings.Split(string(data), "```console")[1:] {
+			block, _, ok := strings.Cut(tail, "```")
+			if !ok || !strings.Contains(block, "docker buildx build") {
+				continue
+			}
+			found++
+			for _, want := range []string{"--target homebrew/image", indexAssignment, indexBuildArg} {
+				if !strings.Contains(block, want) {
+					t.Errorf("%s production command is missing %q:\n%s", relative, want, block)
+				}
+			}
+		}
+		if found != 2 {
+			t.Errorf("%s has %d docker buildx build commands, want 2", relative, found)
+		}
+	}
+
+	for _, relative := range []string{filepath.Join("examples", "forwarded-hello.yaml"), filepath.Join("examples", "hello.yaml")} {
+		data, err := os.ReadFile(filepath.Join(root, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		for _, want := range []string{indexReference, childReference} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s is missing %q", relative, want)
+			}
+		}
 	}
 }

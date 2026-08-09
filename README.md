@@ -22,6 +22,12 @@ The only supported production path uses two immutable gateway images:
 2. the digest-pinned `dalec-homebrew` child frontend, selected through
    `targets.homebrew.frontend.image` and invoked at child route `image`.
 
+Release-bound child frontends also require the matching digest-pinned
+`dalec-homebrew` parent index through the
+`DALEC_HOMEBREW_FRONTEND_INDEX_REF` build argument. Upstream Dalec forwards
+that argument to the child; the child keeps the executing platform child and
+its separately trusted parent index as distinct identities.
+
 The child advertises `image` only so upstream Dalec can discover and forward to
 that route. Direct use of `dalec-homebrew` as the syntax frontend is unsupported:
 an `image` solve without the forwarded `homebrew` target context is rejected.
@@ -36,7 +42,8 @@ Build from stdin through upstream Dalec with `jq`:
 
 ```console
 DALEC_FRONTEND=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
-DALEC_HOMEBREW_CHILD=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-digest>
+DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>
+DALEC_HOMEBREW_CHILD=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>
 
 jq -nc --arg child_frontend "$DALEC_HOMEBREW_CHILD" '{
   dependencies: {runtime: {hello: {}}},
@@ -45,6 +52,7 @@ jq -nc --arg child_frontend "$DALEC_HOMEBREW_CHILD" '{
 }' |
   docker buildx build \
     --build-arg "BUILDKIT_SYNTAX=$DALEC_FRONTEND" \
+    --build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX" \
     --target homebrew/image \
     --platform linux/amd64 \
     --tag hello-runtime:inline \
@@ -56,7 +64,8 @@ docker run --rm hello-runtime:inline
 
 ### Build from YAML
 
-Save this as `hello.yaml`, replacing both placeholders with immutable digests:
+Save this as `hello.yaml`, replacing the syntax and child placeholders with
+immutable digests:
 
 ```yaml
 # syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
@@ -71,13 +80,16 @@ image:
 targets:
   homebrew:
     frontend:
-      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-digest>
+      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>
 ```
 
 Build and run it:
 
 ```console
+DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>
+
 docker buildx build \
+  --build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX" \
   --target homebrew/image \
   --platform linux/amd64 \
   --file hello.yaml \

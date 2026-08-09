@@ -851,7 +851,7 @@ func validateComponentsV2(components ComponentsV2) error {
 			errs = append(errs, fmt.Errorf("V2 %s component: %w", field.name, err))
 		}
 	}
-	if strings.Split(components.FrontendIndexRef, "@")[0] != strings.Split(components.FrontendRef, "@")[0] {
+	if !SameReferenceRepository(components.FrontendIndexRef, components.FrontendRef) {
 		errs = append(errs, errors.New("V2 frontend index and child use different repositories"))
 	}
 	localMode := components.CatalogExtractorRef != ""

@@ -694,7 +694,8 @@ func TestReleaseWorkflowV2ComponentContract(t *testing.T) {
 		"go run ./cmd/v2-bindings",
 		"for target in materializer-amd64 materializer-arm64; do",
 		"materializer_index=$(create_index",
-		"docker buildx bake frontend",
+		"for target in frontend-amd64 frontend-arm64; do",
+		"frontend_index=$(create_index",
 	}
 	previous := -1
 	for _, token := range orderedBuildTokens {
@@ -703,6 +704,32 @@ func TestReleaseWorkflowV2ComponentContract(t *testing.T) {
 			t.Fatalf("V2 release build token %q is missing or out of order", token)
 		}
 		previous = index
+	}
+	for _, binding := range []string{
+		`export RUNTIME_BASE_REF_AMD64="$runtime_base_repo@$runtime_base_amd64"`,
+		`export RUNTIME_BASE_REF_ARM64="$runtime_base_repo@$runtime_base_arm64"`,
+		`export MATERIALIZER_REF_AMD64="$materializer_repo@$materializer_amd64"`,
+		`export MATERIALIZER_REF_ARM64="$materializer_repo@$materializer_arm64"`,
+		`[[ $(platform_digest "$frontend_repo@$frontend_index" linux/amd64) == "$frontend_amd64" ]]`,
+		`[[ $(platform_digest "$frontend_repo@$frontend_index" linux/arm64) == "$frontend_arm64" ]]`,
+	} {
+		if !strings.Contains(buildScript, binding) {
+			t.Fatalf("V2 release build does not bind frontend children with %q", binding)
+		}
+	}
+
+	integrationScript := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "integration", "Build and test a runtime from the released tuple"), "run"))
+	for _, binding := range []string{
+		`runtime_base_ref=$(component_ref runtime-base "$PLATFORM")`,
+		`materializer_ref=$(component_ref materializer "$PLATFORM")`,
+		`frontend_index_ref=$(component_ref frontend)`,
+		`frontend_ref=$(component_ref frontend "$PLATFORM")`,
+		`DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF="$frontend_index_ref"`,
+		`DALEC_HOMEBREW_LIVE_FRONTEND_REF="$frontend_ref"`,
+	} {
+		if !strings.Contains(integrationScript, binding) {
+			t.Fatalf("V2 release integration does not bind platform tuple with %q", binding)
+		}
 	}
 
 	jobs := yamlMappingValue(t, workflow, "jobs")
