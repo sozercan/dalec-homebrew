@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 
+	"github.com/moby/buildkit/client/llb"
 	gwclient "github.com/moby/buildkit/frontend/gateway/client"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/sozercan/dalec-homebrew/internal/config"
@@ -12,6 +15,12 @@ import (
 )
 
 const metadataBundleInputName = "dalec-homebrew-metadata"
+
+const (
+	metadataBundleContextOption = "context:" + metadataBundleInputName
+	metadataBundleLocalSource   = "local:" + metadataBundleInputName
+	metadataBundleSessionOption = "local-sessionid:" + metadataBundleInputName
+)
 
 type metadataBundleData struct {
 	manifest   []byte
@@ -26,6 +35,9 @@ type metadataBundleFile struct {
 
 func loadMetadataSnapshot(ctx context.Context, client gwclient.Client, cfg config.Config) (*metadata.Snapshot, error) {
 	if cfg.MetadataBundleDigest == "" {
+		if err := validateMetadataBundleContext(client.BuildOpts(), false); err != nil {
+			return nil, fmt.Errorf("validate Homebrew metadata bundle input: %w", err)
+		}
 		baseURL, err := metadataBaseURL(cfg.FormulaURL, cfg.MigrationsURL)
 		if err != nil {
 			return nil, err
@@ -58,14 +70,29 @@ func loadMetadataSnapshot(ctx context.Context, client gwclient.Client, cfg confi
 }
 
 func readMetadataBundleInput(ctx context.Context, client gwclient.Client) (metadataBundleData, error) {
-	inputs, err := client.Inputs(ctx)
-	if err != nil {
-		return metadataBundleData{}, fmt.Errorf("list frontend inputs: %w", err)
+	buildOpts := client.BuildOpts()
+	if err := validateMetadataBundleContext(buildOpts, true); err != nil {
+		return metadataBundleData{}, err
 	}
-	state, ok := inputs[metadataBundleInputName]
-	if !ok {
-		return metadataBundleData{}, fmt.Errorf("required named input %q is missing", metadataBundleInputName)
+	files := []string{
+		metadata.BundleManifestFilename,
+		metadata.BundleFormulaFilename,
+		metadata.BundleMigrationsFilename,
 	}
+	descendants := make([]string, len(files))
+	for i, file := range files {
+		descendants[i] = file + "/**"
+	}
+	// dockerui.NamedContext probes .dockerignore even when ignore processing is
+	// disabled. Build the reserved local state directly so the caller can transfer
+	// only the three authenticated bundle members and no directory descendants.
+	state := llb.Local(metadataBundleInputName,
+		llb.SessionID(buildOpts.SessionID),
+		llb.SharedKeyHint("context:"+metadataBundleInputName+"-"+buildOpts.Opts["sharedkey:localdir:"+metadataBundleInputName]),
+		llb.IncludePatterns(files),
+		llb.ExcludePatterns(descendants),
+		llb.WithCustomName("[context "+metadataBundleInputName+"] load authenticated metadata bundle"),
+	)
 	definition, err := state.Marshal(ctx)
 	if err != nil {
 		return metadataBundleData{}, fmt.Errorf("marshal named input %q: %w", metadataBundleInputName, err)
@@ -82,6 +109,49 @@ func readMetadataBundleInput(ctx context.Context, client gwclient.Client) (metad
 		return metadataBundleData{}, fmt.Errorf("named input %q produced no reference", metadataBundleInputName)
 	}
 	return readMetadataBundleReference(ctx, ref)
+}
+
+func validateMetadataBundleContext(buildOpts gwclient.BuildOpts, required bool) error {
+	contextSource, ok := buildOpts.Opts[metadataBundleContextOption]
+	if !required {
+		var contexts []string
+		for key := range buildOpts.Opts {
+			if strings.HasPrefix(key, "context:") {
+				contexts = append(contexts, strings.TrimPrefix(key, "context:"))
+			}
+		}
+		if len(contexts) != 0 {
+			slices.Sort(contexts)
+			return fmt.Errorf("named contexts require a release-bound metadata bundle: %s", strings.Join(contexts, ", "))
+		}
+		if _, ok := buildOpts.Opts[metadataBundleSessionOption]; ok {
+			return fmt.Errorf("named context session override %q requires a release-bound metadata bundle", metadataBundleInputName)
+		}
+		return nil
+	}
+	if !ok {
+		return fmt.Errorf("required named context %q is missing", metadataBundleInputName)
+	}
+	if contextSource != metadataBundleLocalSource {
+		return fmt.Errorf("named context %q must use local source %q, got %q", metadataBundleInputName, metadataBundleLocalSource, contextSource)
+	}
+	var unsupportedContexts []string
+	for key := range buildOpts.Opts {
+		if strings.HasPrefix(key, "context:") && key != metadataBundleContextOption {
+			unsupportedContexts = append(unsupportedContexts, strings.TrimPrefix(key, "context:"))
+		}
+	}
+	if len(unsupportedContexts) != 0 {
+		slices.Sort(unsupportedContexts)
+		return fmt.Errorf("unsupported named contexts: %s", strings.Join(unsupportedContexts, ", "))
+	}
+	if buildOpts.SessionID == "" {
+		return fmt.Errorf("named context %q has no BuildKit session", metadataBundleInputName)
+	}
+	if override, ok := buildOpts.Opts[metadataBundleSessionOption]; ok && override != buildOpts.SessionID {
+		return fmt.Errorf("named context %q session override does not match the active BuildKit session", metadataBundleInputName)
+	}
+	return nil
 }
 
 func readMetadataBundleReference(ctx context.Context, ref gwclient.Reference) (metadataBundleData, error) {

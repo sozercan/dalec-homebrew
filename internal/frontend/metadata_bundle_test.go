@@ -2,6 +2,7 @@ package frontend
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/moby/buildkit/client/llb"
 	gwclient "github.com/moby/buildkit/frontend/gateway/client"
+	"github.com/moby/buildkit/solver/pb"
 	"github.com/sozercan/dalec-homebrew/internal/config"
 	"github.com/sozercan/dalec-homebrew/internal/homebrew/metadata"
 	fstypes "github.com/tonistiigi/fsutil/types"
@@ -83,27 +85,66 @@ func (r *metadataBundleTestRef) ReadFile(_ context.Context, req gwclient.ReadReq
 
 type metadataBundleTestClient struct {
 	gwclient.Client
-	inputs      map[string]llb.State
-	inputsErr   error
-	ref         gwclient.Reference
-	solveErr    error
-	inputsCalls int
-	solveCalls  int
+	buildOpts    gwclient.BuildOpts
+	inputs       map[string]llb.State
+	inputsErr    error
+	ref          gwclient.Reference
+	solveErr     error
+	inputsCalls  int
+	solveCalls   int
+	solveRequest []gwclient.SolveRequest
 }
+
+func (c *metadataBundleTestClient) BuildOpts() gwclient.BuildOpts { return c.buildOpts }
 
 func (c *metadataBundleTestClient) Inputs(context.Context) (map[string]llb.State, error) {
 	c.inputsCalls++
 	return c.inputs, c.inputsErr
 }
 
-func (c *metadataBundleTestClient) Solve(context.Context, gwclient.SolveRequest) (*gwclient.Result, error) {
+func (c *metadataBundleTestClient) Solve(_ context.Context, req gwclient.SolveRequest) (*gwclient.Result, error) {
 	c.solveCalls++
+	c.solveRequest = append(c.solveRequest, req)
 	if c.solveErr != nil {
 		return nil, c.solveErr
 	}
 	result := gwclient.NewResult()
 	result.SetRef(c.ref)
 	return result, nil
+}
+
+func metadataBundleTransferredAttrs(t *testing.T, requests []gwclient.SolveRequest) map[string]string {
+	t.Helper()
+	for _, request := range requests {
+		if request.Definition == nil {
+			continue
+		}
+		for _, raw := range request.Definition.Def {
+			var op pb.Op
+			if err := op.Unmarshal(raw); err != nil {
+				t.Fatal(err)
+			}
+			source := op.GetSource()
+			if source == nil || source.Attrs[pb.AttrIncludePatterns] == "" {
+				continue
+			}
+			return source.Attrs
+		}
+	}
+	return nil
+}
+
+func metadataBundleTransferredPatterns(t *testing.T, attrs map[string]string, attr string) []string {
+	t.Helper()
+	rawPatterns := attrs[attr]
+	if rawPatterns == "" {
+		return nil
+	}
+	var patterns []string
+	if err := json.Unmarshal([]byte(rawPatterns), &patterns); err != nil {
+		t.Fatalf("decode patterns %q: %v", rawPatterns, err)
+	}
+	return patterns
 }
 
 func TestReadMetadataBundleReference(t *testing.T) {
@@ -240,36 +281,115 @@ func TestReadMetadataBundleReferenceRejectsUnsafeOrUnboundedFiles(t *testing.T) 
 	}
 }
 
-func TestReadMetadataBundleInputRequiresReservedNamedInput(t *testing.T) {
-	client := &metadataBundleTestClient{inputs: map[string]llb.State{"other": llb.Scratch()}}
-	_, err := readMetadataBundleInput(t.Context(), client)
-	if err == nil || !strings.Contains(err.Error(), metadataBundleInputName) {
-		t.Fatalf("error=%v", err)
+func TestReadMetadataBundleInputRequiresReservedLocalContext(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{name: "missing", want: "is missing"},
+		{name: "frontend input", source: "input:" + metadataBundleInputName, want: "must use local source"},
+		{name: "image", source: "docker-image://example.com/metadata@sha256:" + strings.Repeat("a", 64), want: "must use local source"},
+		{name: "other local", source: "local:other", want: "must use local source"},
 	}
-	if client.solveCalls != 0 {
-		t.Fatalf("solve calls=%d, want 0", client.solveCalls)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &metadataBundleTestClient{buildOpts: gwclient.BuildOpts{Opts: map[string]string{}}}
+			if tt.source != "" {
+				client.buildOpts.Opts[metadataBundleContextOption] = tt.source
+			}
+			_, err := readMetadataBundleInput(t.Context(), client)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error=%v, want containing %q", err, tt.want)
+			}
+			if client.inputsCalls != 0 || client.solveCalls != 0 {
+				t.Fatalf("rejected context accessed BuildKit: inputs=%d solves=%d", client.inputsCalls, client.solveCalls)
+			}
+		})
 	}
+	t.Run("additional context", func(t *testing.T) {
+		client := &metadataBundleTestClient{buildOpts: gwclient.BuildOpts{
+			SessionID: "active-session",
+			Opts: map[string]string{
+				metadataBundleContextOption: metadataBundleLocalSource,
+				"context:other":             "local:other",
+			},
+		}}
+		_, err := readMetadataBundleInput(t.Context(), client)
+		if err == nil || !strings.Contains(err.Error(), "unsupported named contexts: other") {
+			t.Fatalf("error=%v", err)
+		}
+		if client.inputsCalls != 0 || client.solveCalls != 0 {
+			t.Fatalf("rejected context accessed BuildKit: inputs=%d solves=%d", client.inputsCalls, client.solveCalls)
+		}
+	})
+	t.Run("cross-session override", func(t *testing.T) {
+		client := &metadataBundleTestClient{buildOpts: gwclient.BuildOpts{
+			SessionID: "active-session",
+			Opts: map[string]string{
+				metadataBundleContextOption: metadataBundleLocalSource,
+				metadataBundleSessionOption: "other-session",
+			},
+		}}
+		_, err := readMetadataBundleInput(t.Context(), client)
+		if err == nil || !strings.Contains(err.Error(), "does not match the active BuildKit session") {
+			t.Fatalf("error=%v", err)
+		}
+		if client.inputsCalls != 0 || client.solveCalls != 0 {
+			t.Fatalf("rejected context accessed BuildKit: inputs=%d solves=%d", client.inputsCalls, client.solveCalls)
+		}
+	})
 }
 
-func TestReadMetadataBundleInputSolvesReservedInput(t *testing.T) {
+func TestReadMetadataBundleInputLoadsBoundedReservedLocalContext(t *testing.T) {
 	ref := newMetadataBundleTestRef()
 	client := &metadataBundleTestClient{
-		inputs: map[string]llb.State{metadataBundleInputName: llb.Scratch()},
-		ref:    ref,
+		buildOpts: gwclient.BuildOpts{
+			SessionID: "forwarded-session",
+			Opts: map[string]string{
+				metadataBundleContextOption:                     metadataBundleLocalSource,
+				"sharedkey:localdir:" + metadataBundleInputName: "shared",
+			},
+		},
+		ref: ref,
 	}
 	if _, err := readMetadataBundleInput(t.Context(), client); err != nil {
 		t.Fatal(err)
 	}
-	if client.inputsCalls != 1 || client.solveCalls != 1 {
-		t.Fatalf("input calls=%d solve calls=%d, want 1 each", client.inputsCalls, client.solveCalls)
+	if client.inputsCalls != 0 || client.solveCalls != 1 {
+		t.Fatalf("input calls=%d solve calls=%d, want 0 and 1", client.inputsCalls, client.solveCalls)
+	}
+	wantPatterns := []string{
+		metadata.BundleManifestFilename,
+		metadata.BundleFormulaFilename,
+		metadata.BundleMigrationsFilename,
+	}
+	attrs := metadataBundleTransferredAttrs(t, client.solveRequest)
+	if got := metadataBundleTransferredPatterns(t, attrs, pb.AttrIncludePatterns); !slices.Equal(got, wantPatterns) {
+		t.Fatalf("transferred patterns=%v, want %v", got, wantPatterns)
+	}
+	wantExcludes := make([]string, len(wantPatterns))
+	for i, pattern := range wantPatterns {
+		wantExcludes[i] = pattern + "/**"
+	}
+	if got := metadataBundleTransferredPatterns(t, attrs, pb.AttrExcludePatterns); !slices.Equal(got, wantExcludes) {
+		t.Fatalf("excluded patterns=%v, want %v", got, wantExcludes)
+	}
+	if got := attrs[pb.AttrLocalSessionID]; got != "forwarded-session" {
+		t.Fatalf("local session=%q, want forwarded-session", got)
 	}
 }
 
 func TestBundledMetadataDigestMismatchFailsClosed(t *testing.T) {
 	ref := newMetadataBundleTestRef()
 	client := &metadataBundleTestClient{
-		inputs: map[string]llb.State{metadataBundleInputName: llb.Scratch()},
-		ref:    ref,
+		buildOpts: gwclient.BuildOpts{
+			SessionID: "test-session",
+			Opts: map[string]string{
+				metadataBundleContextOption: metadataBundleLocalSource,
+			},
+		},
+		ref: ref,
 	}
 	_, err := loadMetadataSnapshot(t.Context(), client, config.Config{
 		MetadataBundleDigest: "sha256:" + strings.Repeat("f", 64),
@@ -295,5 +415,28 @@ func TestMetadataWithoutBundleDigestUsesLiveFetch(t *testing.T) {
 	}
 	if client.inputsCalls != 0 || client.solveCalls != 0 {
 		t.Fatalf("ordinary metadata fetch inspected named inputs: inputs=%d solve=%d", client.inputsCalls, client.solveCalls)
+	}
+}
+
+func TestMetadataWithoutBundleDigestRejectsNamedContextBeforeFetch(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client := &metadataBundleTestClient{buildOpts: gwclient.BuildOpts{Opts: map[string]string{
+		metadataBundleContextOption: metadataBundleLocalSource,
+	}}}
+	_, err := loadMetadataSnapshot(t.Context(), client, config.Config{
+		FormulaURL:    server.URL + "/" + metadata.FormulaEndpoint,
+		MigrationsURL: server.URL + "/" + metadata.MigrationsEndpoint,
+	})
+	if err == nil || !strings.Contains(err.Error(), "named contexts require a release-bound metadata bundle") {
+		t.Fatalf("error=%v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("metadata requests=%d, want 0", requests)
 	}
 }
