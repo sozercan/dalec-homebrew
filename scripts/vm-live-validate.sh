@@ -219,13 +219,17 @@ if grep -Fq '"schema_version":"dalec-homebrew-runtime-manifest/v1"' "$EVIDENCE_D
   && grep -Fq '"schema_version":"dalec-homebrew-runtime-inventory/v1"' "$EVIDENCE_DIR/runtime-inventory.json" \
   && grep -Fq '"schema_version":"dalec-homebrew-prune-manifest/v2"' "$EVIDENCE_DIR/prune-manifest.json"; then
   materialization_path=$EVIDENCE_DIR/materialization.json
-  [ ! -e "$EVIDENCE_DIR/materialization-v2.json" ] || fail "V1 runtime contains V2 materialization evidence"
+  [ ! -e "$EVIDENCE_DIR/materialization-v2.json" ] \
+    && [ ! -L "$EVIDENCE_DIR/materialization-v2.json" ] \
+    || fail "V1 runtime contains V2 materialization evidence"
 elif grep -Fq '"schema_version":"dalec-homebrew-runtime-manifest/v2"' "$EVIDENCE_DIR/manifest.json" \
   && grep -Fq '"schema_version":"dalec-homebrew-resolution/v2"' "$EVIDENCE_DIR/resolution.json" \
   && grep -Fq '"schema_version":"dalec-homebrew-runtime-inventory/v2"' "$EVIDENCE_DIR/runtime-inventory.json" \
   && grep -Fq '"schema_version":"dalec-homebrew-prune-manifest/v3"' "$EVIDENCE_DIR/prune-manifest.json"; then
   materialization_path=$EVIDENCE_DIR/materialization-v2.json
-  [ ! -e "$EVIDENCE_DIR/materialization.json" ] || fail "V2 runtime contains V1 materialization evidence"
+  [ ! -e "$EVIDENCE_DIR/materialization.json" ] \
+    && [ ! -L "$EVIDENCE_DIR/materialization.json" ] \
+    || fail "V2 runtime contains V1 materialization evidence"
 else
   fail "runtime evidence schemas are not a coherent V1 or V2 tuple"
 fi

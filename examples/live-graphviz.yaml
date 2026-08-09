@@ -91,12 +91,14 @@ tests:
             && grep -Fq 'dalec-homebrew-prune-manifest/v2' "$evidence_dir/prune-manifest.json"; then
             materialization_path=$materialization_v1
             test ! -e "$materialization_v2"
+            test ! -L "$materialization_v2"
           elif grep -Fq 'dalec-homebrew-runtime-manifest/v2' "$evidence_dir/manifest.json" \
             && grep -Fq 'dalec-homebrew-resolution/v2' "$evidence_dir/resolution.json" \
             && grep -Fq 'dalec-homebrew-runtime-inventory/v2' "$evidence_dir/runtime-inventory.json" \
             && grep -Fq 'dalec-homebrew-prune-manifest/v3' "$evidence_dir/prune-manifest.json"; then
             materialization_path=$materialization_v2
             test ! -e "$materialization_v1"
+            test ! -L "$materialization_v1"
           else
             echo 'runtime evidence schemas are not a coherent V1 or V2 tuple' >&2
             exit 1

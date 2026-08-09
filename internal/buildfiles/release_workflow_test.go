@@ -422,6 +422,8 @@ func TestReleaseRuntimeEvidenceAssertionsAcceptOnlyCoherentSchemas(t *testing.T)
 		`materialization_v2="$evidence_dir/materialization-v2.json"`,
 		`test ! -e "$materialization_v2"`,
 		`test ! -e "$materialization_v1"`,
+		`test ! -L "$materialization_v2"`,
+		`test ! -L "$materialization_v1"`,
 		`test -f "$materialization_path"`,
 		`test ! -L "$materialization_path"`,
 		`test -s "$materialization_path"`,
@@ -479,6 +481,8 @@ func TestReleaseRuntimeEvidenceAssertionsAcceptOnlyCoherentSchemas(t *testing.T)
 		`materialization_path=$EVIDENCE_DIR/materialization-v2.json`,
 		`[ ! -e "$EVIDENCE_DIR/materialization-v2.json" ]`,
 		`[ ! -e "$EVIDENCE_DIR/materialization.json" ]`,
+		`[ ! -L "$EVIDENCE_DIR/materialization-v2.json" ]`,
+		`[ ! -L "$EVIDENCE_DIR/materialization.json" ]`,
 		`[ -f "$materialization_path" ]`,
 		`[ ! -L "$materialization_path" ]`,
 		`[ -s "$materialization_path" ]`,
@@ -545,12 +549,17 @@ func TestVMLiveValidateAcceptsOnlyCoherentEvidenceSchemas(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	runCheck := func(t *testing.T, mask int, materializations map[string]string, wantPass bool) {
+	runCheck := func(t *testing.T, mask int, materializations, symlinks map[string]string, wantPass bool) {
 		t.Helper()
 		evidenceDir := t.TempDir()
 		writeDocuments(t, evidenceDir, mask)
 		for name, body := range materializations {
 			writeMaterialization(t, evidenceDir, name, body)
+		}
+		for name, target := range symlinks {
+			if err := os.Symlink(target, filepath.Join(evidenceDir, name)); err != nil {
+				t.Fatal(err)
+			}
 		}
 
 		script := "set -eu\nfail() { exit 1; }\nassert_root_owned_non_user_writable() { :; }\n" + string(schemaCheck)
@@ -581,7 +590,7 @@ func TestVMLiveValidateAcceptsOnlyCoherentEvidenceSchemas(t *testing.T) {
 			if mask == allV2 {
 				materializations = map[string]string{"materialization-v2.json": v2Materialization}
 			}
-			runCheck(t, mask, materializations, mask == 0 || mask == allV2)
+			runCheck(t, mask, materializations, nil, mask == 0 || mask == allV2)
 		})
 	}
 
@@ -589,6 +598,7 @@ func TestVMLiveValidateAcceptsOnlyCoherentEvidenceSchemas(t *testing.T) {
 		name             string
 		mask             int
 		materializations map[string]string
+		symlinks         map[string]string
 	}{
 		{name: "v1-missing", mask: 0},
 		{name: "v2-missing", mask: allV2},
@@ -600,9 +610,13 @@ func TestVMLiveValidateAcceptsOnlyCoherentEvidenceSchemas(t *testing.T) {
 		{name: "v2-v1-content", mask: allV2, materializations: map[string]string{"materialization-v2.json": v1Materialization}},
 		{name: "v1-empty", mask: 0, materializations: map[string]string{"materialization.json": ""}},
 		{name: "v2-missing-verified-bottles", mask: allV2, materializations: map[string]string{"materialization-v2.json": `{"schema_version":"dalec-homebrew-materialization/v2"}`}},
+		{name: "v1-selected-symlink", mask: 0, materializations: map[string]string{"materialization-target.json": v1Materialization}, symlinks: map[string]string{"materialization.json": "materialization-target.json"}},
+		{name: "v2-selected-symlink", mask: allV2, materializations: map[string]string{"materialization-target.json": v2Materialization}, symlinks: map[string]string{"materialization-v2.json": "materialization-target.json"}},
+		{name: "v1-dangling-v2-symlink", mask: 0, materializations: map[string]string{"materialization.json": v1Materialization}, symlinks: map[string]string{"materialization-v2.json": "missing"}},
+		{name: "v2-dangling-v1-symlink", mask: allV2, materializations: map[string]string{"materialization-v2.json": v2Materialization}, symlinks: map[string]string{"materialization.json": "missing"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			runCheck(t, test.mask, test.materializations, false)
+			runCheck(t, test.mask, test.materializations, test.symlinks, false)
 		})
 	}
 }
