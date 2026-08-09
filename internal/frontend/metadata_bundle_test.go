@@ -24,6 +24,7 @@ type metadataBundleTestRef struct {
 	data         map[string][]byte
 	readErrs     map[string]error
 	read         []string
+	readRequests []gwclient.ReadRequest
 	readDirCalls int
 }
 
@@ -70,6 +71,7 @@ func (r *metadataBundleTestRef) StatFile(_ context.Context, req gwclient.StatReq
 
 func (r *metadataBundleTestRef) ReadFile(_ context.Context, req gwclient.ReadRequest) ([]byte, error) {
 	r.read = append(r.read, req.Filename)
+	r.readRequests = append(r.readRequests, req)
 	if err := r.readErrs[req.Filename]; err != nil {
 		return nil, err
 	}
@@ -77,10 +79,17 @@ func (r *metadataBundleTestRef) ReadFile(_ context.Context, req gwclient.ReadReq
 	if !ok {
 		return nil, os.ErrNotExist
 	}
-	if req.Range == nil || req.Range.Offset != 0 || req.Range.Length != len(data) {
+	if req.Range == nil {
 		return slices.Clone(data), nil
 	}
-	return slices.Clone(data), nil
+	if req.Range.Offset < 0 || req.Range.Length < 0 || req.Range.Offset > len(data) {
+		return nil, errors.New("invalid test range")
+	}
+	end := req.Range.Offset + req.Range.Length
+	if end > len(data) {
+		end = len(data)
+	}
+	return slices.Clone(data[req.Range.Offset:end]), nil
 }
 
 type metadataBundleTestClient struct {
@@ -161,6 +170,43 @@ func TestReadMetadataBundleReference(t *testing.T) {
 	}
 	if ref.readDirCalls != 0 {
 		t.Fatalf("read directory calls=%d, want 0", ref.readDirCalls)
+	}
+}
+
+func TestReadMetadataBundleReferenceChunksLargeMembers(t *testing.T) {
+	ref := newMetadataBundleTestRef()
+	path := "/" + metadata.BundleFormulaFilename
+	ref.data[path] = make([]byte, 2*metadataBundleReadChunkBytes+123)
+	for i := range ref.data[path] {
+		ref.data[path][i] = byte(i)
+	}
+	ref.stats[path].Size = int64(len(ref.data[path]))
+
+	bundle, err := readMetadataBundleReference(t.Context(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(bundle.formula, ref.data[path]) {
+		t.Fatal("chunked formula contents differ from the input")
+	}
+
+	var formulaRanges []gwclient.FileRange
+	for _, request := range ref.readRequests {
+		if request.Filename != path {
+			continue
+		}
+		if request.Range == nil {
+			t.Fatal("formula read did not use a bounded range")
+		}
+		formulaRanges = append(formulaRanges, *request.Range)
+	}
+	want := []gwclient.FileRange{
+		{Offset: 0, Length: metadataBundleReadChunkBytes},
+		{Offset: metadataBundleReadChunkBytes, Length: metadataBundleReadChunkBytes},
+		{Offset: 2 * metadataBundleReadChunkBytes, Length: 123},
+	}
+	if !slices.Equal(formulaRanges, want) {
+		t.Fatalf("formula read ranges=%v, want %v", formulaRanges, want)
 	}
 }
 

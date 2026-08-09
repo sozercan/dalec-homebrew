@@ -16,6 +16,10 @@ import (
 
 const metadataBundleInputName = "dalec-homebrew-metadata"
 
+// Keep each unary gateway ReadFile response comfortably below BuildKit's
+// 16 MiB gRPC message limit. Bundle members remain bounded independently.
+const metadataBundleReadChunkBytes = 8 << 20
+
 const (
 	metadataBundleContextOption = "context:" + metadataBundleInputName
 	metadataBundleLocalSource   = "local:" + metadataBundleInputName
@@ -176,15 +180,27 @@ func readMetadataBundleReference(ctx context.Context, ref gwclient.Reference) (m
 		if stat.Size <= 0 || stat.Size > file.limit {
 			return metadataBundleData{}, fmt.Errorf("metadata bundle file %q size %d is outside 1..%d", file.name, stat.Size, file.limit)
 		}
-		data, err := ref.ReadFile(ctx, gwclient.ReadRequest{
-			Filename: filename,
-			Range:    &gwclient.FileRange{Length: int(stat.Size)},
-		})
-		if err != nil {
-			return metadataBundleData{}, fmt.Errorf("read metadata bundle file %q: %w", file.name, err)
-		}
-		if int64(len(data)) != stat.Size || int64(len(data)) > file.limit {
-			return metadataBundleData{}, fmt.Errorf("metadata bundle file %q read %d bytes after stat reported %d", file.name, len(data), stat.Size)
+		data := make([]byte, 0, int(stat.Size))
+		for offset := int64(0); offset < stat.Size; {
+			length := int64(metadataBundleReadChunkBytes)
+			if remaining := stat.Size - offset; remaining < length {
+				length = remaining
+			}
+			chunk, err := ref.ReadFile(ctx, gwclient.ReadRequest{
+				Filename: filename,
+				Range: &gwclient.FileRange{
+					Offset: int(offset),
+					Length: int(length),
+				},
+			})
+			if err != nil {
+				return metadataBundleData{}, fmt.Errorf("read metadata bundle file %q at offset %d: %w", file.name, offset, err)
+			}
+			if int64(len(chunk)) != length {
+				return metadataBundleData{}, fmt.Errorf("metadata bundle file %q read %d bytes at offset %d after stat reported %d", file.name, len(chunk), offset, stat.Size)
+			}
+			data = append(data, chunk...)
+			offset += length
 		}
 		contents[file.name] = data
 	}

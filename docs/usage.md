@@ -11,9 +11,12 @@
   pinned by digest and taken from the same trusted release evidence
 - The authenticated Homebrew metadata bundle and manifest digest from that
   same release
-- Network access from the BuildKit daemon to both frontend images and the child
-  frontend's bound components, `formulae.brew.sh`, `ghcr.io`, public
-  default-GitHub taps, and selected public bottle or prebuilt-archive hosts
+- Network access from the BuildKit daemon to both frontend images, the child
+  frontend's bound components, `ghcr.io`, public default-GitHub taps, and
+  selected public bottle or prebuilt-archive hosts. Release-bound builds read
+  Formula metadata only from the supplied authenticated bundle; access to
+  `formulae.brew.sh` is required only by an unbound development frontend using
+  the live-fetch path.
 
 The repository's [`../release/dalec-frontend.json`](../release/dalec-frontend.json)
 binding records the release-approved upstream Dalec index, exact Linux platform
