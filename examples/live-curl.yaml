@@ -1,0 +1,42 @@
+# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
+# Base fixture: the integration helper injects targets.homebrew.frontend.image
+# before building homebrew/image.
+
+name: homebrew-live-curl
+version: 0.1.0
+revision: 1
+description: Offline runtime validation for curl and its transitive libpsl helper
+website: https://curl.se/
+license: Apache-2.0
+
+dependencies:
+  runtime:
+    curl: {}
+
+image:
+  entrypoint: /home/linuxbrew/.linuxbrew/bin/curl
+  user: linuxbrew
+
+tests:
+  - name: curl-runtime-closure
+    env:
+      HOMEBREW_PREFIX: /home/linuxbrew/.linuxbrew
+    steps:
+      - command: |
+          set -eu
+          curl --version > /tmp/curl-version
+          grep -q '^curl ' /tmp/curl-version
+          test "$(id -u):$(id -g)" = "1000:1000"
+          test ! -e "$HOMEBREW_PREFIX/bin/psl-make-dafsa"
+          helper="$(find "$HOMEBREW_PREFIX/Cellar/libpsl" -path '*/bin/psl-make-dafsa' -type f -print -quit)"
+          test -n "$helper"
+          test "$(sed -n '1p' "$helper")" = '#!/usr/bin/env python'
+          echo curl-runtime-closure-ok
+        stdout:
+          equals: "curl-runtime-closure-ok\n"
+    files:
+      /home/linuxbrew/.linuxbrew/bin/curl: {}
+      /home/linuxbrew/.linuxbrew/bin/psl-make-dafsa:
+        not_exist: true
+      /home/linuxbrew/.linuxbrew/bin/brew:
+        not_exist: true

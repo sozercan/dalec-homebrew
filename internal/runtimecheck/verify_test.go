@@ -142,6 +142,7 @@ func TestAuxiliaryScriptsMayOmitOptionalInterpreters(t *testing.T) {
 		filepath.Join(prefix, "Cellar/python@3.14/3.14.6/lib/python3.14/site-packages/pip/_vendor/distro"),
 		filepath.Join(prefix, "Cellar/python@3.14/3.14.6/lib/python3.14/site-packages/pip/_vendor/requests"),
 		filepath.Join(prefix, "Cellar/dbus/1.16.2_1/share/doc/dbus/examples"),
+		filepath.Join(prefix, "Cellar/libpsl/0.23.1/bin"),
 		filepath.Join(root, "usr/bin"),
 	} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -182,6 +183,9 @@ func TestAuxiliaryScriptsMayOmitOptionalInterpreters(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(prefix, "Cellar/libpsl/0.23.1/bin/psl-make-dafsa"), []byte("#!/usr/bin/env python\n"), 0o555); err != nil {
+		t.Fatal(err)
+	}
 	searchPATH := []string{"/home/linuxbrew/.linuxbrew/bin", "/usr/bin"}
 	writeRuntimeScopeEvidence(t, root, searchPATH)
 
@@ -192,6 +196,35 @@ func TestAuxiliaryScriptsMayOmitOptionalInterpreters(t *testing.T) {
 		SearchPATH: searchPATH,
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLibPSLAuxiliaryScriptPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		shebang   string
+		exposed   bool
+		requested bool
+		wantError string
+	}{
+		{name: "transitive exact script", shebang: "/usr/bin/env python"},
+		{name: "changed shebang", shebang: "/usr/bin/env python3", wantError: `auxiliary shebang "/usr/bin/env python3" does not match authenticated fixture "/usr/bin/env python"`},
+		{name: "exposed script", shebang: "/usr/bin/env python", exposed: true, wantError: `env interpreter "python" is unavailable`},
+		{name: "requested script", shebang: "/usr/bin/env python", requested: true, wantError: `env interpreter "python" is unavailable`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, searchPATH := writeLibPSLRuntimeFixture(t, test.shebang, test.exposed, test.requested)
+			err := Verify(Options{Root: root, Prefix: "/home/linuxbrew/.linuxbrew", Arch: "amd64", SearchPATH: searchPATH})
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("Verify() error = %v, want %q", err, test.wantError)
+			}
+		})
 	}
 }
 
@@ -589,6 +622,7 @@ func TestCompiledPayloadMayContainInertMaterializerPath(t *testing.T) {
 		writeELFWithSection(t, filepath.Join(prefix, "libwasmtime.so"), 3, 0o444, ".rodata", 2, []byte(cargoSource+"\x00"))
 		writeELFWithSection(t, filepath.Join(prefix, "rustls-helper"), 2, 0o555, ".rodata", 2, []byte(cargoContainedParentPath+"\x00"))
 		writeELFWithSection(t, filepath.Join(prefix, "concatenated-sources"), 2, 0o555, ".rodata", 2, []byte(cargoSource+":983"+cargoSource+"\x00"))
+		writeELFWithSection(t, filepath.Join(prefix, "concatenated-diagnostics"), 2, 0o555, ".rodata", 2, []byte(cargoSource+":728Cannot write more after calling finish()/usr/share/zoneinfo/../usr/share/zoneinfo/\x00"))
 		writeELFWithSection(t, filepath.Join(prefix, "deno"), 2, 0o555, ".debug_line", 0, []byte(cargoDebugDirectory+"\x00"+cargoDebugSymbolPath+"\x00"))
 		memberFile := filepath.Join(t.TempDir(), "member.o")
 		writeELFWithSection(t, memberFile, 1, 0o444, ".rodata", 2, []byte(cargoSource+"\x00"))
@@ -625,6 +659,7 @@ func TestCompiledPayloadMayContainInertMaterializerPath(t *testing.T) {
 		}{
 			{name: "dot components", section: ".rodata", flags: 2, value: "/home/linuxbrew/.cache/Homebrew/cargo_cache/registry/src/i/c/../../../../downloads/payload.rs"},
 			{name: "continues after rs", section: ".rodata", flags: 2, value: "/home/linuxbrew/.cache/Homebrew/cargo_cache/registry/src/i/c/source.rs/../../payload"},
+			{name: "continued token traversal", section: ".rodata", flags: 2, value: cargoSource + "evil/../../payload"},
 			{name: "extension after rs", section: ".rodata", flags: 2, value: "/home/linuxbrew/.cache/Homebrew/cargo_cache/registry/src/i/c/source.rs.evil"},
 			{name: "bare traversal crate", section: ".debug_line", value: "/home/linuxbrew/.cache/Homebrew/cargo_cache/registry/src/i/../payload"},
 		}
@@ -876,7 +911,44 @@ func appendFile(t *testing.T, filename string, data []byte) {
 	}
 }
 
+func writeLibPSLRuntimeFixture(t *testing.T, shebang string, exposed, requested bool) (string, []string) {
+	t.Helper()
+	root := t.TempDir()
+	prefix := filepath.Join(root, "home/linuxbrew/.linuxbrew")
+	for _, dir := range []string{
+		filepath.Join(prefix, "bin"),
+		filepath.Join(prefix, "Cellar/go/1.26.5/bin"),
+		filepath.Join(prefix, "Cellar/libpsl/0.23.1/bin"),
+		filepath.Join(root, "usr/bin"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMinimalELF(t, filepath.Join(root, "usr/bin/env"), "amd64")
+	writeMinimalELF(t, filepath.Join(prefix, "Cellar/go/1.26.5/bin/go"), "amd64")
+	if err := os.Symlink("../Cellar/go/1.26.5/bin/go", filepath.Join(prefix, "bin/go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(prefix, "Cellar/libpsl/0.23.1/bin/psl-make-dafsa"), []byte("#!"+shebang+"\n"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if exposed {
+		if err := os.Symlink("../Cellar/libpsl/0.23.1/bin/psl-make-dafsa", filepath.Join(prefix, "bin/psl-make-dafsa")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	searchPATH := []string{"/home/linuxbrew/.linuxbrew/bin", "/usr/bin"}
+	writeRuntimeScopeEvidenceWithLibPSLRoot(t, root, searchPATH, requested)
+	return root, searchPATH
+}
+
 func writeRuntimeScopeEvidence(t *testing.T, root string, searchPATH []string) {
+	t.Helper()
+	writeRuntimeScopeEvidenceWithLibPSLRoot(t, root, searchPATH, false)
+}
+
+func writeRuntimeScopeEvidenceWithLibPSLRoot(t *testing.T, root string, searchPATH []string, requestedLibPSL bool) {
 	t.Helper()
 	tm := time.Unix(1_800_000_000, 0).UTC()
 	digest := "sha256:" + strings.Repeat("a", 64)
@@ -911,6 +983,10 @@ func writeRuntimeScopeEvidence(t *testing.T, root string, searchPATH []string) {
 			},
 		}
 	}
+	requested := []resolution.RequestedRoot{{Requested: "go", Canonical: "go"}}
+	if requestedLibPSL {
+		requested = append(requested, resolution.RequestedRoot{Requested: "libpsl", Canonical: "libpsl"})
+	}
 	record := &resolution.Record{
 		SchemaVersion: resolution.SchemaVersion,
 		PolicyVersion: resolution.PolicyVersion,
@@ -924,16 +1000,17 @@ func writeRuntimeScopeEvidence(t *testing.T, root string, searchPATH []string) {
 		},
 		ResolvedAt:      tm,
 		SourceDateEpoch: tm.Unix(),
-		Requested:       []resolution.RequestedRoot{{Requested: "go", Canonical: "go"}},
+		Requested:       requested,
 		Nodes: []resolution.Node{
-			node("go", "1.26.5", []string{"bin/go"}, "llvm@21", "ncurses", "python@3.14", "dbus", "tool"),
+			node("go", "1.26.5", []string{"bin/go"}, "llvm@21", "ncurses", "python@3.14", "dbus", "libpsl", "tool"),
 			node("llvm@21", "21.1.8", []string{"bin/scan-build-py"}),
 			node("ncurses", "6.6", nil),
 			node("python@3.14", "3.14.6", nil),
 			node("dbus", "1.16.2_1", nil),
+			node("libpsl", "0.23.1", []string{"bin/psl-make-dafsa"}),
 			node("tool", "1.0", nil),
 		},
-		InstallOrder: []string{"llvm@21", "ncurses", "python@3.14", "dbus", "tool", "go"},
+		InstallOrder: []string{"llvm@21", "ncurses", "python@3.14", "dbus", "libpsl", "tool", "go"},
 		Runtime: resolution.RuntimePolicy{
 			User:          "linuxbrew",
 			UID:           1000,
@@ -1063,9 +1140,22 @@ func TestRuntimeCoreCapabilityHelpersRejectNonCoreRackSpoofs(t *testing.T) {
 		{Name: "go", FullName: "acme/tools/go"},
 		{Name: "python@3.14", FullName: "acme/tools/python@3.14"},
 		{Name: "llvm@21", FullName: "acme/tools/llvm@21"},
+		{Name: "libpsl", FullName: "acme/tools/libpsl"},
 	} {
-		if runtimeRule(node, "runtime-aux-go", func() bool { return false }) || runtimeRule(node, "runtime-aux-python", func() bool { return false }) || runtimeRule(node, "runtime-aux-llvm", func() bool { return false }) {
+		if runtimeRule(node, "runtime-aux-go", func() bool { return false }) || runtimeRule(node, "runtime-aux-python", func() bool { return false }) || runtimeRule(node, "runtime-aux-llvm", func() bool { return false }) || runtimeRule(node, "runtime-aux-libpsl", func() bool {
+			return node.Name == "libpsl" && node.FullName == "homebrew/core/libpsl"
+		}) {
 			t.Fatalf("non-core Formula received core runtime capability: %+v", node)
+		}
+	}
+	for _, node := range []resolution.Node{
+		{Name: "libpsl", FullName: "homebrew/core/libpsl", PolicyFormulaID: "homebrew/core/libpsl"},
+		{Name: "libpsl", FullName: "homebrew/core/libpsl", PolicyFormulaID: "acme/tools/libpsl"},
+	} {
+		got := runtimeRule(node, "runtime-aux-libpsl", func() bool { return true })
+		want := node.PolicyFormulaID == "homebrew/core/libpsl"
+		if got != want {
+			t.Fatalf("runtime-aux-libpsl for %q = %v, want %v", node.PolicyFormulaID, got, want)
 		}
 	}
 }

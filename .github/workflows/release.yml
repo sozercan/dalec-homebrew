@@ -32,7 +32,7 @@ env:
   MAX_RELEASE_ASSET_BYTES: 268435456
   MAX_RELEASE_TOTAL_BYTES: 1073741824
   MAX_RUNTIME_EVIDENCE_EXPANDED_BYTES: 268435456
-  RELEASE_SPECS: live-test live-python live-glibc live-redis live-graphviz live-toolchain
+  RELEASE_SPECS: live-test live-curl live-python-curl live-hf-curl live-python live-glibc live-redis live-graphviz live-toolchain
   RELEASE_AMD64_ONLY_SPECS: ci-noncore-multi-package
 
 jobs:
@@ -2067,7 +2067,7 @@ jobs:
             .dalec_module == $inputs[0].dalec_module and
             .buildkit_module == $inputs[0].buildkit_module and
             .tap_policy_digest == "sha256:9f5b47c9d241dc16464dd81c350fc6c7755fa35c992bc821e6c3927573a3f217" and
-            .executable_runtime_policy_digest == "sha256:dffdd27124b8337839e196dd98dbec93717b4694be1564fd9afd7684baf05d48" and
+            .executable_runtime_policy_digest == "sha256:0dc59f0c1423083b4a2f49ea8356b2832a208dac121c4c080322b48d851f08a1" and
             .supported_catalog_policy_versions == ["tap-catalog-v1"] and
             .supported_fetch_policy_versions == ["homebrew-bottle-fetch-v1"] and
             .supported_provenance_policy_versions == [

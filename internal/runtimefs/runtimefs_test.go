@@ -434,26 +434,79 @@ func newFixture(t *testing.T) fixture {
 }
 
 func TestPruneOptionalDependencyTooling(t *testing.T) {
-	entry := func() *sourceEntry {
-		return &sourceEntry{rel: "bin/scan-build-py", typeName: TypeSymlink, retain: true, packageName: "llvm@21"}
+	entry := func(rel, packageName string) *sourceEntry {
+		return &sourceEntry{rel: rel, typeName: TypeSymlink, retain: true, packageName: packageName}
 	}
 	t.Run("transitive llvm tooling", func(t *testing.T) {
-		scan := &sourceScan{entries: []*sourceEntry{entry()}}
+		scan := &sourceScan{entries: []*sourceEntry{entry("bin/scan-build-py", "llvm@21")}}
 		pruneOptionalDependencyTooling(scan, &normalizedPolicy{nodes: map[string]resolution.Node{"llvm@21": {Name: "llvm@21", FullName: "homebrew/core/llvm@21"}}, requested: map[string]struct{}{}})
 		if scan.entries[0].retain || scan.entries[0].pruneReason != PruneOptionalTooling {
 			t.Fatalf("optional LLVM tool was not pruned: %#v", scan.entries[0])
 		}
 	})
 	t.Run("requested llvm tooling", func(t *testing.T) {
-		scan := &sourceScan{entries: []*sourceEntry{entry()}}
+		scan := &sourceScan{entries: []*sourceEntry{entry("bin/scan-build-py", "llvm@21")}}
 		pruneOptionalDependencyTooling(scan, &normalizedPolicy{nodes: map[string]resolution.Node{"llvm@21": {Name: "llvm@21", FullName: "homebrew/core/llvm@21"}}, requested: map[string]struct{}{"llvm@21": {}}})
 		if !scan.entries[0].retain {
 			t.Fatal("requested LLVM tool was pruned")
 		}
 	})
+	t.Run("transitive core libpsl tooling", func(t *testing.T) {
+		scan := &sourceScan{entries: []*sourceEntry{entry("bin/psl-make-dafsa", "libpsl")}}
+		pruneOptionalDependencyTooling(scan, &normalizedPolicy{nodes: map[string]resolution.Node{"libpsl": {Name: "libpsl", FullName: "homebrew/core/libpsl"}}, requested: map[string]struct{}{}})
+		if scan.entries[0].retain || scan.entries[0].pruneReason != PruneOptionalTooling {
+			t.Fatalf("optional libpsl tool was not pruned: %#v", scan.entries[0])
+		}
+	})
+	t.Run("requested core libpsl tooling", func(t *testing.T) {
+		scan := &sourceScan{entries: []*sourceEntry{entry("bin/psl-make-dafsa", "libpsl")}}
+		pruneOptionalDependencyTooling(scan, &normalizedPolicy{nodes: map[string]resolution.Node{"libpsl": {Name: "libpsl", FullName: "homebrew/core/libpsl"}}, requested: map[string]struct{}{"libpsl": {}}})
+		if !scan.entries[0].retain {
+			t.Fatal("requested libpsl tool was pruned")
+		}
+	})
+	t.Run("other libpsl path", func(t *testing.T) {
+		scan := &sourceScan{entries: []*sourceEntry{entry("bin/psl", "libpsl")}}
+		pruneOptionalDependencyTooling(scan, &normalizedPolicy{nodes: map[string]resolution.Node{"libpsl": {Name: "libpsl", FullName: "homebrew/core/libpsl"}}, requested: map[string]struct{}{}})
+		if !scan.entries[0].retain {
+			t.Fatal("unlisted libpsl executable was pruned")
+		}
+	})
+	t.Run("copied libpsl executable", func(t *testing.T) {
+		copied := entry("bin/psl-make-dafsa", "libpsl")
+		copied.typeName = TypeRegular
+		scan := &sourceScan{entries: []*sourceEntry{copied}}
+		pruneOptionalDependencyTooling(scan, &normalizedPolicy{nodes: map[string]resolution.Node{"libpsl": {Name: "libpsl", FullName: "homebrew/core/libpsl"}}, requested: map[string]struct{}{}})
+		if !scan.entries[0].retain {
+			t.Fatal("non-symlink libpsl executable was pruned")
+		}
+	})
+	t.Run("V1 non-core libpsl spoof", func(t *testing.T) {
+		scan := &sourceScan{entries: []*sourceEntry{entry("bin/psl-make-dafsa", "libpsl")}}
+		node := resolution.Node{Name: "libpsl", FullName: "acme/tools/libpsl"}
+		pruneOptionalDependencyTooling(scan, &normalizedPolicy{nodes: map[string]resolution.Node{"libpsl": node}, requested: map[string]struct{}{}})
+		if !scan.entries[0].retain {
+			t.Fatal("non-core V1 libpsl received optional-tooling prune capability")
+		}
+	})
+	t.Run("V2 exact core libpsl capability", func(t *testing.T) {
+		scan := &sourceScan{entries: []*sourceEntry{entry("bin/psl-make-dafsa", "libpsl")}}
+		node := resolution.Node{Name: "libpsl", FullName: "homebrew/core/libpsl", PolicyFormulaID: "homebrew/core/libpsl"}
+		pruneOptionalDependencyTooling(scan, &normalizedPolicy{nodes: map[string]resolution.Node{"libpsl": node}, requested: map[string]struct{}{}})
+		if scan.entries[0].retain || scan.entries[0].pruneReason != PruneOptionalTooling {
+			t.Fatalf("V2-authorized libpsl tool was not pruned: %#v", scan.entries[0])
+		}
+	})
+	t.Run("V2 non-core libpsl spoof", func(t *testing.T) {
+		scan := &sourceScan{entries: []*sourceEntry{entry("bin/psl-make-dafsa", "libpsl")}}
+		node := resolution.Node{Name: "libpsl", FullName: "homebrew/core/libpsl", PolicyFormulaID: "acme/tools/libpsl"}
+		pruneOptionalDependencyTooling(scan, &normalizedPolicy{nodes: map[string]resolution.Node{"libpsl": node}, requested: map[string]struct{}{}})
+		if !scan.entries[0].retain {
+			t.Fatal("non-core V2 libpsl received optional-tooling prune capability")
+		}
+	})
 	t.Run("unrelated package", func(t *testing.T) {
-		other := entry()
-		other.packageName = "other"
+		other := entry("bin/scan-build-py", "other")
 		scan := &sourceScan{entries: []*sourceEntry{other}}
 		pruneOptionalDependencyTooling(scan, &normalizedPolicy{requested: map[string]struct{}{}})
 		if !other.retain {

@@ -14,6 +14,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/sozercan/dalec-homebrew/internal/bottle"
+	"github.com/sozercan/dalec-homebrew/internal/catalog"
 	"github.com/sozercan/dalec-homebrew/internal/fetcher"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 )
@@ -75,6 +76,35 @@ func TestCatalogBottleTabCanonicalizesEmptySlices(t *testing.T) {
 	}
 	if converted.ChangedFiles != nil || converted.Dependencies != nil {
 		t.Fatalf("empty slices were not canonicalized: %+v", converted)
+	}
+}
+
+func TestInspectionExpectationProjectsExactCertifiSharedCARule(t *testing.T) {
+	node := catalog.Node{
+		ID: "homebrew/core/certifi", Tap: "homebrew/core", Name: "certifi", HomebrewFullName: "homebrew/core/certifi",
+		Dependencies: []catalog.Requirement{{ID: "homebrew/core/ca-certificates", DeclaredDirectly: true}},
+	}
+	expected := inspectionExpectation(node, "x86_64_linux", "sha256:"+strings.Repeat("a", 64), 1, strings.Repeat("a", 64), resolution.BottleTab{})
+	if len(expected.AllowedExternalSymlinkRules) != 1 || expected.AllowedExternalSymlinkRules[0] != bottle.ExternalSymlinkRuleCertifiSharedCA || len(expected.AllowedExternalSymlinkFormulae) != 1 || expected.AllowedExternalSymlinkFormulae[0] != "ca-certificates" {
+		t.Fatalf("expectation = %+v", expected)
+	}
+	for name, mutate := range map[string]func(*catalog.Node){
+		"non-core owner": func(value *catalog.Node) {
+			value.ID, value.Tap, value.HomebrewFullName = "acme/tools/certifi", "acme/tools", "acme/tools/certifi"
+		},
+		"spoofed owner identity": func(value *catalog.Node) { value.HomebrewFullName = "acme/tools/certifi" },
+		"indirect dependency":    func(value *catalog.Node) { value.Dependencies[0].DeclaredDirectly = false },
+		"non-core dependency":    func(value *catalog.Node) { value.Dependencies[0].ID = "acme/tools/ca-certificates" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := node
+			value.Dependencies = append([]catalog.Requirement(nil), node.Dependencies...)
+			mutate(&value)
+			got := inspectionExpectation(value, "x86_64_linux", "sha256:"+strings.Repeat("a", 64), 1, strings.Repeat("a", 64), resolution.BottleTab{})
+			if len(got.AllowedExternalSymlinkRules) != 0 {
+				t.Fatalf("unexpected certifi rules = %v", got.AllowedExternalSymlinkRules)
+			}
+		})
 	}
 }
 

@@ -143,9 +143,10 @@ The example identity above is illustrative; use a Formula present in the public 
 
 Start with the standalone [forwarded hello](examples/forwarded-hello.yaml). The
 [multi-package toolchain](examples/live-toolchain.yaml),
-[Python](examples/live-python.yaml), [Redis](examples/live-redis.yaml),
-[Graphviz](examples/live-graphviz.yaml), and [glibc](examples/live-glibc.yaml)
-files are base fixtures for `scripts/live-test.sh`; the helper validates them,
+[curl](examples/live-curl.yaml), [Python plus curl](examples/live-python-curl.yaml),
+[Hugging Face plus curl](examples/live-hf-curl.yaml), [Python](examples/live-python.yaml),
+[Redis](examples/live-redis.yaml), [Graphviz](examples/live-graphviz.yaml), and
+[glibc](examples/live-glibc.yaml) files are base fixtures for `scripts/live-test.sh`; the helper validates them,
 injects the release-bound `targets.homebrew.frontend.image` child mapping, and
 builds through upstream Dalec's `homebrew/image` target.
 

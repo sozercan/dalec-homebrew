@@ -48,7 +48,16 @@
     "hardlinks": "keg-local-only",
     "external_symlink_target": "opt/<signed-direct-dependency>/...",
     "external_symlink_source": "libexec/...",
-    "external_symlink_target_text": "exact-preservation-required"
+    "external_symlink_target_text": "exact-preservation-required",
+    "certifi_shared_ca": {
+      "rule": "certifi-shared-ca-link-v1",
+      "owner": "homebrew/core/certifi",
+      "direct_dependency": "homebrew/core/ca-certificates",
+      "source": "lib/python3.<one-or-two-decimal-digits-without-leading-zero>/site-packages/certifi/cacert.pem",
+      "target": "etc/ca-certificates/cert.pem",
+      "target_type": "protected-nonempty-regular-file",
+      "max_bytes": 1048576
+    }
   },
   "generated_runtime": {
     "glibc_locale": {
