@@ -215,14 +215,19 @@ do
   assert_root_owned_non_user_writable "$evidence_path"
 done
 
-grep -Fq '"schema_version":"dalec-homebrew-runtime-manifest/v1"' \
-  "$EVIDENCE_DIR/manifest.json" || fail "runtime manifest schema is invalid"
-grep -Fq '"schema_version":"dalec-homebrew-resolution/v1"' \
-  "$EVIDENCE_DIR/resolution.json" || fail "resolution schema is invalid"
-grep -Fq '"schema_version":"dalec-homebrew-runtime-inventory/v1"' \
-  "$EVIDENCE_DIR/runtime-inventory.json" || fail "runtime inventory schema is invalid"
-grep -Fq '"schema_version":"dalec-homebrew-prune-manifest/v2"' \
-  "$EVIDENCE_DIR/prune-manifest.json" || fail "prune manifest schema is invalid"
+if grep -Fq '"schema_version":"dalec-homebrew-runtime-manifest/v1"' "$EVIDENCE_DIR/manifest.json" \
+  && grep -Fq '"schema_version":"dalec-homebrew-resolution/v1"' "$EVIDENCE_DIR/resolution.json" \
+  && grep -Fq '"schema_version":"dalec-homebrew-runtime-inventory/v1"' "$EVIDENCE_DIR/runtime-inventory.json" \
+  && grep -Fq '"schema_version":"dalec-homebrew-prune-manifest/v2"' "$EVIDENCE_DIR/prune-manifest.json"; then
+  :
+elif grep -Fq '"schema_version":"dalec-homebrew-runtime-manifest/v2"' "$EVIDENCE_DIR/manifest.json" \
+  && grep -Fq '"schema_version":"dalec-homebrew-resolution/v2"' "$EVIDENCE_DIR/resolution.json" \
+  && grep -Fq '"schema_version":"dalec-homebrew-runtime-inventory/v2"' "$EVIDENCE_DIR/runtime-inventory.json" \
+  && grep -Fq '"schema_version":"dalec-homebrew-prune-manifest/v3"' "$EVIDENCE_DIR/prune-manifest.json"; then
+  :
+else
+  fail "runtime evidence schemas are not a coherent V1 or V2 tuple"
+fi
 grep -Fq '"spdxVersion":"SPDX-2.3"' \
   "$EVIDENCE_DIR/sbom.spdx.json" || fail "SBOM is not SPDX 2.3"
 grep -Fq '"name":"dalec-homebrew-linux-' \

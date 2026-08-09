@@ -390,6 +390,135 @@ func TestReleaseWorkflowSpecInventory(t *testing.T) {
 	}
 }
 
+func TestReleaseRuntimeEvidenceAssertionsAcceptOnlyCoherentSchemas(t *testing.T) {
+	workflow := releaseWorkflowText(t)
+	match := regexp.MustCompile(`(?m)^  RELEASE_SPECS: (.+)$`).FindStringSubmatch(workflow)
+	if len(match) != 2 {
+		t.Fatal("release workflow does not define RELEASE_SPECS")
+	}
+
+	releaseSpecs := make(map[string]struct{})
+	for _, spec := range strings.Fields(match[1]) {
+		releaseSpecs[spec] = struct{}{}
+	}
+	evidenceSpecs := []string{
+		"live-glibc",
+		"live-graphviz",
+		"live-python",
+		"live-redis",
+	}
+	wantFixtureSchemas := []string{
+		"dalec-homebrew-runtime-manifest/v1",
+		"dalec-homebrew-resolution/v1",
+		"dalec-homebrew-runtime-inventory/v1",
+		"dalec-homebrew-prune-manifest/v2",
+		"dalec-homebrew-runtime-manifest/v2",
+		"dalec-homebrew-resolution/v2",
+		"dalec-homebrew-runtime-inventory/v2",
+		"dalec-homebrew-prune-manifest/v3",
+	}
+
+	for _, spec := range evidenceSpecs {
+		if _, ok := releaseSpecs[spec]; !ok {
+			t.Errorf("%s is not included in RELEASE_SPECS", spec)
+		}
+		path := filepath.Join(repositoryRoot(t), "examples", spec+".yaml")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(data, []byte("/usr/share/dalec-homebrew/manifest.json:")) {
+			t.Errorf("%s does not assert the runtime evidence manifest", spec)
+		}
+		for _, schema := range wantFixtureSchemas {
+			if !bytes.Contains(data, []byte(schema)) {
+				t.Errorf("%s does not accept coherent runtime evidence schema %q", spec, schema)
+			}
+		}
+		if !bytes.Contains(data, []byte("runtime evidence schemas are not a coherent V1 or V2 tuple")) {
+			t.Errorf("%s does not reject mixed runtime evidence schemas", spec)
+		}
+	}
+
+	validatorPath := filepath.Join(repositoryRoot(t), "scripts", "vm-live-validate.sh")
+	validator, err := os.ReadFile(validatorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, schema := range wantFixtureSchemas {
+		if !bytes.Contains(validator, []byte(schema)) {
+			t.Errorf("vm-live-validate.sh does not accept coherent runtime evidence schema %q", schema)
+		}
+	}
+	if !bytes.Contains(validator, []byte("runtime evidence schemas are not a coherent V1 or V2 tuple")) {
+		t.Error("vm-live-validate.sh does not reject mixed runtime evidence schemas")
+	}
+}
+
+func TestVMLiveValidateAcceptsOnlyCoherentEvidenceSchemas(t *testing.T) {
+	validatorPath := filepath.Join(repositoryRoot(t), "scripts", "vm-live-validate.sh")
+	validator, err := os.ReadFile(validatorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	startMarker := []byte(`if grep -Fq '"schema_version":"dalec-homebrew-runtime-manifest/v1"'`)
+	if count := bytes.Count(validator, startMarker); count != 1 {
+		t.Fatalf("vm-live-validate.sh V1 schema check count = %d, want 1", count)
+	}
+	start := bytes.Index(validator, startMarker)
+	endMarker := []byte("\nfi\ngrep -Fq '\"spdxVersion\":\"SPDX-2.3\"'")
+	end := bytes.Index(validator[start:], endMarker)
+	if end == -1 {
+		t.Fatal("vm-live-validate.sh does not terminate the evidence schema check before the SPDX check")
+	}
+	schemaCheck := validator[start : start+end+len("\nfi")]
+
+	documents := []struct {
+		name string
+		v1   string
+		v2   string
+	}{
+		{name: "manifest.json", v1: "dalec-homebrew-runtime-manifest/v1", v2: "dalec-homebrew-runtime-manifest/v2"},
+		{name: "resolution.json", v1: "dalec-homebrew-resolution/v1", v2: "dalec-homebrew-resolution/v2"},
+		{name: "runtime-inventory.json", v1: "dalec-homebrew-runtime-inventory/v1", v2: "dalec-homebrew-runtime-inventory/v2"},
+		{name: "prune-manifest.json", v1: "dalec-homebrew-prune-manifest/v2", v2: "dalec-homebrew-prune-manifest/v3"},
+	}
+
+	for mask := 0; mask < 1<<len(documents); mask++ {
+		versions := make([]string, 0, len(documents))
+		for i := range documents {
+			version := "v1"
+			if mask&(1<<i) != 0 {
+				version = "v2"
+			}
+			versions = append(versions, version)
+		}
+		t.Run(strings.Join(versions, "-"), func(t *testing.T) {
+			evidenceDir := t.TempDir()
+			for i, document := range documents {
+				schema := document.v1
+				if mask&(1<<i) != 0 {
+					schema = document.v2
+				}
+				body := []byte(`{"schema_version":"` + schema + `"}`)
+				if err := os.WriteFile(filepath.Join(evidenceDir, document.name), body, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			script := "set -eu\nfail() { exit 1; }\n" + string(schemaCheck)
+			cmd := exec.Command("/bin/sh", "-c", script)
+			cmd.Env = append(os.Environ(), "EVIDENCE_DIR="+evidenceDir)
+			output, err := cmd.CombinedOutput()
+			wantPass := mask == 0 || mask == 1<<len(documents)-1
+			if gotPass := err == nil; gotPass != wantPass {
+				t.Fatalf("schema check pass = %v, want %v: %v\n%s", gotPass, wantPass, err, output)
+			}
+		})
+	}
+}
+
 func TestReleaseWorkflowBindsExternalDalecFrontend(t *testing.T) {
 	workflow := workflowYAML(t, "release.yml")
 
