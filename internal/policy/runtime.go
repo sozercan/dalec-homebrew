@@ -46,7 +46,7 @@ func RuntimeAllowlist(record *resolution.Record) (runtimefs.Allowlist, []string)
 		}
 		allow.Var = append(allow.Var, runtimefs.PathRule{Path: node.Name, Package: node.Name, Writable: true, Required: true})
 		writable = append(writable, path.Join(runtimefs.DefaultInstallPrefix, "var", node.Name))
-		if runtimePolicyAllows(node, "gdk-pixbuf-loader-cache", "gdk-pixbuf") {
+		if runtimePolicyOwnsGeneratedGlobalPath(node, gdkPixbufLoadersCachePath, "gdk-pixbuf") {
 			// Homebrew's authenticated gdk-pixbuf install step generates this
 			// runtime module registry below the enabled global lib root. The
 			// materializer validates its complete structure and binds every
@@ -57,7 +57,7 @@ func RuntimeAllowlist(record *resolution.Record) (runtimefs.Allowlist, []string)
 				Required: true,
 			})
 		}
-		if runtimePolicyAllows(node, "generated-node-npm", "node") {
+		if runtimePolicyOwnsGeneratedGlobalPath(node, nodeNPMRuntimePath, "node") {
 			// Node's verified post-install step copies its bottled private npm
 			// tree into the global lib tree and writes one prefix-bound npmrc.
 			// The materializer validates the complete copy before this fallback
@@ -68,7 +68,7 @@ func RuntimeAllowlist(record *resolution.Record) (runtimefs.Allowlist, []string)
 				Required: true,
 			})
 		}
-		if runtimePolicyAllows(node, "generated-shared-mime", "shared-mime-info") {
+		if runtimePolicyOwnsGeneratedGlobalPath(node, sharedMimeDatabasePath, "shared-mime-info") {
 			// update-mime-database expands the verified package XML into a
 			// shared runtime database. The materializer validates the complete
 			// generated tree and rejects unverified writers before this fallback
@@ -86,6 +86,13 @@ func RuntimeAllowlist(record *resolution.Record) (runtimefs.Allowlist, []string)
 func runtimePolicyAllows(node resolution.Node, rule, legacyName string) bool {
 	if node.PolicyFormulaID != "" {
 		return policyv2.HasEmbeddedRule(node.PolicyFormulaID, rule)
+	}
+	return node.Name == legacyName && node.FullName == "homebrew/core/"+legacyName
+}
+
+func runtimePolicyOwnsGeneratedGlobalPath(node resolution.Node, generatedPath, legacyName string) bool {
+	if node.PolicyFormulaID != "" {
+		return policyv2.HasEmbeddedGeneratedGlobalPath(node.PolicyFormulaID, generatedPath)
 	}
 	return node.Name == legacyName && node.FullName == "homebrew/core/"+legacyName
 }

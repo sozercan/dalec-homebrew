@@ -2158,6 +2158,34 @@ func TestClassifyAllowsControlledGdkPixbufLoaderCacheWriters(t *testing.T) {
 	}
 }
 
+func TestClassifyGdkPixbufLoaderCacheWritersUseExactV2FormulaIDs(t *testing.T) {
+	for _, tc := range []struct {
+		writer             string
+		includeContributor bool
+		kind               string
+	}{
+		{writer: gdkPixbufFormula, kind: "created"},
+		{writer: gdkPixbufTestLibrsvg, includeContributor: true, kind: "modified"},
+		{writer: gdkPixbufTestWebP, includeContributor: true, kind: "modified"},
+	} {
+		t.Run(tc.writer, func(t *testing.T) {
+			fixture := newGdkPixbufCacheFixture(t, tc.writer, tc.includeContributor, nil)
+			changes := []Change{{Path: gdkPixbufLoadersCachePath, Kind: tc.kind}}
+
+			fixture.node.PolicyFormulaID = "homebrew/core/" + tc.writer
+			if err := classify(fixture.prefix, fixture.node, fixture.before, fixture.after, changes, fixture.options()); err != nil {
+				t.Fatalf("exact core Formula ID rejected: %v", err)
+			}
+
+			fixture.node.PolicyFormulaID = "acme/tools/" + tc.writer
+			changes[0].Classification = ""
+			if err := classify(fixture.prefix, fixture.node, fixture.before, fixture.after, changes, fixture.options()); err == nil {
+				t.Fatal("non-core Formula ID received loader-cache writer capability")
+			}
+		})
+	}
+}
+
 func TestClassifyRejectsUncontrolledGdkPixbufLoaderCacheWriters(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

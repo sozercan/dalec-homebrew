@@ -28,6 +28,33 @@ func TestRuntimeAllowlistBindsGdkPixbufLoaderCache(t *testing.T) {
 	}
 }
 
+func TestRuntimeAllowlistV2BindsSharedGdkPixbufCacheToGenerator(t *testing.T) {
+	record := &resolution.Record{Nodes: []resolution.Node{
+		{Name: "gdk-pixbuf", FullName: "homebrew/core/gdk-pixbuf", PkgVersion: "2.44.7", PolicyFormulaID: "homebrew/core/gdk-pixbuf"},
+		{Name: "librsvg", FullName: "homebrew/core/librsvg", PkgVersion: "2.62.3", PolicyFormulaID: "homebrew/core/librsvg"},
+		{Name: "webp-pixbuf-loader", FullName: "homebrew/core/webp-pixbuf-loader", PkgVersion: "0.2.7", PolicyFormulaID: "homebrew/core/webp-pixbuf-loader"},
+	}}
+
+	for _, contributor := range record.Nodes[1:] {
+		if !runtimePolicyAllows(contributor, "gdk-pixbuf-loader-cache", "") {
+			t.Fatalf("%s lost its loader-cache writer capability", contributor.PolicyFormulaID)
+		}
+	}
+
+	allow, _ := RuntimeAllowlist(record)
+	want := []runtimefs.PathRule{{
+		Path:     gdkPixbufLoadersCachePath,
+		Package:  "gdk-pixbuf",
+		Required: true,
+	}}
+	if !slices.Equal(allow.Owners, want) {
+		t.Fatalf("owner rules = %#v, want %#v", allow.Owners, want)
+	}
+	if _, err := runtimefs.PolicyDigest(allow, runtimefs.DefaultInstallPrefix, record.Nodes); err != nil {
+		t.Fatalf("PolicyDigest() rejected shared loader-cache contributors: %v", err)
+	}
+}
+
 func TestRuntimeAllowlistDoesNotAddGdkPixbufOwnerWithoutFormula(t *testing.T) {
 	allow, _ := RuntimeAllowlist(&resolution.Record{Nodes: []resolution.Node{{Name: "hello", FullName: "homebrew/core/hello", PkgVersion: "1"}}})
 	if len(allow.Owners) != 0 {
