@@ -1,15 +1,146 @@
 package frontend
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/moby/buildkit/client/llb/sourceresolver"
+	gwclient "github.com/moby/buildkit/frontend/gateway/client"
+	"github.com/moby/buildkit/solver/pb"
+	digest "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/project-dalec/dalec"
 	dalecfrontend "github.com/project-dalec/dalec/frontend"
 	"github.com/sozercan/dalec-homebrew/internal/config"
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 )
+
+type sourceMetadataClient struct {
+	gwclient.Client
+	response *sourceresolver.MetaResponse
+	op       *pb.SourceOp
+	opt      sourceresolver.Opt
+}
+
+func (c *sourceMetadataClient) ResolveSourceMetadata(_ context.Context, op *pb.SourceOp, opt sourceresolver.Opt) (*sourceresolver.MetaResponse, error) {
+	c.op = op
+	c.opt = opt
+	return c.response, nil
+}
+
+func TestResolveImageConfigSelectsPlatformChild(t *testing.T) {
+	root := digest.FromString("index")
+	child := digest.FromString("amd64-child")
+	client := &sourceMetadataClient{response: &sourceresolver.MetaResponse{
+		Op: &pb.SourceOp{Identifier: "docker-image://ghcr.io/example/component@" + root.String()},
+		Image: &sourceresolver.ResolveImageResponse{
+			Digest: root,
+			Config: []byte(`{}`),
+			AttestationChain: &sourceresolver.AttestationChain{
+				Root:          root,
+				ImageManifest: child,
+			},
+		},
+	}}
+	platform := ocispec.Platform{OS: "linux", Architecture: "amd64"}
+
+	ref, image, err := resolveImageConfig(t.Context(), client, "ghcr.io/example/component@"+root.String(), platform, "force-pull", "component")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "ghcr.io/example/component@" + child.String(); ref != want {
+		t.Fatalf("resolved reference=%q, want selected child %q", ref, want)
+	}
+	if image == nil {
+		t.Fatal("resolved image config is nil")
+	}
+	if client.op == nil || client.op.Identifier != "docker-image://ghcr.io/example/component@"+root.String() {
+		t.Fatalf("source op=%+v, want immutable root reference", client.op)
+	}
+	if client.opt.ImageOpt == nil || !client.opt.ImageOpt.AttestationChain || client.opt.ImageOpt.ResolveMode != "force-pull" || client.opt.ImageOpt.Platform == nil || client.opt.ImageOpt.Platform.OS != platform.OS || client.opt.ImageOpt.Platform.Architecture != platform.Architecture {
+		t.Fatalf("source metadata options=%+v, want platform-bound index chain", client.opt.ImageOpt)
+	}
+}
+
+func TestResolveImageConfigRetainsDirectChild(t *testing.T) {
+	child := digest.FromString("amd64-child")
+	client := &sourceMetadataClient{response: &sourceresolver.MetaResponse{
+		Op:    &pb.SourceOp{Identifier: "docker-image://ghcr.io/example/component@" + child.String()},
+		Image: &sourceresolver.ResolveImageResponse{Digest: child, Config: []byte(`{}`)},
+	}}
+
+	ref, _, err := resolveImageConfig(t.Context(), client, "ghcr.io/example/component@"+child.String(), ocispec.Platform{OS: "linux", Architecture: "amd64"}, "force-pull", "component")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "ghcr.io/example/component@" + child.String(); ref != want {
+		t.Fatalf("resolved reference=%q, want direct child %q", ref, want)
+	}
+}
+
+func TestResolveImageConfigRejectsInvalidIndexChain(t *testing.T) {
+	root := digest.FromString("index")
+	child := digest.FromString("amd64-child")
+	for _, test := range []struct {
+		name  string
+		chain *sourceresolver.AttestationChain
+		want  string
+	}{
+		{name: "missing root", chain: &sourceresolver.AttestationChain{ImageManifest: child}, want: "invalid index identity chain"},
+		{name: "mismatched root", chain: &sourceresolver.AttestationChain{Root: digest.FromString("other-index"), ImageManifest: child}, want: "invalid index identity chain"},
+		{name: "missing child", chain: &sourceresolver.AttestationChain{Root: root}, want: "no platform child identity"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &sourceMetadataClient{response: &sourceresolver.MetaResponse{
+				Op: &pb.SourceOp{Identifier: "docker-image://ghcr.io/example/component@" + root.String()},
+				Image: &sourceresolver.ResolveImageResponse{
+					Digest:           root,
+					Config:           []byte(`{}`),
+					AttestationChain: test.chain,
+				},
+			}}
+			_, _, err := resolveImageConfig(t.Context(), client, "ghcr.io/example/component@"+root.String(), ocispec.Platform{OS: "linux", Architecture: "amd64"}, "force-pull", "component")
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestResolveImageConfigRejectsRewrittenSourceIdentity(t *testing.T) {
+	root := digest.FromString("index")
+	otherRoot := digest.FromString("other-index")
+	child := digest.FromString("amd64-child")
+	for _, test := range []struct {
+		name        string
+		opDigest    digest.Digest
+		imageDigest digest.Digest
+		chainRoot   digest.Digest
+	}{
+		{name: "requested reference differs from resolved image", opDigest: otherRoot, imageDigest: otherRoot, chainRoot: otherRoot},
+		{name: "returned source differs from resolved image", opDigest: otherRoot, imageDigest: root, chainRoot: root},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &sourceMetadataClient{response: &sourceresolver.MetaResponse{
+				Op: &pb.SourceOp{Identifier: "docker-image://ghcr.io/example/component@" + test.opDigest.String()},
+				Image: &sourceresolver.ResolveImageResponse{
+					Digest: test.imageDigest,
+					Config: []byte(`{}`),
+					AttestationChain: &sourceresolver.AttestationChain{
+						Root:          test.chainRoot,
+						ImageManifest: child,
+					},
+				},
+			}}
+			_, _, err := resolveImageConfig(t.Context(), client, "ghcr.io/example/component@"+root.String(), ocispec.Platform{OS: "linux", Architecture: "amd64"}, "force-pull", "component")
+			if err == nil || !strings.Contains(err.Error(), "does not match the requested source") {
+				t.Fatalf("error=%v, want source identity mismatch", err)
+			}
+		})
+	}
+}
 
 func TestDalecLoadOptionsAllowFrontendOwnedBuildArgs(t *testing.T) {
 	args := make(map[string]string)

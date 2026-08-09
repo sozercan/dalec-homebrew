@@ -17,6 +17,7 @@ import (
 	"github.com/moby/buildkit/client/llb/sourceresolver"
 	"github.com/moby/buildkit/frontend/dockerui"
 	gwclient "github.com/moby/buildkit/frontend/gateway/client"
+	"github.com/moby/buildkit/solver/pb"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/project-dalec/dalec"
 	dalecfrontend "github.com/project-dalec/dalec/frontend"
@@ -250,20 +251,66 @@ func marshalEffectiveSpec(spec *dalec.Spec) ([]byte, error) {
 }
 
 func resolveImageConfig(ctx context.Context, client gwclient.Client, ref string, p ocispec.Platform, mode, name string) (string, *dalec.DockerImageSpec, error) {
-	resolved, manifest, data, err := client.ResolveImageConfig(ctx, ref, sourceresolver.Opt{LogName: "load " + name + " metadata", ImageOpt: &sourceresolver.ResolveImageOpt{Platform: &p, ResolveMode: mode}})
+	named, err := reference.ParseNormalizedNamed(ref)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse %s reference: %w", name, err)
+	}
+	if err := resolution.ValidatePinnedReference(named.String()); err != nil {
+		return "", nil, fmt.Errorf("validate %s reference: %w", name, err)
+	}
+	requested, ok := named.(reference.Digested)
+	if !ok {
+		return "", nil, fmt.Errorf("validate %s reference: digest-pinned identity is required", name)
+	}
+	metadata, err := client.ResolveSourceMetadata(ctx, &pb.SourceOp{Identifier: "docker-image://" + named.String()}, sourceresolver.Opt{
+		LogName: "load " + name + " metadata",
+		ImageOpt: &sourceresolver.ResolveImageOpt{
+			Platform:         &p,
+			ResolveMode:      mode,
+			AttestationChain: true,
+		},
+	})
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve %s: %w", name, err)
 	}
-	if resolved == "" || manifest == "" {
+	if metadata == nil || metadata.Op == nil || metadata.Image == nil {
 		return "", nil, fmt.Errorf("resolve %s returned no immutable identity", name)
 	}
-	named, err := reference.ParseNormalizedNamed(resolved)
+	const imageScheme = "docker-image://"
+	if !strings.HasPrefix(metadata.Op.Identifier, imageScheme) {
+		return "", nil, fmt.Errorf("resolve %s returned non-image identity %q", name, metadata.Op.Identifier)
+	}
+	resolvedIdentity := strings.TrimPrefix(metadata.Op.Identifier, imageScheme)
+	named, err = reference.ParseNormalizedNamed(resolvedIdentity)
 	if err != nil {
 		return "", nil, fmt.Errorf("parse resolved %s reference: %w", name, err)
 	}
-	resolved = reference.TrimNamed(named).String() + "@" + manifest.String()
+	if err := resolution.ValidatePinnedReference(named.String()); err != nil {
+		return "", nil, fmt.Errorf("validate resolved %s reference: %w", name, err)
+	}
+	resolvedSource, ok := named.(reference.Digested)
+	if !ok {
+		return "", nil, fmt.Errorf("validate resolved %s reference: digest-pinned identity is required", name)
+	}
+	if requested.Digest() != metadata.Image.Digest || resolvedSource.Digest() != metadata.Image.Digest {
+		return "", nil, fmt.Errorf("resolve %s returned an image identity that does not match the requested source", name)
+	}
+	manifest := metadata.Image.Digest
+	if chain := metadata.Image.AttestationChain; chain != nil {
+		if chain.Root == "" || chain.Root != metadata.Image.Digest {
+			return "", nil, fmt.Errorf("resolve %s returned an invalid index identity chain", name)
+		}
+		if chain.ImageManifest == "" {
+			return "", nil, fmt.Errorf("resolve %s returned no platform child identity", name)
+		}
+		manifest = chain.ImageManifest
+	}
+	resolved := reference.TrimNamed(named).String() + "@" + manifest.String()
+	if err := resolution.ValidatePinnedReference(resolved); err != nil {
+		return "", nil, fmt.Errorf("resolve %s returned invalid platform identity: %w", name, err)
+	}
 	var image dalec.DockerImageSpec
-	if err := json.Unmarshal(data, &image); err != nil {
+	if err := json.Unmarshal(metadata.Image.Config, &image); err != nil {
 		return "", nil, fmt.Errorf("decode %s image config: %w", name, err)
 	}
 	return resolved, &image, nil
