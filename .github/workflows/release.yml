@@ -1564,9 +1564,7 @@ jobs:
                       "homebrew_commit": core["commit"],
                       "signer": core["signer"],
                       "formula_digest": by_name["formula"]["digest"],
-                      "formula_envelope_digest": by_name["formula"]["envelope_digest"],
                       "migration_digest": by_name["migrations"]["digest"],
-                      "migration_envelope_digest": by_name["migrations"]["envelope_digest"],
                       "generated_at_source": core["generated_at_source"],
                       "rollback_policy": core["rollback"]["policy"],
                       "rollback_sequence_floor": core["rollback"]["sequence_floor"],
@@ -1580,6 +1578,8 @@ jobs:
                       "platform": platform,
                       "generated_at": core["generated_at"],
                       "core_generated_at_epoch": core_epoch,
+                      "formula_envelope_digest": by_name["formula"]["envelope_digest"],
+                      "migration_envelope_digest": by_name["migrations"]["envelope_digest"],
                       "resolution_source_date_epoch": resolution_epoch,
                   })
               except (KeyError, OSError, TypeError, ValueError) as exc:
@@ -1590,7 +1590,9 @@ jobs:
               raise SystemExit("signed homebrew/core generated_at differs across release integrations")
           accepted = min(observations, key=lambda item: (item["core_generated_at_epoch"], item["generated_at"]))
           snapshot = dict(reference_identity)
+          snapshot["formula_envelope_digest"] = accepted["formula_envelope_digest"]
           snapshot["generated_at"] = accepted["generated_at"]
+          snapshot["migration_envelope_digest"] = accepted["migration_envelope_digest"]
           snapshot["source_date_epoch"] = accepted["core_generated_at_epoch"]
           document = {
               "schema_version": "dalec-homebrew-release-metadata/v2",
@@ -2112,10 +2114,15 @@ jobs:
             .accepted_snapshot.signer.verified == true and
             (.observations | type == "array" and length > 0) and
             all(.observations[];
-              (keys == ["core_generated_at_epoch", "generated_at", "platform", "resolution_source_date_epoch", "spec"]) and
+              (keys == [
+                "core_generated_at_epoch", "formula_envelope_digest", "generated_at",
+                "migration_envelope_digest", "platform", "resolution_source_date_epoch", "spec"
+              ]) and
               (.spec | type == "string" and length > 0) and
               (.platform == "linux/amd64" or .platform == "linux/arm64") and
               (.generated_at | type == "string" and length > 0) and
+              (.formula_envelope_digest | sha256) and
+              (.migration_envelope_digest | sha256) and
               (.core_generated_at_epoch | type == "number" and . > 0 and . == floor) and
               (.resolution_source_date_epoch | type == "number" and . > 0 and . == floor))
           ' dist/release/metadata-snapshot.json >/dev/null
@@ -2162,8 +2169,14 @@ jobs:
           accepted = document["accepted_snapshot"]
           accepted_epoch = epoch(accepted["generated_at"], "accepted metadata generated_at")
           earliest = min(observations, key=lambda item: (item["core_generated_at_epoch"], item["generated_at"]))
-          if accepted["generated_at"] != earliest["generated_at"] or accepted["source_date_epoch"] != accepted_epoch or accepted_epoch != earliest["core_generated_at_epoch"]:
-              raise SystemExit("accepted metadata timestamp is not the earliest observed core timestamp")
+          if (
+              accepted["generated_at"] != earliest["generated_at"]
+              or accepted["source_date_epoch"] != accepted_epoch
+              or accepted_epoch != earliest["core_generated_at_epoch"]
+              or accepted["formula_envelope_digest"] != earliest["formula_envelope_digest"]
+              or accepted["migration_envelope_digest"] != earliest["migration_envelope_digest"]
+          ):
+              raise SystemExit("accepted metadata snapshot is not the earliest observed core snapshot")
           observed_values = {item["generated_at"] for item in observations}
           if len(observed_values) != 1 and accepted["generated_at_source"] != "http-last-modified":
               raise SystemExit("signed metadata generated_at differs across release integrations")

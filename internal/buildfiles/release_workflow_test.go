@@ -1129,6 +1129,10 @@ func TestReleaseWorkflowMetadataReconciliationContract(t *testing.T) {
 		`"schema_version": "dalec-homebrew-release-metadata/v2"`,
 		`reference_identity["generated_at_source"] != "http-last-modified"`,
 		`"authenticated homebrew/core metadata identity differs across release integrations"`,
+		`"formula_envelope_digest": by_name["formula"]["envelope_digest"]`,
+		`"migration_envelope_digest": by_name["migrations"]["envelope_digest"]`,
+		`snapshot["formula_envelope_digest"] = accepted["formula_envelope_digest"]`,
+		`snapshot["migration_envelope_digest"] = accepted["migration_envelope_digest"]`,
 		`"observations": observations`,
 		`accepted = min(observations`,
 	} {
@@ -1291,6 +1295,16 @@ func TestReleaseWorkflowRuntimeEvidenceValidation(t *testing.T) {
 	coreSource := func(record map[string]any) map[string]any {
 		return record["metadata_sources"].([]any)[0].(map[string]any)
 	}
+	envelopeDigest := func(record map[string]any, name string) string {
+		for _, raw := range coreSource(record)["documents"].([]any) {
+			document := raw.(map[string]any)
+			if document["name"] == name {
+				return document["envelope_digest"].(string)
+			}
+		}
+		t.Fatalf("record has no %s metadata document", name)
+		return ""
+	}
 	makeNoncoreRecord := func() map[string]any {
 		record := makeRecord("linux/amd64", "2026-08-03T00:00:00Z", 1785715200)
 		record["metadata_sources"] = append(record["metadata_sources"].([]any), map[string]any{
@@ -1374,6 +1388,14 @@ func TestReleaseWorkflowRuntimeEvidenceValidation(t *testing.T) {
 				coreSource(records["linux/arm64"])["generated_at"] = "2026-08-03T00:00:01Z"
 				coreSource(records["linux/arm64"])["sequence"] = int64(1785715201)
 				records["linux/arm64"]["source_date_epoch"] = int64(1785715201)
+			},
+		},
+		{
+			name: "verified metadata envelope drift",
+			mutate: func(records map[string]map[string]any) {
+				documents := coreSource(records["linux/arm64"])["documents"].([]any)
+				documents[0].(map[string]any)["envelope_digest"] = digest("e")
+				documents[1].(map[string]any)["envelope_digest"] = digest("f")
 			},
 		},
 		{
@@ -1552,13 +1574,17 @@ func TestReleaseWorkflowRuntimeEvidenceValidation(t *testing.T) {
 			var snapshot struct {
 				SchemaVersion    string `json:"schema_version"`
 				AcceptedSnapshot struct {
-					GeneratedAt     string `json:"generated_at"`
-					SourceDateEpoch int64  `json:"source_date_epoch"`
+					FormulaEnvelopeDigest   string `json:"formula_envelope_digest"`
+					GeneratedAt             string `json:"generated_at"`
+					MigrationEnvelopeDigest string `json:"migration_envelope_digest"`
+					SourceDateEpoch         int64  `json:"source_date_epoch"`
 				} `json:"accepted_snapshot"`
 				Observations []struct {
 					Spec                      string `json:"spec"`
 					Platform                  string `json:"platform"`
+					FormulaEnvelopeDigest     string `json:"formula_envelope_digest"`
 					GeneratedAt               string `json:"generated_at"`
+					MigrationEnvelopeDigest   string `json:"migration_envelope_digest"`
 					CoreGeneratedAtEpoch      int64  `json:"core_generated_at_epoch"`
 					ResolutionSourceDateEpoch int64  `json:"resolution_source_date_epoch"`
 				} `json:"observations"`
@@ -1575,6 +1601,12 @@ func TestReleaseWorkflowRuntimeEvidenceValidation(t *testing.T) {
 			if snapshot.AcceptedSnapshot.SourceDateEpoch != 1785715200 {
 				t.Fatalf("accepted snapshot epoch = %d", snapshot.AcceptedSnapshot.SourceDateEpoch)
 			}
+			if got, want := snapshot.AcceptedSnapshot.FormulaEnvelopeDigest, envelopeDigest(records["linux/amd64"], "formula"); got != want {
+				t.Fatalf("accepted formula envelope digest = %q, want %q", got, want)
+			}
+			if got, want := snapshot.AcceptedSnapshot.MigrationEnvelopeDigest, envelopeDigest(records["linux/amd64"], "migrations"); got != want {
+				t.Fatalf("accepted migrations envelope digest = %q, want %q", got, want)
+			}
 			if len(snapshot.Observations) != 3 ||
 				snapshot.Observations[0].Spec != "live-test" || snapshot.Observations[0].Platform != "linux/amd64" ||
 				snapshot.Observations[1].Spec != "live-test" || snapshot.Observations[1].Platform != "linux/arm64" ||
@@ -1583,6 +1615,12 @@ func TestReleaseWorkflowRuntimeEvidenceValidation(t *testing.T) {
 			}
 			if got, want := snapshot.Observations[1].GeneratedAt, coreSource(records["linux/arm64"])["generated_at"]; got != want {
 				t.Fatalf("arm64 metadata observation = %q, want %q", got, want)
+			}
+			if got, want := snapshot.Observations[1].FormulaEnvelopeDigest, envelopeDigest(records["linux/arm64"], "formula"); got != want {
+				t.Fatalf("arm64 formula envelope digest = %q, want %q", got, want)
+			}
+			if got, want := snapshot.Observations[1].MigrationEnvelopeDigest, envelopeDigest(records["linux/arm64"], "migrations"); got != want {
+				t.Fatalf("arm64 migrations envelope digest = %q, want %q", got, want)
 			}
 		})
 	}

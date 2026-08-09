@@ -71,12 +71,16 @@ new signed tuple cannot downgrade the timestamp trust evidence.
 
 Release integrations may fetch the same authenticated documents on independent
 runners. Signing therefore requires identical Homebrew commit, signer, payload
-digests, envelope digests, and rollback identity across every observation.
-Signed-payload timestamps must also be byte-for-byte identical. Only when the
-V2 record identifies the aggregate timestamp as `http-last-modified` may
-those unsigned timestamps differ; the signed release evidence retains every
-observation and selects the earliest one deterministically. This exception does
-not permit payload, envelope, signer, commit, or rollback drift.
+digests, and rollback identity across every observation. PS512 uses randomized
+RSA-PSS signatures, so independently issued valid envelopes for the same
+payload may have different envelope digests. Every envelope digest remains
+required and is retained with its observation; the accepted snapshot takes its
+envelope pair from the same deterministic observation as its timestamp.
+Signed-payload timestamps must be byte-for-byte identical. Only when the V2
+record identifies the aggregate timestamp as `http-last-modified` may those
+unsigned timestamps differ; the signed release evidence retains every
+observation and selects the earliest one deterministically. These exceptions do
+not permit payload, signer, commit, or rollback drift.
 
 Callers may supply a metadata rollback floor, but the repository release workflow does not persist one across releases. For release-bound frontends, it limits metadata age to seven days and future skew to 15 minutes, requires every release integration to use the same authenticated snapshot, and records that snapshot in signed evidence. This is not cross-release anti-rollback: a previously superseded but still-fresh signed snapshot may be accepted by a later release.
 
