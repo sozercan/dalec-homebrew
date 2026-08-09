@@ -122,6 +122,19 @@ func TestRunRejectsIncompleteV2Inputs(t *testing.T) {
 	}
 }
 
+func TestRunRequiresMetadataBundleDigestForNewV2Manifest(t *testing.T) {
+	args := withoutFlag(validV2Args(t), "--metadata-bundle-digest")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run(args, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "--metadata-bundle-digest is required") {
+		t.Fatalf("err = %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
 func TestRunRejectsUnsupportedSchemaVersion(t *testing.T) {
 	args := append(validArgs(), "--schema-version", "v3")
 	var stdout bytes.Buffer
@@ -218,6 +231,7 @@ func validV2Args(t *testing.T) []string {
 	}
 	return append(validArgs(),
 		"--schema-version", "v2",
+		"--metadata-bundle-digest", "sha256:"+strings.Repeat("0", 64),
 		"--bottle-fetcher-index", pinned("ghcr.io/example/bottle-fetcher", 'a'),
 		"--bottle-fetcher-amd64", pinned("ghcr.io/example/bottle-fetcher", 'b'),
 		"--bottle-fetcher-arm64", pinned("ghcr.io/example/bottle-fetcher", 'c'),
@@ -261,6 +275,7 @@ func canonicalV2Manifest(t *testing.T) []byte {
 		HomebrewCommit:                 strings.Repeat("b", 40),
 		PortableRubyVersion:            "4.0.6",
 		VerificationKeysDigest:         "sha256:" + strings.Repeat("a", 64),
+		MetadataBundleDigest:           "sha256:" + strings.Repeat("0", 64),
 		DalecModule:                    "v0.21.5",
 		BuildKitModule:                 "v0.31.2",
 		TapPolicyDigest:                tapDigest,

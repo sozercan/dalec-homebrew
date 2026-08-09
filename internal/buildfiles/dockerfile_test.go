@@ -64,7 +64,7 @@ func TestFrontendImageContainsOnlyGatewayAndCABundle(t *testing.T) {
 		"COPY --from=ca-bundle /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt",
 		"COPY --from=helper-build /out/frontend-rootfs/ /",
 		"COPY --from=frontend-build /out/dalec-homebrew-frontend /dalec-homebrew-frontend",
-		`moby.buildkit.frontend.caps="moby.buildkit.frontend.inputs,moby.buildkit.frontend.subrequests"`,
+		`moby.buildkit.frontend.caps="moby.buildkit.frontend.inputs,moby.buildkit.frontend.subrequests,moby.buildkit.frontend.contexts"`,
 		`ENTRYPOINT ["/dalec-homebrew-frontend"]`,
 	} {
 		if !strings.Contains(stage, want) {
@@ -202,6 +202,8 @@ func TestV2ComponentImagesAreExplicitAndMinimal(t *testing.T) {
 func TestFrontendBuildBindsCompleteNonCoreTuple(t *testing.T) {
 	stage := dockerfileStage(t, dockerfileText(t), "FROM go-source AS frontend-build")
 	for _, want := range []string{
+		"ARG METADATA_BUNDLE_DIGEST",
+		"internal/config.MetadataBundleDigest=${METADATA_BUNDLE_DIGEST}",
 		"internal/config.BottleFetcherRef=${BOTTLE_FETCHER_REF}",
 		"internal/config.CatalogExtractorRef=${CATALOG_EXTRACTOR_REF}",
 		"internal/config.TapPolicyDigest=${TAP_POLICY_DIGEST}",

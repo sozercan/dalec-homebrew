@@ -36,6 +36,7 @@ const (
 	TapPolicyDigestBuildArg                   = "DALEC_HOMEBREW_TAP_POLICY_DIGEST"
 	ExecutableRuntimePolicyDigestBuildArg     = "DALEC_HOMEBREW_EXECUTABLE_RUNTIME_POLICY_DIGEST"
 	FrontendIndexRefBuildArg                  = "DALEC_HOMEBREW_FRONTEND_INDEX_REF"
+	MetadataBundleDigestBuildArg              = "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST"
 	SupportedCatalogPolicyVersionsBuildArg    = "DALEC_HOMEBREW_SUPPORTED_CATALOG_POLICY_VERSIONS"
 	SupportedFetchPolicyVersionsBuildArg      = "DALEC_HOMEBREW_SUPPORTED_FETCH_POLICY_VERSIONS"
 	SupportedProvenancePolicyVersionsBuildArg = "DALEC_HOMEBREW_SUPPORTED_PROVENANCE_POLICY_VERSIONS"
@@ -59,6 +60,7 @@ var dalecBuildArgs = []string{
 	IngestionJWSKeyPolicyDigestBuildArg,
 	"DALEC_HOMEBREW_KEYS_DIGEST",
 	"DALEC_HOMEBREW_MATERIALIZER",
+	MetadataBundleDigestBuildArg,
 	"DALEC_HOMEBREW_METADATA_MAX_AGE",
 	"DALEC_HOMEBREW_METADATA_NOT_BEFORE",
 	"DALEC_HOMEBREW_METADATA_URL",
@@ -90,6 +92,7 @@ var (
 	MaterializerRef        string
 	FrontendRef            string
 	HomebrewCommit         string
+	MetadataBundleDigest   string
 	VerificationKeysDigest string
 	PortableRubyVersion    string
 
@@ -119,6 +122,7 @@ type Config struct {
 	FrontendIndexRef       string
 	FrontendRef            string
 	HomebrewCommit         string
+	MetadataBundleDigest   string
 	VerificationKeysDigest string
 	PortableRubyVersion    string
 	SkipTests              bool
@@ -213,6 +217,20 @@ func FromBuildOpts(opts map[string]string) (Config, error) {
 		SupportedProvenancePolicyVersions: provenancePolicyVersions,
 
 		compiledNonCoreTaps: SupportsCompiledNonCoreTaps(),
+	}
+	suppliedMetadataBundleDigest := opts["build-arg:"+MetadataBundleDigestBuildArg]
+	if MetadataBundleDigest == "" {
+		if suppliedMetadataBundleDigest != "" {
+			errs = append(errs, errors.New("compiled metadata bundle digest is required when a runtime binding is supplied"))
+		}
+	} else if err := validateDigest(MetadataBundleDigest); err != nil {
+		errs = append(errs, fmt.Errorf("compiled metadata bundle digest: %w", err))
+	} else if suppliedMetadataBundleDigest == "" {
+		errs = append(errs, fmt.Errorf("%s is required for release-bound frontends", MetadataBundleDigestBuildArg))
+	} else if suppliedMetadataBundleDigest != MetadataBundleDigest {
+		errs = append(errs, fmt.Errorf("%s differs from the release-bound value", MetadataBundleDigestBuildArg))
+	} else {
+		cfg.MetadataBundleDigest = MetadataBundleDigest
 	}
 	if source := opts["source"]; source != "" && cfg.FrontendRef != source {
 		errs = append(errs, errors.New("frontend binding differs from the invoking gateway source"))
@@ -459,6 +477,7 @@ func compiledReleaseBound() bool {
 	return RuntimeBaseRef != "" ||
 		MaterializerRef != "" ||
 		HomebrewCommit != "" ||
+		MetadataBundleDigest != "" ||
 		VerificationKeysDigest != "" ||
 		BottleFetcherRef != "" ||
 		CatalogExtractorRef != "" ||

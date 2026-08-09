@@ -26,6 +26,7 @@ func resetCompiledBindings(t *testing.T) {
 	oldMaterializerRef := MaterializerRef
 	oldFrontendRef := FrontendRef
 	oldHomebrewCommit := HomebrewCommit
+	oldMetadataBundleDigest := MetadataBundleDigest
 	oldVerificationKeysDigest := VerificationKeysDigest
 	oldPortableRubyVersion := PortableRubyVersion
 	oldBottleFetcherRef := BottleFetcherRef
@@ -43,6 +44,7 @@ func resetCompiledBindings(t *testing.T) {
 		MaterializerRef = oldMaterializerRef
 		FrontendRef = oldFrontendRef
 		HomebrewCommit = oldHomebrewCommit
+		MetadataBundleDigest = oldMetadataBundleDigest
 		VerificationKeysDigest = oldVerificationKeysDigest
 		PortableRubyVersion = oldPortableRubyVersion
 		BottleFetcherRef = oldBottleFetcherRef
@@ -60,6 +62,7 @@ func resetCompiledBindings(t *testing.T) {
 	MaterializerRef = ""
 	FrontendRef = ""
 	HomebrewCommit = ""
+	MetadataBundleDigest = ""
 	VerificationKeysDigest = ""
 	PortableRubyVersion = ""
 	BottleFetcherRef = ""
@@ -217,6 +220,46 @@ func TestFromBuildOpts(t *testing.T) {
 	}
 	if cfg.SupportsNonCoreTaps() {
 		t.Fatal("V1 local config unexpectedly supports non-core taps")
+	}
+}
+
+func TestMetadataBundleDigestOptIn(t *testing.T) {
+	tests := []struct {
+		name     string
+		compiled string
+		supplied string
+		want     string
+		wantErr  string
+	}{
+		{name: "unbound local frontend uses live metadata"},
+		{name: "matching release binding", compiled: testDigestA, supplied: testDigestA, want: testDigestA},
+		{name: "compiled release binding is required", compiled: testDigestA, wantErr: MetadataBundleDigestBuildArg},
+		{name: "runtime binding without compiled value", supplied: testDigestA, wantErr: "compiled metadata bundle digest"},
+		{name: "malformed release binding", compiled: "not-a-digest", supplied: "not-a-digest", wantErr: "compiled metadata bundle digest"},
+		{name: "mismatched release binding", compiled: testDigestA, supplied: testDigestB, wantErr: MetadataBundleDigestBuildArg},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetCompiledBindings(t)
+			MetadataBundleDigest = tt.compiled
+			opts := localV1BuildOpts()
+			if tt.supplied != "" {
+				opts["build-arg:"+MetadataBundleDigestBuildArg] = tt.supplied
+			}
+			cfg, err := FromBuildOpts(opts)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error=%v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.MetadataBundleDigest != tt.want {
+				t.Fatalf("metadata bundle digest=%q, want %q", cfg.MetadataBundleDigest, tt.want)
+			}
+		})
 	}
 }
 

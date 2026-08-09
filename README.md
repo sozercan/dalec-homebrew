@@ -36,6 +36,20 @@ Use the exact digests from trusted release evidence. The repository binding in
 [`release/dalec-frontend.json`](release/dalec-frontend.json) records the upstream
 Dalec index, its Linux platform children, and the fixed `homebrew/image` route.
 
+Released child frontends also require the exact authenticated Homebrew metadata
+bundle from the same release. First verify the release's signed `SHA256SUMS`,
+then reconstruct the three-file named context and verify its manifest digest:
+
+```console
+RELEASE_ASSETS=/path/to/verified/release-assets
+DALEC_HOMEBREW_METADATA_BUNDLE=$(mktemp -d)
+install -m 0444 "$RELEASE_ASSETS/metadata-bundle-manifest.json" "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json"
+install -m 0444 "$RELEASE_ASSETS/metadata-formula.jws.json" "$DALEC_HOMEBREW_METADATA_BUNDLE/formula.jws.json"
+install -m 0444 "$RELEASE_ASSETS/metadata-migrations.jws.json" "$DALEC_HOMEBREW_METADATA_BUNDLE/formula_tap_migrations.jws.json"
+DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$(tr -d '\n' < "$RELEASE_ASSETS/metadata-bundle.digest")
+test "$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" = "sha256:$(sha256sum "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json" | awk '{print $1}')"
+```
+
 ### Build from the command line through upstream Dalec
 
 Build from stdin through upstream Dalec with `jq`:
@@ -53,6 +67,8 @@ jq -nc --arg child_frontend "$DALEC_HOMEBREW_CHILD" '{
   docker buildx build \
     --build-arg "BUILDKIT_SYNTAX=$DALEC_FRONTEND" \
     --build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX" \
+    --build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" \
+    --build-context "dalec-homebrew-metadata=$DALEC_HOMEBREW_METADATA_BUNDLE" \
     --target homebrew/image \
     --platform linux/amd64 \
     --tag hello-runtime:inline \
@@ -90,6 +106,8 @@ DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-inde
 
 docker buildx build \
   --build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX" \
+  --build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" \
+  --build-context "dalec-homebrew-metadata=$DALEC_HOMEBREW_METADATA_BUNDLE" \
   --target homebrew/image \
   --platform linux/amd64 \
   --file hello.yaml \

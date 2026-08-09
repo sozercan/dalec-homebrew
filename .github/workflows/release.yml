@@ -531,6 +531,23 @@ jobs:
           [[ $(platform_digest "$materializer_repo@$materializer_index" linux/amd64) == "$materializer_amd64" ]]
           [[ $(platform_digest "$materializer_repo@$materializer_index" linux/arm64) == "$materializer_arm64" ]]
 
+          go run ./cmd/metadata-bundle \
+            --output dist/release/metadata-bundle \
+            --digest-output dist/release/metadata-bundle.digest
+          METADATA_BUNDLE_DIGEST=$(<dist/release/metadata-bundle.digest)
+          [[ "$METADATA_BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          actual_metadata_bundle_digest="sha256:$(sha256sum dist/release/metadata-bundle/manifest.json | awk '{print $1}')"
+          [[ "$actual_metadata_bundle_digest" == "$METADATA_BUNDLE_DIGEST" ]] || {
+            echo "metadata bundle digest does not match its canonical manifest" >&2
+            exit 1
+          }
+          inputs_candidate=$(mktemp dist/release/inputs.json.XXXXXX)
+          jq --arg digest "$METADATA_BUNDLE_DIGEST" \
+            '.metadata_bundle_digest = $digest' \
+            dist/release/inputs.json > "$inputs_candidate"
+          mv "$inputs_candidate" dist/release/inputs.json
+          export METADATA_BUNDLE_DIGEST
+
           export RUNTIME_BASE_REF_AMD64="$runtime_base_repo@$runtime_base_amd64"
           export RUNTIME_BASE_REF_ARM64="$runtime_base_repo@$runtime_base_arm64"
           export MATERIALIZER_REF_AMD64="$materializer_repo@$materializer_amd64"
@@ -669,6 +686,7 @@ jobs:
             --homebrew-commit "$(jq -er .homebrew_commit dist/release/inputs.json)" \
             --portable-ruby-version "$(jq -er .portable_ruby_version dist/release/inputs.json)" \
             --verification-keys-digest "$(jq -er .verification_keys_digest dist/release/inputs.json)" \
+            --metadata-bundle-digest "$(jq -er .metadata_bundle_digest dist/release/inputs.json)" \
             --dalec-module "$(jq -er .dalec_module dist/release/inputs.json)" \
             --buildkit-module "$(jq -er .buildkit_module dist/release/inputs.json)" \
             --tap-policy-digest "$(jq -er .tap_policy_digest "$RUNNER_TEMP/v2-bindings.json")" \
@@ -783,6 +801,7 @@ jobs:
             DALEC_HOMEBREW_LIVE_FRONTEND_REF="$frontend_ref" \
             DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF="$dalec_frontend_ref" \
             DALEC_HOMEBREW_LIVE_TARGET="$dalec_frontend_route" \
+            DALEC_HOMEBREW_LIVE_METADATA_BUNDLE="$PWD/dist/release/metadata-bundle" \
             DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH="$source_date_epoch" \
             DALEC_HOMEBREW_LIVE_IMAGE="$final_image" \
             DALEC_HOMEBREW_LIVE_OUTPUT=load \
@@ -1058,6 +1077,18 @@ jobs:
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
     steps:
+      - name: Check out trusted verifier source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
       - name: Install checksum-pinned Buildx
         run: *install-buildx
 
@@ -1724,6 +1755,7 @@ jobs:
                 parameters: {
                   tag: $tag,
                   source_date_epoch: $inputs[0].source_date_epoch,
+                  metadata_bundle_digest: $inputs[0].metadata_bundle_digest,
                   dalec_frontend: $inputs[0].dalec_frontend,
                   buildx_version: env.BUILDX_VERSION,
                   buildx_sha256_amd64: env.BUILDX_SHA256_AMD64,
@@ -1800,6 +1832,45 @@ jobs:
                   raise SystemExit(f"{path}: invalid strict JSON: {exc}")
           PYJSON
 
+          nested_manifest=dist/release/metadata-bundle/manifest.json
+          nested_formula=dist/release/metadata-bundle/formula.jws.json
+          nested_migrations=dist/release/metadata-bundle/formula_tap_migrations.jws.json
+          flat_manifest=dist/release/metadata-bundle-manifest.json
+          flat_formula=dist/release/metadata-formula.jws.json
+          flat_migrations=dist/release/metadata-migrations.jws.json
+          nested_count=0
+          flat_count=0
+          for path in "$nested_manifest" "$nested_formula" "$nested_migrations"; do
+            [[ ! -e "$path" && ! -L "$path" ]] || ((nested_count += 1))
+          done
+          for path in "$flat_manifest" "$flat_formula" "$flat_migrations"; do
+            [[ ! -e "$path" && ! -L "$path" ]] || ((flat_count += 1))
+          done
+          if (( nested_count == 3 && flat_count == 0 )); then
+            metadata_bundle_manifest=$nested_manifest
+            metadata_bundle_formula=$nested_formula
+            metadata_bundle_migrations=$nested_migrations
+          elif (( nested_count == 0 && flat_count == 3 )); then
+            metadata_bundle_manifest=$flat_manifest
+            metadata_bundle_formula=$flat_formula
+            metadata_bundle_migrations=$flat_migrations
+          else
+            echo "release must contain exactly one complete nested or flattened metadata bundle" >&2
+            exit 1
+          fi
+          [[ -f dist/release/metadata-bundle.digest && ! -L dist/release/metadata-bundle.digest ]]
+          mapfile -t metadata_bundle_digest_lines < dist/release/metadata-bundle.digest
+          (( ${#metadata_bundle_digest_lines[@]} == 1 ))
+          metadata_bundle_digest=${metadata_bundle_digest_lines[0]}
+          [[ "$metadata_bundle_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          metadata_bundle_verification=$(mktemp "$RUNNER_TEMP/metadata-bundle-verification.XXXXXX.json")
+          go run ./cmd/metadata-bundle verify \
+            --manifest "$metadata_bundle_manifest" \
+            --formula "$metadata_bundle_formula" \
+            --migrations "$metadata_bundle_migrations" \
+            --expected-digest "$metadata_bundle_digest" \
+            > "$metadata_bundle_verification"
+
           jq -e '
             def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
             def hex256: type == "string" and test("^[0-9a-f]{64}$");
@@ -1807,7 +1878,7 @@ jobs:
             (.dalec_frontend.index
               | capture("^(?<repository>[^@]+)@sha256:(?<digest>[0-9a-f]{64})$")) as $dalec_frontend_index
             | (keys == ["builder", "buildkit_module", "dalec_frontend", "dalec_module",
-              "homebrew_archive_sha256", "homebrew_commit", "portable_ruby_version",
+              "homebrew_archive_sha256", "homebrew_commit", "metadata_bundle_digest", "portable_ruby_version",
               "schema_version", "source_date_epoch", "ubuntu_base", "ubuntu_snapshot",
               "verification_keys_digest"]) and
             .schema_version == "dalec-homebrew-release-inputs/v2" and
@@ -1828,6 +1899,7 @@ jobs:
             (.homebrew_archive_sha256 | hex256) and
             (.portable_ruby_version | type == "string" and length > 0) and
             (.verification_keys_digest | sha256) and
+            (.metadata_bundle_digest | sha256) and
             (.dalec_module | type == "string" and length > 0) and
             (.buildkit_module | type == "string" and length > 0) and
             ((.dalec_frontend | keys) == ["index", "module", "platforms", "route", "schema_version"]) and
@@ -2001,7 +2073,7 @@ jobs:
               "schema_version", "policy_version", "frontend", "runtime_base",
               "materializer", "bottle_fetcher", "catalog_extractor",
               "homebrew_commit", "portable_ruby_version",
-              "verification_keys_digest", "dalec_module", "buildkit_module",
+              "verification_keys_digest", "metadata_bundle_digest", "dalec_module", "buildkit_module",
               "tap_policy_digest", "executable_runtime_policy_digest",
               "supported_catalog_policy_versions", "supported_fetch_policy_versions",
               "supported_provenance_policy_versions",
@@ -2018,6 +2090,7 @@ jobs:
               "homebrew_commit": require_string(manifest["homebrew_commit"], "homebrew_commit"),
               "portable_ruby_version": require_string(manifest["portable_ruby_version"], "portable_ruby_version"),
               "verification_keys_digest": require_string(manifest["verification_keys_digest"], "verification_keys_digest"),
+              "metadata_bundle_digest": require_string(manifest["metadata_bundle_digest"], "metadata_bundle_digest"),
               "dalec_module": require_string(manifest["dalec_module"], "dalec_module"),
               "buildkit_module": require_string(manifest["buildkit_module"], "buildkit_module"),
               "tap_policy_digest": require_string(manifest["tap_policy_digest"], "tap_policy_digest"),
@@ -2065,6 +2138,7 @@ jobs:
             .homebrew_commit == $inputs[0].homebrew_commit and
             .portable_ruby_version == $inputs[0].portable_ruby_version and
             .verification_keys_digest == $inputs[0].verification_keys_digest and
+            .metadata_bundle_digest == $inputs[0].metadata_bundle_digest and
             .dalec_module == $inputs[0].dalec_module and
             .buildkit_module == $inputs[0].buildkit_module and
             .tap_policy_digest == "sha256:9f5b47c9d241dc16464dd81c350fc6c7755fa35c992bc821e6c3927573a3f217" and
@@ -2083,8 +2157,16 @@ jobs:
           jq -e \
             --arg tag "$RELEASE_TAG" \
             --arg sha "$RELEASE_SHA" \
-            --slurpfile inputs dist/release/inputs.json '
+            --slurpfile inputs dist/release/inputs.json \
+            --slurpfile bundle "$metadata_bundle_verification" '
             def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
+            ($bundle[0].snapshot) as $bundle_snapshot
+            | ([$bundle_snapshot.formula.signatures[] | select(.verified == true)] | first) as $bundle_signer
+            | ($bundle[0].bundle_digest == $inputs[0].metadata_bundle_digest) and
+            $bundle_snapshot.schema_version == "homebrew-metadata-snapshot/v1" and
+            $bundle_snapshot.formula_digest == $bundle_snapshot.formula.payload_digest and
+            $bundle_snapshot.migration_digest == $bundle_snapshot.migrations.payload_digest and
+            ($bundle_signer | type == "object") and
             (keys == ["accepted_snapshot", "observations", "release", "schema_version"]) and
             .schema_version == "dalec-homebrew-release-metadata/v2" and
             (.release | keys) == ["sha", "tag"] and
@@ -2102,6 +2184,16 @@ jobs:
               .accepted_snapshot.formula_envelope_digest,
               .accepted_snapshot.migration_envelope_digest] | all(sha256)) and
             .accepted_snapshot.homebrew_commit == $inputs[0].homebrew_commit and
+            .accepted_snapshot.digest == $bundle_snapshot.digest and
+            .accepted_snapshot.formula_digest == $bundle_snapshot.formula_digest and
+            .accepted_snapshot.migration_digest == $bundle_snapshot.migration_digest and
+            .accepted_snapshot.formula_envelope_digest == $bundle_snapshot.formula.envelope_digest and
+            .accepted_snapshot.migration_envelope_digest == $bundle_snapshot.migrations.envelope_digest and
+            .accepted_snapshot.generated_at == $bundle_snapshot.generated_at and
+            .accepted_snapshot.generated_at_source ==
+              (if ($bundle_snapshot.formula.generated_at_source == "signed-payload" and
+                   $bundle_snapshot.migrations.generated_at_source == "signed-payload")
+               then "signed-payload" else "http-last-modified" end) and
             (.accepted_snapshot.generated_at | type == "string" and length > 0) and
             (.accepted_snapshot.generated_at_source == "signed-payload" or
               .accepted_snapshot.generated_at_source == "http-last-modified") and
@@ -2112,6 +2204,9 @@ jobs:
             (.accepted_snapshot.signer.key_id | type == "string" and length > 0) and
             .accepted_snapshot.signer.algorithm == "PS512" and
             .accepted_snapshot.signer.verified == true and
+            .accepted_snapshot.signer.key_id == $bundle_signer.key_id and
+            .accepted_snapshot.signer.algorithm == $bundle_signer.algorithm and
+            .accepted_snapshot.signer.verified == $bundle_signer.verified and
             (.observations | type == "array" and length > 0) and
             all(.observations[];
               (keys == [
@@ -2121,8 +2216,9 @@ jobs:
               (.spec | type == "string" and length > 0) and
               (.platform == "linux/amd64" or .platform == "linux/arm64") and
               (.generated_at | type == "string" and length > 0) and
-              (.formula_envelope_digest | sha256) and
-              (.migration_envelope_digest | sha256) and
+              .generated_at == $bundle_snapshot.generated_at and
+              .formula_envelope_digest == $bundle_snapshot.formula.envelope_digest and
+              .migration_envelope_digest == $bundle_snapshot.migrations.envelope_digest and
               (.core_generated_at_epoch | type == "number" and . > 0 and . == floor) and
               (.resolution_source_date_epoch | type == "number" and . > 0 and . == floor))
           ' dist/release/metadata-snapshot.json >/dev/null
@@ -2197,6 +2293,7 @@ jobs:
             .invocation.configSource.entryPoint == ".github/workflows/release.yml" and
             .invocation.parameters.tag == $tag and
             .invocation.parameters.source_date_epoch == $inputs[0].source_date_epoch and
+            .invocation.parameters.metadata_bundle_digest == $inputs[0].metadata_bundle_digest and
             .invocation.parameters.dalec_frontend == $inputs[0].dalec_frontend and
             .invocation.parameters.buildx_version == env.BUILDX_VERSION and
             .invocation.parameters.buildx_sha256_amd64 == env.BUILDX_SHA256_AMD64 and
@@ -2441,6 +2538,14 @@ jobs:
           find dist/release/evidence -maxdepth 1 -type f -exec mv {} dist/release/ \;
           find dist/release/runtime-evidence -maxdepth 1 -type f -exec mv {} dist/release/ \;
           rmdir dist/release/evidence dist/release/runtime-evidence
+          test -s dist/release/metadata-bundle/manifest.json
+          test -s dist/release/metadata-bundle/formula.jws.json
+          test -s dist/release/metadata-bundle/formula_tap_migrations.jws.json
+          test -s dist/release/metadata-bundle.digest
+          mv dist/release/metadata-bundle/manifest.json dist/release/metadata-bundle-manifest.json
+          mv dist/release/metadata-bundle/formula.jws.json dist/release/metadata-formula.jws.json
+          mv dist/release/metadata-bundle/formula_tap_migrations.jws.json dist/release/metadata-migrations.jws.json
+          rmdir dist/release/metadata-bundle
 
       - name: Sign release records
         run: |
@@ -2499,6 +2604,18 @@ jobs:
       RELEASE_STATE: ${{ needs.release_target.outputs.state }}
       STABLE: ${{ needs.prepare.outputs.stable }}
     steps:
+      - name: Check out trusted verifier source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
       - name: Download newly signed release bundle
         if: needs.release_target.outputs.state == 'absent'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -2587,6 +2704,10 @@ jobs:
               components.json.bundle \
               digests.json \
               inputs.json \
+              metadata-bundle.digest \
+              metadata-bundle-manifest.json \
+              metadata-formula.jws.json \
+              metadata-migrations.jws.json \
               metadata-snapshot.json \
               metadata-snapshot.json.bundle \
               provenance.json \
@@ -2607,7 +2728,7 @@ jobs:
               printf 'runtime-evidence-linux-amd64-%s.tar.gz\n' "$spec"
             done
           } | sort > "$contract_names"
-          expected_contract_count=$((30 + 2 * ${#specs[@]} + ${#amd64_only_specs[@]}))
+          expected_contract_count=$((34 + 2 * ${#specs[@]} + ${#amd64_only_specs[@]}))
           (( $(wc -l < "$contract_names") == expected_contract_count ))
           (
             cd dist/release

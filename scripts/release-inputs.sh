@@ -15,6 +15,10 @@ done
 
 release_registry=${REGISTRY:-ghcr.io/sozercan}
 release_version=${VERSION:-dev}
+metadata_bundle_digest=${METADATA_BUNDLE_DIGEST:-}
+if [[ -n "$metadata_bundle_digest" && ! "$metadata_bundle_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  fail "METADATA_BUNDLE_DIGEST must be empty or one sha256 digest"
+fi
 
 dalec_frontend_file=release/dalec-frontend.json
 dalec_frontend=$(python3 - "$dalec_frontend_file" <<'PYJSON'
@@ -148,7 +152,7 @@ if jq -e --argjson targets "$targets_json" '
 fi
 
 for target in frontend frontend-amd64 frontend-arm64; do
-  for name in FRONTEND_REF RUNTIME_BASE_REF MATERIALIZER_REF BOTTLE_FETCHER_REF CATALOG_EXTRACTOR_REF; do
+  for name in FRONTEND_REF RUNTIME_BASE_REF MATERIALIZER_REF BOTTLE_FETCHER_REF CATALOG_EXTRACTOR_REF METADATA_BUNDLE_DIGEST; do
     value=$(jq -r --arg target "$target" --arg name "$name" '.target[$target].args[$name] // ""' <<<"$bake")
     [[ -z "$value" ]] || fail "default $target $name must be empty; release CI supplies or derives the immutable reference"
   done
@@ -322,6 +326,7 @@ jq -n \
   --arg homebrew_commit "$homebrew_commit" \
   --arg portable_ruby_version "$portable_ruby_version" \
   --arg verification_keys_digest "$verification_keys_digest" \
+  --arg metadata_bundle_digest "$metadata_bundle_digest" \
   --arg dalec_module "$dalec_module" \
   --arg buildkit_module "$buildkit_module" \
   --argjson dalec_frontend "$dalec_frontend" \
@@ -348,6 +353,7 @@ jq -n \
     homebrew_archive_sha256: $homebrew_archive_sha256,
     portable_ruby_version: $portable_ruby_version,
     verification_keys_digest: $verification_keys_digest,
+    metadata_bundle_digest: $metadata_bundle_digest,
     dalec_module: $dalec_module,
     buildkit_module: $buildkit_module,
     dalec_frontend: $dalec_frontend

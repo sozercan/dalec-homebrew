@@ -80,6 +80,7 @@
   "homebrew_commit": "77d90328ca2f63ff4ec1f67de0ade5632f5d2335",
   "portable_ruby_version": "4.0.6",
   "verification_keys_digest": "sha256:ef2d2c9e0219d485df9f07fff7b037feadc36c93085be9ffefb1390f31a3de1d",
+  "metadata_bundle_digest": "sha256:<metadata-bundle-manifest-digest>",
   "dalec_module": "v0.21.5-0.20260728234020-5fa2c46d716b",
   "buildkit_module": "v0.31.2",
   "tap_policy_digest": "sha256:9f5b47c9d241dc16464dd81c350fc6c7755fa35c992bc821e6c3927573a3f217",

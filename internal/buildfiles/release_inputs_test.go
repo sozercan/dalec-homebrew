@@ -26,6 +26,7 @@ func TestReleaseInputsFixture(t *testing.T) {
 		HomebrewCommit         string            `json:"homebrew_commit"`
 		HomebrewArchiveSHA256  string            `json:"homebrew_archive_sha256"`
 		VerificationKeysDigest string            `json:"verification_keys_digest"`
+		MetadataBundleDigest   string            `json:"metadata_bundle_digest"`
 		DalecModule            string            `json:"dalec_module"`
 		BuildKitModule         string            `json:"buildkit_module"`
 		DalecFrontend          struct {
@@ -56,6 +57,9 @@ func TestReleaseInputsFixture(t *testing.T) {
 	}
 	if inputs.VerificationKeysDigest != testVerificationKeysDigest {
 		t.Fatalf("verification_keys_digest = %q", inputs.VerificationKeysDigest)
+	}
+	if inputs.MetadataBundleDigest != testMetadataBundleDigest {
+		t.Fatalf("metadata_bundle_digest = %q", inputs.MetadataBundleDigest)
 	}
 	if inputs.DalecModule != testDalecVersion || inputs.BuildKitModule != "v0.31.2" {
 		t.Fatalf("module versions = %q, %q", inputs.DalecModule, inputs.BuildKitModule)
@@ -276,6 +280,7 @@ const (
 	testHomebrewCommit         = "935053a12d38d62e59c467bf7f0f50dbc11cbcb6"
 	testHomebrewArchiveSHA256  = "09eafcf099e344f5c1a4040992a2e1add3789e9b553b9141ab14df9f727f8c6b"
 	testVerificationKeysDigest = "sha256:ef2d2c9e0219d485df9f07fff7b037feadc36c93085be9ffefb1390f31a3de1d"
+	testMetadataBundleDigest   = "sha256:5e3a2a5a96f35a3b310df1018b9004295802d6d2ce58d2b21ec94f6c46319f8d"
 	testDalecVersion           = "v0.21.5-0.20260728234020-5fa2c46d716b"
 	testDalecFrontendVersion   = "v0.21.5"
 	testDalecRoute             = "homebrew/image"
@@ -455,6 +460,7 @@ fi
 		"RELEASE_INPUTS_REAL_GO="+realGo,
 		"RELEASE_INPUTS_REPLACED_MODULE="+replacedModule,
 		"RELEASE_INPUTS_DALEC_MODULE_VERSION="+dalecModuleVersion,
+		"METADATA_BUNDLE_DIGEST="+testMetadataBundleDigest,
 	)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

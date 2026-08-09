@@ -52,6 +52,7 @@ func validV2(t *testing.T) *Manifest {
 	fetcher := testComponent("fetcher")
 	m.SchemaVersion = SchemaVersionV2
 	m.PolicyVersion = RuntimePolicyVersionV2
+	m.MetadataBundleDigest = "sha256:" + strings.Repeat("c", 64)
 	m.BottleFetcher = &fetcher
 	m.CatalogServiceOrigin = "https://catalog.example.com"
 	m.IngestionJWSKeyPolicyDigest = d
@@ -142,6 +143,7 @@ func TestV2RequiresCompleteBindings(t *testing.T) {
 		want   string
 	}{
 		{name: "fetcher", mutate: func(m *Manifest) { m.BottleFetcher = nil }, want: "bottle fetcher"},
+		{name: "invalid metadata bundle", mutate: func(m *Manifest) { m.MetadataBundleDigest = "sha256:nope" }, want: "metadata bundle"},
 		{name: "origin", mutate: func(m *Manifest) { m.CatalogServiceOrigin = "" }, want: "catalog service origin"},
 		{name: "ingestion policy", mutate: func(m *Manifest) { m.IngestionJWSKeyPolicyDigest = "" }, want: "ingestion JWS key policy"},
 		{name: "tap policy", mutate: func(m *Manifest) { m.TapPolicyDigest = "" }, want: "tap policy"},
@@ -161,6 +163,35 @@ func TestV2RequiresCompleteBindings(t *testing.T) {
 				t.Fatal("incomplete V2 manifest advertised non-core support")
 			}
 		})
+	}
+}
+
+func TestLegacyV2WithoutMetadataBundleDigestRemainsReplayable(t *testing.T) {
+	m := validV2(t)
+	m.MetadataBundleDigest = ""
+	canonical, err := Canonical(m)
+	if err != nil {
+		t.Fatalf("Canonical: %v", err)
+	}
+	if strings.Contains(string(canonical), "metadata_bundle_digest") {
+		t.Fatalf("legacy canonical manifest unexpectedly contains metadata bundle digest: %s", canonical)
+	}
+	decoded, err := Decode(strings.NewReader(string(canonical)))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !decoded.SupportsNonCoreTaps() {
+		t.Fatal("legacy V2 manifest no longer advertises its existing non-core capability")
+	}
+	bindings, err := decoded.BindingsFor(resolution.Platform{OS: "linux", Architecture: "amd64"})
+	if err != nil {
+		t.Fatalf("BindingsFor: %v", err)
+	}
+	if bindings.MetadataBundleDigest != "" {
+		t.Fatalf("legacy metadata bundle digest = %q, want empty", bindings.MetadataBundleDigest)
+	}
+	if _, err := Digest(decoded); err != nil {
+		t.Fatalf("Digest: %v", err)
 	}
 }
 
@@ -275,7 +306,7 @@ func TestBindingsForV2PreservesCompleteResolutionTuple(t *testing.T) {
 		t.Fatal(err)
 	}
 	components := bindings.ComponentsV2
-	if components.FrontendIndexRef != manifest.Frontend.Index || components.FrontendRef == "" || components.BottleFetcherRef != manifest.BottleFetcher.Index || bindings.BottleFetcherRef != manifest.BottleFetcher.Index || components.CatalogServiceOrigin != manifest.CatalogServiceOrigin || components.IngestionJWSKeyPolicyDigest != manifest.IngestionJWSKeyPolicyDigest || components.TapPolicyDigest != manifest.TapPolicyDigest || components.ExecutableRuntimePolicyDigest != manifest.ExecutableRuntimePolicyDigest {
+	if components.FrontendIndexRef != manifest.Frontend.Index || components.FrontendRef == "" || components.BottleFetcherRef != manifest.BottleFetcher.Index || bindings.BottleFetcherRef != manifest.BottleFetcher.Index || bindings.MetadataBundleDigest != manifest.MetadataBundleDigest || components.CatalogServiceOrigin != manifest.CatalogServiceOrigin || components.IngestionJWSKeyPolicyDigest != manifest.IngestionJWSKeyPolicyDigest || components.TapPolicyDigest != manifest.TapPolicyDigest || components.ExecutableRuntimePolicyDigest != manifest.ExecutableRuntimePolicyDigest {
 		t.Fatalf("V2 components dropped bindings: %+v", components)
 	}
 	if len(components.SupportedCatalogPolicyVersions) == 0 || len(components.SupportedFetchPolicyVersions) == 0 || len(components.SupportedProvenancePolicyVersions) == 0 {

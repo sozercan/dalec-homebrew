@@ -124,8 +124,11 @@ Build and publish components in this order:
 2. the immutable multi-platform runtime-base index
 3. bottle-fetcher and catalog-extractor platform children and indexes
 4. platform materializer children bound to the helper indexes and corresponding full Ubuntu children, then the materializer index
-5. the frontend, bound to the released base, materializer, helper, and policy identities
-6. the completed component manifest, after every index and child digest is known
+5. one verified Homebrew metadata bundle, captured before either frontend child,
+   with its digest retained as a release input
+6. the frontend, bound to the released base, materializer, helper, policy, and
+   metadata-bundle identities
+7. the completed component manifest, after every index and child digest is known
 
 [`../docker-bake.hcl`](../docker-bake.hcl) exposes the repository build targets. Signing, provenance, vulnerability scanning, OCI referrer publication, mirror retention, and promotion are release-pipeline responsibilities and are deliberately not performed by the frontend.
 
@@ -190,7 +193,13 @@ The example runtimes are integration fixtures and are not promoted.
    `glibc` regression bottle and the currently authenticated `glibc` bottle
    offline with each materializer child, then assemble and verify their
    immutable multi-platform indexes.
-4. Build the frontend with the complete V2 tuple bound; publish its platform children and index by digest; generate and verify the completed component manifest; run every core-focused runtime spec on native `amd64` and `arm64` workers; and run the release-owned non-core fixture through the published helper tuple while producing runtime evidence, component-child SPDX SBOMs, and vulnerability reports.
+4. Capture and verify one Homebrew metadata bundle, bind its digest into both
+   frontend children, publish the children and index by digest, generate and
+   verify the completed component manifest, run every core-focused runtime spec
+   on native `amd64` and `arm64` workers against that exact bundle, and run the
+   release-owned non-core fixture through the published helper tuple while
+   producing runtime evidence, component-child SPDX SBOMs, and vulnerability
+   reports.
 5. Sign all ten component children and five indexes, attach the exact SLSA predicate to every subject and the matching SPDX predicate to each child, then blob-sign the component manifest, accepted metadata snapshot, and checksum set.
 6. Resolve once, retain the signed metadata envelopes and resolution records, and mirror every selected layer by digest.
 7. Build platform runtime images, test and scan them by manifest digest, then assemble the final index from those exact manifests.
@@ -282,17 +291,19 @@ For a new tuple, the workflow:
    pinned upstream Dalec index contains the recorded `amd64` and `arm64`
    dispatcher children.
 2. Builds all `amd64` and `arm64` component children, smoke-tests the
-   runtime-base and materializer children, compiles each frontend child against
-   the matching platform children, assembles and verifies all five component
-   indexes, and generates and verifies the completed component manifest. The
-   published bottle-fetcher and catalog-extractor are exercised by the `amd64`
-   non-core integration in the next step.
+   runtime-base and materializer children, captures and verifies one Homebrew
+   metadata bundle, compiles its digest and the matching platform tuple into
+   each frontend child, assembles and verifies all five component indexes, and
+   generates and verifies the completed component manifest. The published
+   bottle-fetcher and catalog-extractor are exercised by the `amd64` non-core
+   integration in the next step.
 3. Runs every focused integration spec through the pinned platform-specific
-   upstream Dalec dispatcher on native `amd64` and `arm64` workers, requires one
-   authenticated Homebrew metadata identity across every spec and platform,
-   and additionally runs the non-core helper fixture on `amd64`. It produces
-   deterministic runtime evidence and separately generates SPDX SBOMs and
-   vulnerability reports for each component child. Fixed
+   upstream Dalec dispatcher on native `amd64` and `arm64` workers, supplies the
+   same captured metadata bundle to every solve, requires one authenticated
+   Homebrew metadata identity across every spec and platform, and additionally
+   runs the non-core helper fixture on `amd64`. It produces deterministic
+   runtime evidence and separately generates SPDX SBOMs and vulnerability
+   reports for each component child. Fixed
    `CRITICAL` findings are surfaced in the corresponding evidence job summary
    and retained in the reports without blocking the release.
 4. Generates provenance that includes the external dispatcher binding, signs
@@ -310,20 +321,18 @@ digest; the workflow creates only missing tags, verifies them, rechecks the
 draft, and then publishes it. It never rebuilds during promotion or publishes a
 `latest` tag.
 
-Every integration must report the same authenticated Homebrew commit, signer,
-payload digests, and rollback identity. Independently issued PS512 envelopes
-may have different digests because RSA-PSS signatures are randomized; the
-workflow still requires and retains both envelope digests with every
-spec/platform observation. When the controlling aggregate `generated_at` is
-fully signed, its timestamp must be identical. When either signed document
-lacks that field, independent runners may observe slightly different unsigned
-HTTP `Last-Modified` timestamps for the same authenticated bytes. The workflow
-deterministically selects the earliest observation for
-`metadata-snapshot.json`, including that observation's exact envelope pair; it
-does not treat the HTTP value or randomized envelope bytes as authenticated
-cross-run identity. The workflow does not compare the accepted snapshot with
-earlier releases. See [`../SECURITY.md`](../SECURITY.md) for the resulting trust
-and cross-release anti-rollback limitations.
+Every integration receives the same release-captured Formula and migration JWS
+envelopes. Their bundle digest is compiled into both frontend children and must
+also arrive as the top-level `DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST` build
+argument with the fixed `dalec-homebrew-metadata` context. Reconciliation still
+requires the same authenticated Homebrew commit, signer, payload digests, and
+rollback identity across every spec/platform observation and retains both
+envelope digests for each one. `metadata-snapshot.json` deterministically
+selects the earliest observation and binds its exact envelope pair. Another
+capture of the same PS512 payload can have different randomized signature
+bytes, but one release never mixes captures. The workflow does not compare the
+accepted snapshot with earlier releases. See [`../SECURITY.md`](../SECURITY.md)
+for the resulting trust and cross-release anti-rollback limitations.
 
 The GitHub `release` environment gates signing and promotion. Configure required
 reviewers, protect release-critical paths with branch rules, restrict release-tag
@@ -336,6 +345,8 @@ Release assets include:
 - `components.json`, `components.digest`, and `components.json.bundle`
 - `digests.json`, `inputs.json`, `metadata-snapshot.json`,
   `metadata-snapshot.json.bundle`, and `provenance.json`
+- `metadata-bundle.digest`, `metadata-bundle-manifest.json`,
+  `metadata-formula.jws.json`, and `metadata-migrations.jws.json`
 - ten per-component, per-platform SPDX SBOMs and ten vulnerability reports
 - one deterministic `runtime-evidence-<platform>-<spec>.tar.gz` archive for each
   common focused spec and platform, plus the `amd64` non-core helper fixture
