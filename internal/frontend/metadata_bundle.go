@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"slices"
 
 	gwclient "github.com/moby/buildkit/frontend/gateway/client"
 	digest "github.com/opencontainers/go-digest"
@@ -91,28 +90,6 @@ func readMetadataBundleReference(ctx context.Context, ref gwclient.Reference) (m
 		{name: metadata.BundleFormulaFilename, limit: metadata.DefaultMaxFormulaBytes},
 		{name: metadata.BundleMigrationsFilename, limit: metadata.DefaultMaxMigrationsBytes},
 	}
-	expected := make([]string, len(files))
-	for i, file := range files {
-		expected[i] = file.name
-	}
-	slices.Sort(expected)
-
-	entries, err := ref.ReadDir(ctx, gwclient.ReadDirRequest{Path: "/"})
-	if err != nil {
-		return metadataBundleData{}, fmt.Errorf("enumerate metadata bundle root: %w", err)
-	}
-	actual := make([]string, len(entries))
-	for i, entry := range entries {
-		if entry == nil {
-			return metadataBundleData{}, fmt.Errorf("metadata bundle root contains a nil entry")
-		}
-		actual[i] = entry.Path
-	}
-	slices.Sort(actual)
-	if !slices.Equal(actual, expected) {
-		return metadataBundleData{}, fmt.Errorf("metadata bundle root must contain exactly %v, got %v", expected, actual)
-	}
-
 	contents := make(map[string][]byte, len(files))
 	for _, file := range files {
 		filename := "/" + file.name

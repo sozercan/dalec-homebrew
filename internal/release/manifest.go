@@ -292,8 +292,14 @@ func (m *Manifest) SupportsNonCoreTaps() bool {
 
 func validateV2Bindings(m *Manifest) error {
 	var errs []error
-	if err := validateDigest(m.MetadataBundleDigest); err != nil {
-		errs = append(errs, fmt.Errorf("metadata bundle: %w", err))
+	// MetadataBundleDigest was added after the V2 schema shipped. Preserve
+	// decode/replay compatibility for legacy V2 manifests while validating any
+	// digest that is present. New release generation requires the field at its
+	// boundary.
+	if m.MetadataBundleDigest != "" {
+		if err := validateDigest(m.MetadataBundleDigest); err != nil {
+			errs = append(errs, fmt.Errorf("metadata bundle: %w", err))
+		}
 	}
 	if m.BottleFetcher == nil {
 		errs = append(errs, errors.New("V2 bottle fetcher component is required"))

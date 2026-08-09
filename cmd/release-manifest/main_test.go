@@ -122,6 +122,19 @@ func TestRunRejectsIncompleteV2Inputs(t *testing.T) {
 	}
 }
 
+func TestRunRequiresMetadataBundleDigestForNewV2Manifest(t *testing.T) {
+	args := withoutFlag(validV2Args(t), "--metadata-bundle-digest")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run(args, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "--metadata-bundle-digest is required") {
+		t.Fatalf("err = %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
 func TestRunRejectsUnsupportedSchemaVersion(t *testing.T) {
 	args := append(validArgs(), "--schema-version", "v3")
 	var stdout bytes.Buffer

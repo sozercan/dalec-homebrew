@@ -143,7 +143,6 @@ func TestV2RequiresCompleteBindings(t *testing.T) {
 		want   string
 	}{
 		{name: "fetcher", mutate: func(m *Manifest) { m.BottleFetcher = nil }, want: "bottle fetcher"},
-		{name: "metadata bundle", mutate: func(m *Manifest) { m.MetadataBundleDigest = "" }, want: "metadata bundle"},
 		{name: "invalid metadata bundle", mutate: func(m *Manifest) { m.MetadataBundleDigest = "sha256:nope" }, want: "metadata bundle"},
 		{name: "origin", mutate: func(m *Manifest) { m.CatalogServiceOrigin = "" }, want: "catalog service origin"},
 		{name: "ingestion policy", mutate: func(m *Manifest) { m.IngestionJWSKeyPolicyDigest = "" }, want: "ingestion JWS key policy"},
@@ -164,6 +163,35 @@ func TestV2RequiresCompleteBindings(t *testing.T) {
 				t.Fatal("incomplete V2 manifest advertised non-core support")
 			}
 		})
+	}
+}
+
+func TestLegacyV2WithoutMetadataBundleDigestRemainsReplayable(t *testing.T) {
+	m := validV2(t)
+	m.MetadataBundleDigest = ""
+	canonical, err := Canonical(m)
+	if err != nil {
+		t.Fatalf("Canonical: %v", err)
+	}
+	if strings.Contains(string(canonical), "metadata_bundle_digest") {
+		t.Fatalf("legacy canonical manifest unexpectedly contains metadata bundle digest: %s", canonical)
+	}
+	decoded, err := Decode(strings.NewReader(string(canonical)))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !decoded.SupportsNonCoreTaps() {
+		t.Fatal("legacy V2 manifest no longer advertises its existing non-core capability")
+	}
+	bindings, err := decoded.BindingsFor(resolution.Platform{OS: "linux", Architecture: "amd64"})
+	if err != nil {
+		t.Fatalf("BindingsFor: %v", err)
+	}
+	if bindings.MetadataBundleDigest != "" {
+		t.Fatalf("legacy metadata bundle digest = %q, want empty", bindings.MetadataBundleDigest)
+	}
+	if _, err := Digest(decoded); err != nil {
+		t.Fatalf("Digest: %v", err)
 	}
 }
 

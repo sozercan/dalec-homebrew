@@ -73,6 +73,65 @@ func TestCaptureBundleFetchesOfficialEnvelopesOnceAndRoundTrips(t *testing.T) {
 	}
 }
 
+func TestCaptureBundlePreservesAuthenticatedSignedGeneratedDates(t *testing.T) {
+	one, _ := generatedTestKeys(t)
+	now := time.Date(2026, 8, 9, 18, 0, 0, 0, time.UTC)
+	formulaGeneratedAt := now.Add(-10 * time.Minute)
+	migrationsGeneratedAt := now.Add(-20 * time.Minute)
+	formulaPayload := string(mustJSON(t, map[string]any{
+		"generated_date": formulaGeneratedAt.Format(time.RFC3339),
+		"formulae":       jsonRaw(validFormulaPayload(t)),
+	}))
+	migrationsPayload := string(mustJSON(t, map[string]any{
+		"generated_date": migrationsGeneratedAt.Format(time.RFC3339),
+		"migrations":     jsonRaw(validMigrationPayload(t)),
+	}))
+	responses := map[string][]byte{
+		OfficialFormulaURL:    makeGeneralJWS(t, formulaPayload, validTestSignature(t, DefaultRequiredKeyID, one)),
+		OfficialMigrationsURL: makeGeneralJWS(t, migrationsPayload, validTestSignature(t, DefaultRequiredKeyID, one)),
+	}
+	client, err := NewClient(Config{
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return metadataResponse(request, responses[request.URL.String()], time.Time{}), nil
+		})},
+		Keys: testKeySet(t),
+		Freshness: FreshnessPolicy{
+			MaxAge:        time.Hour,
+			MaxFutureSkew: time.Minute,
+		},
+		Clock: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	bundle, err := client.CaptureBundle(t.Context(), BundleCaptureOptions{})
+	if err != nil {
+		t.Fatalf("CaptureBundle: %v", err)
+	}
+	if bundle.Manifest.Formula.GeneratedAt != formulaGeneratedAt.Format(time.RFC3339) || bundle.Manifest.Migrations.GeneratedAt != migrationsGeneratedAt.Format(time.RFC3339) {
+		t.Fatalf("bundle generated dates = %q, %q", bundle.Manifest.Formula.GeneratedAt, bundle.Manifest.Migrations.GeneratedAt)
+	}
+	manifestData, err := bundle.CanonicalManifest()
+	if err != nil {
+		t.Fatalf("CanonicalManifest: %v", err)
+	}
+	snapshot, _, err := LoadBundleBytes(manifestData, bundle.Formula, bundle.Migrations, BundleLoadOptions{
+		Keys:      testKeySet(t),
+		Freshness: FreshnessPolicy{MaxAge: time.Hour, MaxFutureSkew: time.Minute},
+		Now:       now,
+	})
+	if err != nil {
+		t.Fatalf("LoadBundleBytes: %v", err)
+	}
+	info := snapshot.Info()
+	if info.Formula.GeneratedAt != formulaGeneratedAt || info.Migrations.GeneratedAt != migrationsGeneratedAt {
+		t.Fatalf("round-trip generated dates = %s, %s", info.Formula.GeneratedAt, info.Migrations.GeneratedAt)
+	}
+	if info.Formula.GeneratedAtSource != GeneratedAtSignedPayload || info.Migrations.GeneratedAtSource != GeneratedAtSignedPayload {
+		t.Fatalf("round-trip date sources = %q, %q", info.Formula.GeneratedAtSource, info.Migrations.GeneratedAtSource)
+	}
+}
+
 func TestCaptureBundleRejectsNonOfficialBaseURLBeforeFetching(t *testing.T) {
 	requests := 0
 	client, err := NewClient(Config{
@@ -392,7 +451,9 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 
 func metadataResponse(request *http.Request, data []byte, generatedAt time.Time) *http.Response {
 	header := make(http.Header)
-	header.Set("Last-Modified", generatedAt.Format(http.TimeFormat))
+	if !generatedAt.IsZero() {
+		header.Set("Last-Modified", generatedAt.Format(http.TimeFormat))
+	}
 	return &http.Response{
 		StatusCode:    http.StatusOK,
 		Status:        http.StatusText(http.StatusOK),

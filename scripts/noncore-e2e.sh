@@ -99,6 +99,12 @@ inputs="$WORK/release-inputs.json"
 SOURCE_DATE_EPOCH=$(jq -er .source_date_epoch "$inputs")
 RUNTIME_BASE=$(jq -er '.ubuntu_base["linux/amd64"]' "$inputs")
 HOMEBREW_COMMIT=$(jq -er .homebrew_commit "$inputs")
+go run ./cmd/metadata-bundle \
+  --output "$WORK/metadata-bundle" \
+  --digest-output "$WORK/metadata-bundle.digest"
+METADATA_BUNDLE_DIGEST=$(<"$WORK/metadata-bundle.digest")
+[[ "$METADATA_BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+  fail_usage "metadata bundle command returned an invalid manifest digest"
 
 cat > "$WORK/buildkitd.toml" <<EOF_CONFIG
 [registry."$REGISTRY"]
@@ -163,6 +169,7 @@ MATERIALIZER_REF=$(build_component materializer materializer dalec-homebrew-mate
 FRONTEND_REF=$(build_component "V2 frontend" frontend dalec-homebrew \
   --build-arg "RUNTIME_BASE_REF=$RUNTIME_BASE_REF" \
   --build-arg "MATERIALIZER_REF=$MATERIALIZER_REF" \
+  --build-arg "METADATA_BUNDLE_DIGEST=$METADATA_BUNDLE_DIGEST" \
   "${V2_BUILD_ARGS[@]}")
 FRONTEND_CHILD_DIGEST=${FRONTEND_REF##*@}
 docker buildx imagetools create \
@@ -193,6 +200,8 @@ expect_forwarding_rejection() {
     --progress="$PROGRESS" \
     --target "$DALEC_ROUTE" \
     --build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$FRONTEND_INDEX_REF" \
+    --build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$METADATA_BUNDLE_DIGEST" \
+    --build-context "dalec-homebrew-metadata=$WORK/metadata-bundle" \
     --file "$WORK/$name.yaml" \
     . >"$WORK/$name.log" 2>&1; then
     echo "upstream Dalec accepted unsupported dependency shape $name" >&2
@@ -255,6 +264,7 @@ DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF="$RUNTIME_BASE_REF" \
 DALEC_HOMEBREW_LIVE_MATERIALIZER_REF="$MATERIALIZER_REF" \
 DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF="$FRONTEND_INDEX_REF" \
 DALEC_HOMEBREW_LIVE_FRONTEND_REF="$FRONTEND_REF" \
+DALEC_HOMEBREW_LIVE_METADATA_BUNDLE="$WORK/metadata-bundle" \
 DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN="$DALEC_FRONTEND_PIN" \
 DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
 DALEC_HOMEBREW_LIVE_IMAGE="$FINAL_IMAGE" \

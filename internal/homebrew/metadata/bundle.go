@@ -29,8 +29,9 @@ const (
 )
 
 // BundleDocument binds one exact, signed HTTP response into a bundle manifest.
-// GeneratedAt is the canonical UTC representation of the response's parsed
-// Last-Modified header.
+// GeneratedAt is the canonical UTC representation of the authenticated
+// document's effective freshness timestamp: signed payload date when present,
+// otherwise the parsed Last-Modified header.
 type BundleDocument struct {
 	Filename       string `json:"filename"`
 	URL            string `json:"url"`
@@ -108,13 +109,13 @@ func (c *Client) CaptureBundle(ctx context.Context, options BundleCaptureOptions
 				BundleFormulaFilename,
 				OfficialFormulaURL,
 				formula,
-				info.Formula.EnvelopeDigest,
+				info.Formula,
 			),
 			Migrations: bundleDocument(
 				BundleMigrationsFilename,
 				OfficialMigrationsURL,
 				migrations,
-				info.Migrations.EnvelopeDigest,
+				info.Migrations,
 			),
 		},
 		Formula:    slices.Clone(formula.Data),
@@ -151,17 +152,17 @@ func (c *Client) bundleLoadOptions(options BundleCaptureOptions) LoadOptions {
 	}
 }
 
-func bundleDocument(filename, sourceURL string, source SignedSource, envelopeDigest string) BundleDocument {
+func bundleDocument(filename, sourceURL string, source SignedSource, info DocumentInfo) BundleDocument {
 	generatedAt := ""
-	if !source.GeneratedAt.IsZero() {
-		generatedAt = source.GeneratedAt.UTC().Round(0).Format(time.RFC3339)
+	if !info.GeneratedAt.IsZero() {
+		generatedAt = info.GeneratedAt.UTC().Round(0).Format(time.RFC3339)
 	}
 	return BundleDocument{
 		Filename:       filename,
 		URL:            sourceURL,
 		GeneratedAt:    generatedAt,
 		Size:           int64(len(source.Data)),
-		EnvelopeDigest: envelopeDigest,
+		EnvelopeDigest: info.EnvelopeDigest,
 	}
 }
 

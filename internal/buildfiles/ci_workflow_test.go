@@ -65,7 +65,13 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 		`--catalog-extractor-ref "$EXTRACTOR_REF"`,
 		`--build-arg "CATALOG_EXTRACTOR_REF=$EXTRACTOR_REF"`,
 		`--build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$FRONTEND_INDEX_REF"`,
+		`go run ./cmd/metadata-bundle`,
+		`--digest-output "$WORK/metadata-bundle.digest"`,
+		`--build-arg "METADATA_BUNDLE_DIGEST=$METADATA_BUNDLE_DIGEST"`,
+		`--build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$METADATA_BUNDLE_DIGEST"`,
+		`--build-context "dalec-homebrew-metadata=$WORK/metadata-bundle"`,
 		`DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF="$FRONTEND_INDEX_REF"`,
+		`DALEC_HOMEBREW_LIVE_METADATA_BUNDLE="$WORK/metadata-bundle"`,
 		`.components.frontend_index_ref == $frontend_index`,
 		`.components.frontend_ref == $frontend`,
 		"docker run --rm --network none",
@@ -112,6 +118,11 @@ func TestNonCoreE2EUsesProductionCatalogIngestionAndOfflineRuntime(t *testing.T)
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("non-core E2E contains forbidden marker %q", forbidden)
 		}
+	}
+	capture := strings.Index(text, "go run ./cmd/metadata-bundle")
+	frontend := strings.Index(text, `FRONTEND_REF=$(build_component "V2 frontend"`)
+	if capture < 0 || frontend < 0 || capture >= frontend {
+		t.Fatalf("non-core E2E must capture the authenticated metadata bundle before building the V2 frontend")
 	}
 }
 

@@ -103,6 +103,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}
 		manifest.PolicyVersion = resolution.PolicyVersion
 	case release.SchemaVersionV2:
+		if opts.metadataBundleDigest == "" {
+			return errors.New("--metadata-bundle-digest is required for schema v2")
+		}
 		bottleFetcher := opts.bottleFetcher.component()
 		catalogExtractor := opts.catalogExtractor.component()
 		manifest.PolicyVersion = release.RuntimePolicyVersionV2

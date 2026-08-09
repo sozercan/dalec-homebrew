@@ -18,11 +18,11 @@ import (
 )
 
 type metadataBundleTestRef struct {
-	entries  []*fstypes.Stat
-	stats    map[string]*fstypes.Stat
-	data     map[string][]byte
-	readErrs map[string]error
-	read     []string
+	stats        map[string]*fstypes.Stat
+	data         map[string][]byte
+	readErrs     map[string]error
+	read         []string
+	readDirCalls int
 }
 
 func newMetadataBundleTestRef() *metadataBundleTestRef {
@@ -42,7 +42,6 @@ func newMetadataBundleTestRef() *metadataBundleTestRef {
 		metadata.BundleMigrationsFilename,
 	} {
 		path := "/" + name
-		ref.entries = append(ref.entries, &fstypes.Stat{Path: name, Mode: uint32(0o444), Size: int64(len(data[path]))})
 		ref.stats[path] = &fstypes.Stat{Path: name, Mode: uint32(0o444), Size: int64(len(data[path]))}
 	}
 	return ref
@@ -51,11 +50,9 @@ func newMetadataBundleTestRef() *metadataBundleTestRef {
 func (r *metadataBundleTestRef) ToState() (llb.State, error)    { return llb.Scratch(), nil }
 func (r *metadataBundleTestRef) Evaluate(context.Context) error { return nil }
 
-func (r *metadataBundleTestRef) ReadDir(_ context.Context, req gwclient.ReadDirRequest) ([]*fstypes.Stat, error) {
-	if req.Path != "/" {
-		return nil, errors.New("unexpected directory")
-	}
-	return slices.Clone(r.entries), nil
+func (r *metadataBundleTestRef) ReadDir(context.Context, gwclient.ReadDirRequest) ([]*fstypes.Stat, error) {
+	r.readDirCalls++
+	return nil, errors.New("metadata bundle reader must not enumerate caller-controlled directories")
 }
 
 func (r *metadataBundleTestRef) StatFile(_ context.Context, req gwclient.StatRequest) (*fstypes.Stat, error) {
@@ -121,56 +118,23 @@ func TestReadMetadataBundleReference(t *testing.T) {
 	if len(ref.read) != 3 {
 		t.Fatalf("read calls=%v, want all three files", ref.read)
 	}
+	if ref.readDirCalls != 0 {
+		t.Fatalf("read directory calls=%d, want 0", ref.readDirCalls)
+	}
 }
 
-func TestReadMetadataBundleReferenceRequiresExactRootInventory(t *testing.T) {
-	tests := []struct {
-		name   string
-		mutate func(*metadataBundleTestRef)
-	}{
-		{
-			name: "missing",
-			mutate: func(ref *metadataBundleTestRef) {
-				ref.entries = ref.entries[:2]
-			},
-		},
-		{
-			name: "extra",
-			mutate: func(ref *metadataBundleTestRef) {
-				ref.entries = append(ref.entries, &fstypes.Stat{Path: "extra.json", Mode: uint32(0o444), Size: 1})
-			},
-		},
-		{
-			name: "duplicate",
-			mutate: func(ref *metadataBundleTestRef) {
-				ref.entries[2].Path = ref.entries[1].Path
-			},
-		},
-		{
-			name: "nested",
-			mutate: func(ref *metadataBundleTestRef) {
-				ref.entries[0].Path = "nested/" + ref.entries[0].Path
-			},
-		},
-		{
-			name: "nil",
-			mutate: func(ref *metadataBundleTestRef) {
-				ref.entries[0] = nil
-			},
-		},
+func TestReadMetadataBundleReferenceIgnoresUnreferencedFilesWithoutEnumeration(t *testing.T) {
+	ref := newMetadataBundleTestRef()
+	ref.stats["/unused"] = &fstypes.Stat{Path: "unused", Mode: uint32(0o444), Size: 1}
+	ref.data["/unused"] = []byte("x")
+	if _, err := readMetadataBundleReference(t.Context(), ref); err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ref := newMetadataBundleTestRef()
-			tt.mutate(ref)
-			_, err := readMetadataBundleReference(t.Context(), ref)
-			if err == nil || (!strings.Contains(err.Error(), "must contain exactly") && !strings.Contains(err.Error(), "nil entry")) {
-				t.Fatalf("error=%v", err)
-			}
-			if len(ref.read) != 0 {
-				t.Fatalf("malformed inventory was read: %v", ref.read)
-			}
-		})
+	if ref.readDirCalls != 0 {
+		t.Fatalf("read directory calls=%d, want 0", ref.readDirCalls)
+	}
+	if slices.Contains(ref.read, "/unused") {
+		t.Fatalf("unused file was read: %v", ref.read)
 	}
 }
 
@@ -194,6 +158,14 @@ func TestReadMetadataBundleReferenceRejectsUnsafeOrUnboundedFiles(t *testing.T) 
 			file: metadata.BundleManifestFilename,
 			mutate: func(ref *metadataBundleTestRef, path string) {
 				ref.stats[path].Mode = uint32(os.ModeSymlink | 0o777)
+				ref.stats[path].Linkname = metadata.BundleFormulaFilename
+			},
+			want: "must be a regular file",
+		},
+		{
+			name: "regular file with link target",
+			file: metadata.BundleManifestFilename,
+			mutate: func(ref *metadataBundleTestRef, path string) {
 				ref.stats[path].Linkname = metadata.BundleFormulaFilename
 			},
 			want: "must be a regular file",
