@@ -1577,6 +1577,116 @@ func TestReconcileRejectsCrossKegHardlinkAlias(t *testing.T) {
 	}
 }
 
+func TestReconcileAllowsDeclaredHardlinkGroupPartitions(t *testing.T) {
+	node := resolution.Node{Name: "glibc", PkgVersion: "2.39_1"}
+	verified := bottle.Result{
+		Name:       node.Name,
+		PkgVersion: node.PkgVersion,
+		KegPrefix:  "glibc/2.39_1",
+		Inventory: []bottle.InventoryEntry{
+			{Path: "glibc/2.39_1/bin/getconf", KegPath: "bin/getconf", Type: bottle.EntryRegular, Mode: 0o555, SHA256: "sha256:" + strings.Repeat("a", 64)},
+			{Path: "glibc/2.39_1/libexec/getconf/POSIX_V6_LP64_OFF64", KegPath: "libexec/getconf/POSIX_V6_LP64_OFF64", Type: bottle.EntryHardlink, Mode: 0o555, SHA256: "sha256:" + strings.Repeat("a", 64), ResolvedTarget: "glibc/2.39_1/bin/getconf"},
+			{Path: "glibc/2.39_1/libexec/getconf/POSIX_V7_LP64_OFF64", KegPath: "libexec/getconf/POSIX_V7_LP64_OFF64", Type: bottle.EntryHardlink, Mode: 0o555, SHA256: "sha256:" + strings.Repeat("a", 64), ResolvedTarget: "glibc/2.39_1/bin/getconf"},
+			{Path: "glibc/2.39_1/libexec/getconf/XBS5_LP64_OFF64", KegPath: "libexec/getconf/XBS5_LP64_OFF64", Type: bottle.EntryHardlink, Mode: 0o555, SHA256: "sha256:" + strings.Repeat("a", 64), ResolvedTarget: "glibc/2.39_1/bin/getconf"},
+		},
+	}
+	paths := []string{
+		"Cellar/glibc/2.39_1/bin/getconf",
+		"Cellar/glibc/2.39_1/libexec/getconf/POSIX_V6_LP64_OFF64",
+		"Cellar/glibc/2.39_1/libexec/getconf/POSIX_V7_LP64_OFF64",
+		"Cellar/glibc/2.39_1/libexec/getconf/XBS5_LP64_OFF64",
+	}
+	for _, tc := range []struct {
+		name   string
+		inodes []string
+		links  []uint64
+	}{
+		{name: "preserved", inodes: []string{"1:1", "1:1", "1:1", "1:1"}, links: []uint64{4, 4, 4, 4}},
+		{name: "partially split", inodes: []string{"1:1", "1:1", "1:2", "1:3"}, links: []uint64{2, 2, 1, 1}},
+		{name: "fully split", inodes: []string{"1:1", "1:2", "1:3", "1:4"}, links: []uint64{1, 1, 1, 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			after := map[string]fileState{}
+			for i, rel := range paths {
+				after[rel] = fileState{Type: "regular", Mode: 0o555, Digest: strings.Repeat("a", 64), Inode: tc.inodes[i], Links: tc.links[i]}
+			}
+			if err := reconcileInstalledKeg("/prefix", node, verified, after); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestReconcileRejectsInvalidDeclaredHardlinkGroupPartitions(t *testing.T) {
+	node := resolution.Node{Name: "glibc", PkgVersion: "2.39_1"}
+	verified := bottle.Result{
+		Name:       node.Name,
+		PkgVersion: node.PkgVersion,
+		KegPrefix:  "glibc/2.39_1",
+		Inventory: []bottle.InventoryEntry{
+			{Path: "glibc/2.39_1/bin/getconf", KegPath: "bin/getconf", Type: bottle.EntryRegular, Mode: 0o555, SHA256: "sha256:" + strings.Repeat("a", 64)},
+			{Path: "glibc/2.39_1/libexec/getconf/POSIX_V6_LP64_OFF64", KegPath: "libexec/getconf/POSIX_V6_LP64_OFF64", Type: bottle.EntryHardlink, Mode: 0o555, SHA256: "sha256:" + strings.Repeat("a", 64), ResolvedTarget: "glibc/2.39_1/bin/getconf"},
+		},
+	}
+	base := map[string]fileState{
+		"Cellar/glibc/2.39_1/bin/getconf":                         {Type: "regular", Mode: 0o555, Digest: strings.Repeat("a", 64), Inode: "1:1", Links: 1},
+		"Cellar/glibc/2.39_1/libexec/getconf/POSIX_V6_LP64_OFF64": {Type: "regular", Mode: 0o555, Digest: strings.Repeat("a", 64), Inode: "1:2", Links: 1},
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*bottle.Result, map[string]fileState)
+	}{
+		{
+			name: "undeclared cross-keg alias",
+			mutate: func(_ *bottle.Result, after map[string]fileState) {
+				state := after["Cellar/glibc/2.39_1/libexec/getconf/POSIX_V6_LP64_OFF64"]
+				state.Links = 2
+				after["Cellar/glibc/2.39_1/libexec/getconf/POSIX_V6_LP64_OFF64"] = state
+				after["Cellar/other/1/alias"] = fileState{Type: "regular", Mode: 0o555, Digest: strings.Repeat("a", 64), Inode: "1:2", Links: 2}
+			},
+		},
+		{
+			name: "merged declared groups",
+			mutate: func(result *bottle.Result, after map[string]fileState) {
+				result.Inventory = append(result.Inventory, bottle.InventoryEntry{Path: "glibc/2.39_1/bin/other", KegPath: "bin/other", Type: bottle.EntryRegular, Mode: 0o555, SHA256: "sha256:" + strings.Repeat("a", 64)})
+				state := after["Cellar/glibc/2.39_1/libexec/getconf/POSIX_V6_LP64_OFF64"]
+				state.Links = 2
+				after["Cellar/glibc/2.39_1/libexec/getconf/POSIX_V6_LP64_OFF64"] = state
+				after["Cellar/glibc/2.39_1/bin/other"] = fileState{Type: "regular", Mode: 0o555, Digest: strings.Repeat("a", 64), Inode: "1:2", Links: 2}
+			},
+		},
+		{
+			name: "unobserved alias",
+			mutate: func(_ *bottle.Result, after map[string]fileState) {
+				state := after["Cellar/glibc/2.39_1/libexec/getconf/POSIX_V6_LP64_OFF64"]
+				state.Links = 2
+				after["Cellar/glibc/2.39_1/libexec/getconf/POSIX_V6_LP64_OFF64"] = state
+			},
+		},
+		{
+			name: "divergent relocated content",
+			mutate: func(result *bottle.Result, after map[string]fileState) {
+				for i := range result.Inventory {
+					result.Inventory[i].Relocatable = true
+				}
+				state := after["Cellar/glibc/2.39_1/libexec/getconf/POSIX_V6_LP64_OFF64"]
+				state.Digest = strings.Repeat("b", 64)
+				after["Cellar/glibc/2.39_1/libexec/getconf/POSIX_V6_LP64_OFF64"] = state
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := verified
+			result.Inventory = append([]bottle.InventoryEntry(nil), verified.Inventory...)
+			after := maps.Clone(base)
+			tc.mutate(&result, after)
+			if err := reconcileInstalledKeg("/prefix", node, result, after); err == nil {
+				t.Fatal("invalid installed hardlink partition accepted")
+			}
+		})
+	}
+}
+
 func TestClassifyRejectsSharedRootModeChange(t *testing.T) {
 	before := map[string]fileState{"lib": {Type: "directory", Mode: 0o755}}
 	after := map[string]fileState{"lib": {Type: "directory", Mode: 0o777}}

@@ -2472,7 +2472,6 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 		}
 	}
 	declaredGroups := map[string]map[string]struct{}{}
-	groupInode := map[string]string{}
 	for rel, entry := range expected {
 		if entry.Type != bottle.EntryRegular && entry.Type != bottle.EntryHardlink {
 			continue
@@ -2486,14 +2485,6 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 			declaredGroups[group] = map[string]struct{}{}
 		}
 		declaredGroups[group][rel] = struct{}{}
-		actual := after[rel]
-		if actual.Inode == "" {
-			continue
-		}
-		if previous, ok := groupInode[group]; ok && previous != actual.Inode {
-			return fmt.Errorf("declared hardlink group %s spans multiple inodes", group)
-		}
-		groupInode[group] = actual.Inode
 	}
 	pathsByInode := map[string]map[string]struct{}{}
 	linksByInode := map[string]uint64{}
@@ -2508,16 +2499,47 @@ func reconcileInstalledKeg(prefix string, node resolution.Node, verified bottle.
 		linksByInode[state.Inode] = state.Links
 	}
 	for group, expectedPaths := range declaredGroups {
-		inode := groupInode[group]
-		if inode == "" {
-			continue
+		// Homebrew may replace members independently while relocating or pouring a
+		// bottle. In particular, moving a staged bottle from a separate temporary
+		// filesystem into the prefix copies each member and splits an authenticated
+		// archive hardlink group into ordinary files. Accept only identical members
+		// that form a partition of the declared group: each installed inode must
+		// remain confined to paths from that group, and its kernel link count must
+		// match the complete observed partition.
+		partitions := map[string]map[string]struct{}{}
+		var installedState fileState
+		haveInstalledState := false
+		for rel := range expectedPaths {
+			actual := after[rel]
+			if !haveInstalledState {
+				installedState = actual
+				haveInstalledState = true
+			} else if actual.Type != installedState.Type ||
+				actual.Mode != installedState.Mode ||
+				actual.Size != installedState.Size ||
+				actual.Digest != installedState.Digest ||
+				actual.UID != installedState.UID ||
+				actual.GID != installedState.GID ||
+				actual.OwnershipKnown != installedState.OwnershipKnown {
+				return fmt.Errorf("hardlink group %s has divergent installed members", group)
+			}
+			inode := actual.Inode
+			if inode == "" {
+				continue
+			}
+			if partitions[inode] == nil {
+				partitions[inode] = map[string]struct{}{}
+			}
+			partitions[inode][rel] = struct{}{}
 		}
-		actualPaths := pathsByInode[inode]
-		if !maps.Equal(actualPaths, expectedPaths) {
-			return fmt.Errorf("hardlink group %s has undeclared aliases: %v", group, actualPaths)
-		}
-		if linksByInode[inode] != uint64(len(expectedPaths)) {
-			return fmt.Errorf("hardlink group %s has link count %d, expected %d", group, linksByInode[inode], len(expectedPaths))
+		for inode, expectedPartition := range partitions {
+			actualPaths := pathsByInode[inode]
+			if !maps.Equal(actualPaths, expectedPartition) {
+				return fmt.Errorf("hardlink group %s has undeclared aliases: %v", group, actualPaths)
+			}
+			if linksByInode[inode] != uint64(len(expectedPartition)) {
+				return fmt.Errorf("hardlink group %s has link count %d, expected %d", group, linksByInode[inode], len(expectedPartition))
+			}
 		}
 	}
 	for rel, actual := range after {
