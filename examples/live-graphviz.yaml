@@ -83,19 +83,33 @@ tests:
           test "$(find /usr/share/dalec-homebrew -maxdepth 1 -type f | wc -l)" -eq 9
           test -z "$(find "$HOMEBREW_PREFIX" -type f -perm /111 -writable -print -quit)"
           evidence_dir=/usr/share/dalec-homebrew
+          materialization_v1="$evidence_dir/materialization.json"
+          materialization_v2="$evidence_dir/materialization-v2.json"
           if grep -Fq 'dalec-homebrew-runtime-manifest/v1' "$evidence_dir/manifest.json" \
             && grep -Fq 'dalec-homebrew-resolution/v1' "$evidence_dir/resolution.json" \
             && grep -Fq 'dalec-homebrew-runtime-inventory/v1' "$evidence_dir/runtime-inventory.json" \
             && grep -Fq 'dalec-homebrew-prune-manifest/v2' "$evidence_dir/prune-manifest.json"; then
-            :
+            materialization_path=$materialization_v1
+            test ! -e "$materialization_v2"
           elif grep -Fq 'dalec-homebrew-runtime-manifest/v2' "$evidence_dir/manifest.json" \
             && grep -Fq 'dalec-homebrew-resolution/v2' "$evidence_dir/resolution.json" \
             && grep -Fq 'dalec-homebrew-runtime-inventory/v2' "$evidence_dir/runtime-inventory.json" \
             && grep -Fq 'dalec-homebrew-prune-manifest/v3' "$evidence_dir/prune-manifest.json"; then
-            :
+            materialization_path=$materialization_v2
+            test ! -e "$materialization_v1"
           else
             echo 'runtime evidence schemas are not a coherent V1 or V2 tuple' >&2
             exit 1
+          fi
+          test -f "$materialization_path"
+          test ! -L "$materialization_path"
+          test -s "$materialization_path"
+          test "$(stat -c '%a' "$materialization_path")" = 444
+          grep -Fq 'verified_bottles' "$materialization_path"
+          if [ "$materialization_path" = "$materialization_v2" ]; then
+            grep -Fq 'dalec-homebrew-materialization/v2' "$materialization_path"
+          else
+            ! grep -Fq 'dalec-homebrew-materialization/v2' "$materialization_path"
           fi
           echo runtime-invariants-ok
         stdout:
@@ -134,9 +148,6 @@ tests:
         contains:
           - SPDX-2.3
           - dalec-homebrew-linux-
-      /usr/share/dalec-homebrew/materialization.json:
-        permissions: 0o444
-        contains: [verified_bottles]
       /usr/share/dalec-homebrew/runtime-base-packages.tsv:
         permissions: 0o444
       /usr/share/dalec-homebrew/runtime-base-artifacts.tsv:

@@ -417,6 +417,19 @@ func TestReleaseRuntimeEvidenceAssertionsAcceptOnlyCoherentSchemas(t *testing.T)
 		"dalec-homebrew-runtime-inventory/v2",
 		"dalec-homebrew-prune-manifest/v3",
 	}
+	wantFixtureMaterializationAssertions := []string{
+		`materialization_v1="$evidence_dir/materialization.json"`,
+		`materialization_v2="$evidence_dir/materialization-v2.json"`,
+		`test ! -e "$materialization_v2"`,
+		`test ! -e "$materialization_v1"`,
+		`test -f "$materialization_path"`,
+		`test ! -L "$materialization_path"`,
+		`test -s "$materialization_path"`,
+		`test "$(stat -c '%a' "$materialization_path")" = 444`,
+		`grep -Fq 'verified_bottles' "$materialization_path"`,
+		`grep -Fq 'dalec-homebrew-materialization/v2' "$materialization_path"`,
+		`! grep -Fq 'dalec-homebrew-materialization/v2' "$materialization_path"`,
+	}
 
 	for _, spec := range evidenceSpecs {
 		if _, ok := releaseSpecs[spec]; !ok {
@@ -438,6 +451,14 @@ func TestReleaseRuntimeEvidenceAssertionsAcceptOnlyCoherentSchemas(t *testing.T)
 		if !bytes.Contains(data, []byte("runtime evidence schemas are not a coherent V1 or V2 tuple")) {
 			t.Errorf("%s does not reject mixed runtime evidence schemas", spec)
 		}
+		for _, assertion := range wantFixtureMaterializationAssertions {
+			if !bytes.Contains(data, []byte(assertion)) {
+				t.Errorf("%s does not bind materialization evidence with %q", spec, assertion)
+			}
+		}
+		if bytes.Contains(data, []byte("/usr/share/dalec-homebrew/materialization.json:\n")) {
+			t.Errorf("%s still requires the V1 materialization filename unconditionally", spec)
+		}
 	}
 
 	validatorPath := filepath.Join(repositoryRoot(t), "scripts", "vm-live-validate.sh")
@@ -452,6 +473,26 @@ func TestReleaseRuntimeEvidenceAssertionsAcceptOnlyCoherentSchemas(t *testing.T)
 	}
 	if !bytes.Contains(validator, []byte("runtime evidence schemas are not a coherent V1 or V2 tuple")) {
 		t.Error("vm-live-validate.sh does not reject mixed runtime evidence schemas")
+	}
+	for _, assertion := range []string{
+		`materialization_path=$EVIDENCE_DIR/materialization.json`,
+		`materialization_path=$EVIDENCE_DIR/materialization-v2.json`,
+		`[ ! -e "$EVIDENCE_DIR/materialization-v2.json" ]`,
+		`[ ! -e "$EVIDENCE_DIR/materialization.json" ]`,
+		`[ -f "$materialization_path" ]`,
+		`[ ! -L "$materialization_path" ]`,
+		`[ -s "$materialization_path" ]`,
+		`assert_root_owned_non_user_writable "$materialization_path"`,
+		`grep -Fq '"verified_bottles"' "$materialization_path"`,
+		`grep -Fq '"schema_version":"dalec-homebrew-materialization/v2"' "$materialization_path"`,
+		`! grep -Fq 'dalec-homebrew-materialization/v2' "$materialization_path"`,
+	} {
+		if !bytes.Contains(validator, []byte(assertion)) {
+			t.Errorf("vm-live-validate.sh does not bind materialization evidence with %q", assertion)
+		}
+	}
+	if bytes.Contains(validator, []byte("  materialization.json \\\n")) {
+		t.Error("vm-live-validate.sh still requires the V1 materialization filename unconditionally")
 	}
 }
 
@@ -485,6 +526,47 @@ func TestVMLiveValidateAcceptsOnlyCoherentEvidenceSchemas(t *testing.T) {
 		{name: "prune-manifest.json", v1: "dalec-homebrew-prune-manifest/v2", v2: "dalec-homebrew-prune-manifest/v3"},
 	}
 
+	writeDocuments := func(t *testing.T, evidenceDir string, mask int) {
+		t.Helper()
+		for i, document := range documents {
+			schema := document.v1
+			if mask&(1<<i) != 0 {
+				schema = document.v2
+			}
+			body := []byte(`{"schema_version":"` + schema + `"}`)
+			if err := os.WriteFile(filepath.Join(evidenceDir, document.name), body, 0o444); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	writeMaterialization := func(t *testing.T, evidenceDir, name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(evidenceDir, name), []byte(body), 0o444); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runCheck := func(t *testing.T, mask int, materializations map[string]string, wantPass bool) {
+		t.Helper()
+		evidenceDir := t.TempDir()
+		writeDocuments(t, evidenceDir, mask)
+		for name, body := range materializations {
+			writeMaterialization(t, evidenceDir, name, body)
+		}
+
+		script := "set -eu\nfail() { exit 1; }\nassert_root_owned_non_user_writable() { :; }\n" + string(schemaCheck)
+		cmd := exec.Command("/bin/sh", "-c", script)
+		cmd.Env = append(os.Environ(), "EVIDENCE_DIR="+evidenceDir)
+		output, err := cmd.CombinedOutput()
+		if gotPass := err == nil; gotPass != wantPass {
+			t.Fatalf("evidence check pass = %v, want %v: %v\n%s", gotPass, wantPass, err, output)
+		}
+	}
+
+	const (
+		v1Materialization = `{"verified_bottles":[]}`
+		v2Materialization = `{"schema_version":"dalec-homebrew-materialization/v2","verified_bottles":[]}`
+	)
+	allV2 := 1<<len(documents) - 1
 	for mask := 0; mask < 1<<len(documents); mask++ {
 		versions := make([]string, 0, len(documents))
 		for i := range documents {
@@ -495,26 +577,32 @@ func TestVMLiveValidateAcceptsOnlyCoherentEvidenceSchemas(t *testing.T) {
 			versions = append(versions, version)
 		}
 		t.Run(strings.Join(versions, "-"), func(t *testing.T) {
-			evidenceDir := t.TempDir()
-			for i, document := range documents {
-				schema := document.v1
-				if mask&(1<<i) != 0 {
-					schema = document.v2
-				}
-				body := []byte(`{"schema_version":"` + schema + `"}`)
-				if err := os.WriteFile(filepath.Join(evidenceDir, document.name), body, 0o644); err != nil {
-					t.Fatal(err)
-				}
+			materializations := map[string]string{"materialization.json": v1Materialization}
+			if mask == allV2 {
+				materializations = map[string]string{"materialization-v2.json": v2Materialization}
 			}
+			runCheck(t, mask, materializations, mask == 0 || mask == allV2)
+		})
+	}
 
-			script := "set -eu\nfail() { exit 1; }\n" + string(schemaCheck)
-			cmd := exec.Command("/bin/sh", "-c", script)
-			cmd.Env = append(os.Environ(), "EVIDENCE_DIR="+evidenceDir)
-			output, err := cmd.CombinedOutput()
-			wantPass := mask == 0 || mask == 1<<len(documents)-1
-			if gotPass := err == nil; gotPass != wantPass {
-				t.Fatalf("schema check pass = %v, want %v: %v\n%s", gotPass, wantPass, err, output)
-			}
+	for _, test := range []struct {
+		name             string
+		mask             int
+		materializations map[string]string
+	}{
+		{name: "v1-missing", mask: 0},
+		{name: "v2-missing", mask: allV2},
+		{name: "v1-wrong-filename", mask: 0, materializations: map[string]string{"materialization-v2.json": v1Materialization}},
+		{name: "v2-wrong-filename", mask: allV2, materializations: map[string]string{"materialization.json": v2Materialization}},
+		{name: "v1-both-filenames", mask: 0, materializations: map[string]string{"materialization.json": v1Materialization, "materialization-v2.json": v2Materialization}},
+		{name: "v2-both-filenames", mask: allV2, materializations: map[string]string{"materialization.json": v1Materialization, "materialization-v2.json": v2Materialization}},
+		{name: "v1-v2-content", mask: 0, materializations: map[string]string{"materialization.json": v2Materialization}},
+		{name: "v2-v1-content", mask: allV2, materializations: map[string]string{"materialization-v2.json": v1Materialization}},
+		{name: "v1-empty", mask: 0, materializations: map[string]string{"materialization.json": ""}},
+		{name: "v2-missing-verified-bottles", mask: allV2, materializations: map[string]string{"materialization-v2.json": `{"schema_version":"dalec-homebrew-materialization/v2"}`}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runCheck(t, test.mask, test.materializations, false)
 		})
 	}
 }

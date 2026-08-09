@@ -203,7 +203,6 @@ for evidence_name in \
   runtime-inventory.json \
   prune-manifest.json \
   sbom.spdx.json \
-  materialization.json \
   runtime-base-packages.tsv \
   runtime-base-artifacts.tsv \
   runtime-base-chisel.manifest.wall
@@ -219,14 +218,26 @@ if grep -Fq '"schema_version":"dalec-homebrew-runtime-manifest/v1"' "$EVIDENCE_D
   && grep -Fq '"schema_version":"dalec-homebrew-resolution/v1"' "$EVIDENCE_DIR/resolution.json" \
   && grep -Fq '"schema_version":"dalec-homebrew-runtime-inventory/v1"' "$EVIDENCE_DIR/runtime-inventory.json" \
   && grep -Fq '"schema_version":"dalec-homebrew-prune-manifest/v2"' "$EVIDENCE_DIR/prune-manifest.json"; then
-  :
+  materialization_path=$EVIDENCE_DIR/materialization.json
+  [ ! -e "$EVIDENCE_DIR/materialization-v2.json" ] || fail "V1 runtime contains V2 materialization evidence"
 elif grep -Fq '"schema_version":"dalec-homebrew-runtime-manifest/v2"' "$EVIDENCE_DIR/manifest.json" \
   && grep -Fq '"schema_version":"dalec-homebrew-resolution/v2"' "$EVIDENCE_DIR/resolution.json" \
   && grep -Fq '"schema_version":"dalec-homebrew-runtime-inventory/v2"' "$EVIDENCE_DIR/runtime-inventory.json" \
   && grep -Fq '"schema_version":"dalec-homebrew-prune-manifest/v3"' "$EVIDENCE_DIR/prune-manifest.json"; then
-  :
+  materialization_path=$EVIDENCE_DIR/materialization-v2.json
+  [ ! -e "$EVIDENCE_DIR/materialization.json" ] || fail "V2 runtime contains V1 materialization evidence"
 else
   fail "runtime evidence schemas are not a coherent V1 or V2 tuple"
+fi
+[ -f "$materialization_path" ] || fail "materialization evidence is missing or not regular: $materialization_path"
+[ ! -L "$materialization_path" ] || fail "materialization evidence must not be a symlink: $materialization_path"
+[ -s "$materialization_path" ] || fail "materialization evidence is empty: $materialization_path"
+assert_root_owned_non_user_writable "$materialization_path"
+grep -Fq '"verified_bottles"' "$materialization_path" || fail "materialization evidence has no verified bottles"
+if [ "$materialization_path" = "$EVIDENCE_DIR/materialization-v2.json" ]; then
+  grep -Fq '"schema_version":"dalec-homebrew-materialization/v2"' "$materialization_path" || fail "V2 materialization evidence schema is invalid"
+else
+  ! grep -Fq 'dalec-homebrew-materialization/v2' "$materialization_path" || fail "V1 materialization evidence contains a V2 schema"
 fi
 grep -Fq '"spdxVersion":"SPDX-2.3"' \
   "$EVIDENCE_DIR/sbom.spdx.json" || fail "SBOM is not SPDX 2.3"
