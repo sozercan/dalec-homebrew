@@ -1071,6 +1071,15 @@ func TestReleaseWorkflowReverifiesCosignNormalizedPredicates(t *testing.T) {
 			},
 		},
 	}
+	wrongTypeDrift := map[string]any{
+		"builder": map[string]any{"id": "https://github.com/actions/runner"},
+		"metadata": map[string]any{
+			"buildInvocationId": "https://example.invalid/build/1",
+			"completeness": map[string]any{
+				"parameters": "false",
+			},
+		},
+	}
 
 	tests := []struct {
 		name    string
@@ -1082,6 +1091,7 @@ func TestReleaseWorkflowReverifiesCosignNormalizedPredicates(t *testing.T) {
 		{name: "Cosign omitted false SLSA defaults", typeID: "slsaprovenance02", actual: normalized},
 		{name: "true SLSA value", typeID: "slsaprovenance02", actual: trueDrift, wantErr: true},
 		{name: "null SLSA value", typeID: "slsaprovenance02", actual: nullDrift, wantErr: true},
+		{name: "wrong-type SLSA value", typeID: "slsaprovenance02", actual: wrongTypeDrift, wantErr: true},
 		{name: "SPDX omission stays exact", typeID: "spdxjson", actual: normalized, wantErr: true},
 	}
 	for _, tt := range tests {
