@@ -7,7 +7,8 @@
 - A Linux `amd64` or `arm64` target
 - Docker Buildx or `buildctl` backed by BuildKit 0.31.2 or newer
 - An upstream Dalec frontend reference pinned by digest
-- A `dalec-homebrew` child frontend reference pinned by digest
+- A `dalec-homebrew` parent index and exact platform child reference, both
+  pinned by digest and taken from the same trusted release evidence
 - Network access from the BuildKit daemon to both frontend images and the child
   frontend's bound components, `formulae.brew.sh`, `ghcr.io`, public
   default-GitHub taps, and selected public bottle or prebuilt-archive hosts
@@ -38,14 +39,19 @@ image:
 targets:
   homebrew:
     frontend:
-      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-digest>
+      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>
 ```
 
-Replace both placeholders with immutable references supplied by trusted release
-evidence, then invoke upstream Dalec's `homebrew/image` target:
+Replace the syntax and child placeholders with immutable references supplied by
+trusted release evidence. Pass the matching parent index through the build
+argument that upstream Dalec forwards to the child, then invoke the
+`homebrew/image` target:
 
 ```console
+DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>
+
 docker buildx build \
+  --build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX" \
   --target homebrew/image \
   --platform linux/amd64 \
   --file examples/forwarded-hello.yaml \
@@ -112,7 +118,7 @@ Target-specific dependencies, image settings, and tests belong to the fixed
 targets:
   homebrew:
     frontend:
-      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-digest>
+      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>
     dependencies:
       runtime:
         hello: {}
@@ -121,7 +127,10 @@ targets:
 Select it through upstream Dalec's full `homebrew/image` target:
 
 ```console
+DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>
+
 docker buildx build \
+  --build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX" \
   --target homebrew/image \
   --platform linux/amd64 \
   --file spec.yaml \
