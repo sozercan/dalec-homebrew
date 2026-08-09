@@ -76,6 +76,9 @@ FRONTEND_REF=ghcr.io/example/frontend@$DIGEST_C
 FRONTEND_INDEX_REF=ghcr.io/example/frontend@$DIGEST_D
 DALEC_FRONTEND_REF=ghcr.io/project-dalec/dalec/frontend@$DIGEST_E
 DALEC_PIN="$TEST_ROOT/dalec-frontend.json"
+METADATA_BUNDLE="$TEST_ROOT/metadata-bundle"
+mkdir -p "$METADATA_BUNDLE"
+printf '%s\n' "$DIGEST_G" > "${METADATA_BUNDLE}.digest"
 cat > "$DALEC_PIN" <<EOF_PIN
 {
   "schema_version": "dalec-homebrew-dalec-frontend/v1",
@@ -183,6 +186,21 @@ expect_rejected invalid-metadata-not-before "DALEC_HOMEBREW_LIVE_METADATA_NOT_BE
   "${PUBLISHED_ENV[@]}" \
   DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=2026-02-31T00:00:00Z
 
+expect_rejected missing-metadata-bundle "DALEC_HOMEBREW_LIVE_METADATA_BUNDLE must name a metadata bundle directory" \
+  "${PUBLISHED_ENV[@]}" \
+  DALEC_HOMEBREW_LIVE_METADATA_BUNDLE="$TEST_ROOT/missing-metadata-bundle"
+
+mkdir -p "$TEST_ROOT/missing-metadata-digest"
+expect_rejected missing-metadata-digest "requires sibling digest file" \
+  "${PUBLISHED_ENV[@]}" \
+  DALEC_HOMEBREW_LIVE_METADATA_BUNDLE="$TEST_ROOT/missing-metadata-digest"
+
+mkdir -p "$TEST_ROOT/invalid-metadata-digest"
+printf '%s\n' 'sha256:not-a-digest' > "$TEST_ROOT/invalid-metadata-digest.digest"
+expect_rejected invalid-metadata-digest "must contain one sha256 digest" \
+  "${PUBLISHED_ENV[@]}" \
+  DALEC_HOMEBREW_LIVE_METADATA_BUNDLE="$TEST_ROOT/invalid-metadata-digest"
+
 expect_rejected partial-dalec-override "DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF and DALEC_HOMEBREW_LIVE_TARGET must be set together" \
   "${PUBLISHED_ENV[@]}" \
   "DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF=ghcr.io/project-dalec/dalec/frontend@$DIGEST_F"
@@ -241,6 +259,7 @@ CAPTURED_SPEC="$TEST_ROOT/published-spec.yaml"
 run_live_test "$published_output" \
   CAPTURED_SPEC="$CAPTURED_SPEC" \
   "${PUBLISHED_ENV[@]}" \
+  "DALEC_HOMEBREW_LIVE_METADATA_BUNDLE=$METADATA_BUNDLE" \
   DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z
 [[ $(grep -c '^buildx build ' "$DOCKER_LOG") -eq 1 ]] || fail "published mode did not build only the final image"
 assert_contains "$DOCKER_LOG" "--target homebrew/image"
@@ -249,9 +268,11 @@ for argument in \
   "DALEC_HOMEBREW_MATERIALIZER=$MATERIALIZER_REF" \
   "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$FRONTEND_INDEX_REF" \
   "DALEC_HOMEBREW_FRONTEND_REF=$FRONTEND_REF" \
+  "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$DIGEST_G" \
   "DALEC_HOMEBREW_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z"; do
   assert_contains "$DOCKER_LOG" "--build-arg $argument"
 done
+assert_contains "$DOCKER_LOG" "--build-context dalec-homebrew-metadata=$METADATA_BUNDLE"
 [[ $(head -n 1 "$CAPTURED_SPEC") == "# syntax=$DALEC_FRONTEND_REF" ]] || fail "upstream Dalec frontend reference was not written to the live spec"
 EXPECTED_SPEC="$TEST_ROOT/expected-published-spec.yaml"
 {
@@ -274,6 +295,7 @@ for result in \
   "DALEC_HOMEBREW_LIVE_TARGET=homebrew/image" \
   "DALEC_HOMEBREW_LIVE_DALEC_ROUTE=homebrew/image" \
   "DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=2026-06-01T00:00:00Z" \
+  "DALEC_HOMEBREW_LIVE_METADATA_BUNDLE=$METADATA_BUNDLE" \
   "DALEC_HOMEBREW_LIVE_FINAL_REF=dalec-homebrew-live@$DIGEST_D"; do
   assert_contains "$published_output" "$result"
 done
@@ -309,6 +331,8 @@ for argument in \
   assert_contains "$DOCKER_LOG" "--build-arg $argument"
 done
 assert_not_contains "$DOCKER_LOG" "--build-arg DALEC_HOMEBREW_METADATA_NOT_BEFORE="
+assert_not_contains "$DOCKER_LOG" "--build-arg DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST="
+assert_not_contains "$DOCKER_LOG" "--build-context dalec-homebrew-metadata="
 assert_not_contains "$DOCKER_LOG" "--build-arg DALEC_HOMEBREW_FRONTEND_INDEX_REF="
 for result in \
   "DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF=registry.example/dalec-homebrew-runtime-base@$DIGEST_A" \

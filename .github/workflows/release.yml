@@ -531,6 +531,13 @@ jobs:
           [[ $(platform_digest "$materializer_repo@$materializer_index" linux/amd64) == "$materializer_amd64" ]]
           [[ $(platform_digest "$materializer_repo@$materializer_index" linux/arm64) == "$materializer_arm64" ]]
 
+          go run ./cmd/metadata-bundle \
+            --output dist/release/metadata-bundle \
+            --digest-output dist/release/metadata-bundle.digest
+          METADATA_BUNDLE_DIGEST=$(<dist/release/metadata-bundle.digest)
+          [[ "$METADATA_BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          export METADATA_BUNDLE_DIGEST
+
           export RUNTIME_BASE_REF_AMD64="$runtime_base_repo@$runtime_base_amd64"
           export RUNTIME_BASE_REF_ARM64="$runtime_base_repo@$runtime_base_arm64"
           export MATERIALIZER_REF_AMD64="$materializer_repo@$materializer_amd64"
@@ -783,6 +790,7 @@ jobs:
             DALEC_HOMEBREW_LIVE_FRONTEND_REF="$frontend_ref" \
             DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF="$dalec_frontend_ref" \
             DALEC_HOMEBREW_LIVE_TARGET="$dalec_frontend_route" \
+            DALEC_HOMEBREW_LIVE_METADATA_BUNDLE="$PWD/dist/release/metadata-bundle" \
             DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH="$source_date_epoch" \
             DALEC_HOMEBREW_LIVE_IMAGE="$final_image" \
             DALEC_HOMEBREW_LIVE_OUTPUT=load \
@@ -2441,6 +2449,14 @@ jobs:
           find dist/release/evidence -maxdepth 1 -type f -exec mv {} dist/release/ \;
           find dist/release/runtime-evidence -maxdepth 1 -type f -exec mv {} dist/release/ \;
           rmdir dist/release/evidence dist/release/runtime-evidence
+          test -s dist/release/metadata-bundle/manifest.json
+          test -s dist/release/metadata-bundle/formula.jws.json
+          test -s dist/release/metadata-bundle/formula_tap_migrations.jws.json
+          test -s dist/release/metadata-bundle.digest
+          mv dist/release/metadata-bundle/manifest.json dist/release/metadata-bundle-manifest.json
+          mv dist/release/metadata-bundle/formula.jws.json dist/release/metadata-formula.jws.json
+          mv dist/release/metadata-bundle/formula_tap_migrations.jws.json dist/release/metadata-migrations.jws.json
+          rmdir dist/release/metadata-bundle
 
       - name: Sign release records
         run: |
@@ -2587,6 +2603,10 @@ jobs:
               components.json.bundle \
               digests.json \
               inputs.json \
+              metadata-bundle.digest \
+              metadata-bundle-manifest.json \
+              metadata-formula.jws.json \
+              metadata-migrations.jws.json \
               metadata-snapshot.json \
               metadata-snapshot.json.bundle \
               provenance.json \
@@ -2607,7 +2627,7 @@ jobs:
               printf 'runtime-evidence-linux-amd64-%s.tar.gz\n' "$spec"
             done
           } | sort > "$contract_names"
-          expected_contract_count=$((30 + 2 * ${#specs[@]} + ${#amd64_only_specs[@]}))
+          expected_contract_count=$((34 + 2 * ${#specs[@]} + ${#amd64_only_specs[@]}))
           (( $(wc -l < "$contract_names") == expected_contract_count ))
           (
             cd dist/release

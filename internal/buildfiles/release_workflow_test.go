@@ -785,8 +785,63 @@ func TestReleaseWorkflowV2ComponentContract(t *testing.T) {
 		t.Fatal("promotion does not cover all five V2 components")
 	}
 	recovery := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "promote", "Verify signed bundle checksums"), "run"))
-	if !strings.Contains(recovery, "expected_contract_count=$((30 + 2 * ${#specs[@]} + ${#amd64_only_specs[@]}))") {
+	if !strings.Contains(recovery, "expected_contract_count=$((34 + 2 * ${#specs[@]} + ${#amd64_only_specs[@]}))") {
 		t.Fatal("recovery asset contract does not count five-component evidence and amd64-only runtime evidence")
+	}
+}
+
+func TestReleaseWorkflowPinsMetadataBundle(t *testing.T) {
+	workflow := workflowYAML(t, "release.yml")
+	buildScript := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "build", "Build children and assemble component indexes"), "run"))
+	captureIndex := strings.Index(buildScript, "go run ./cmd/metadata-bundle")
+	frontendIndex := strings.Index(buildScript, "for target in frontend-amd64 frontend-arm64; do")
+	if captureIndex < 0 || frontendIndex < 0 || captureIndex >= frontendIndex {
+		t.Fatal("release metadata bundle is not captured before both frontend children")
+	}
+	for _, want := range []string{
+		`--output dist/release/metadata-bundle`,
+		`--digest-output dist/release/metadata-bundle.digest`,
+		`METADATA_BUNDLE_DIGEST=$(<dist/release/metadata-bundle.digest)`,
+		`[[ "$METADATA_BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]`,
+		`export METADATA_BUNDLE_DIGEST`,
+	} {
+		if !strings.Contains(buildScript, want) {
+			t.Fatalf("release frontend build does not bind captured metadata with %q", want)
+		}
+	}
+
+	upload := yamlMappingValue(t, workflowStepByName(t, workflow, "build", "Upload immutable build tuple"), "with")
+	if got := yamlScalarValue(t, yamlMappingValue(t, upload, "path")); got != "dist/release" {
+		t.Fatalf("release build artifact path = %q, want dist/release", got)
+	}
+
+	integrationScript := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "integration", "Build and test a runtime from the released tuple"), "run"))
+	if want := `DALEC_HOMEBREW_LIVE_METADATA_BUNDLE="$PWD/dist/release/metadata-bundle"`; !strings.Contains(integrationScript, want) {
+		t.Fatalf("release integrations do not consume the captured metadata bundle with %q", want)
+	}
+
+	flattenScript := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "sign", "Flatten release evidence"), "run"))
+	for _, want := range []string{
+		"mv dist/release/metadata-bundle/manifest.json dist/release/metadata-bundle-manifest.json",
+		"mv dist/release/metadata-bundle/formula.jws.json dist/release/metadata-formula.jws.json",
+		"mv dist/release/metadata-bundle/formula_tap_migrations.jws.json dist/release/metadata-migrations.jws.json",
+		"rmdir dist/release/metadata-bundle",
+	} {
+		if !strings.Contains(flattenScript, want) {
+			t.Fatalf("release bundle flattening is missing %q", want)
+		}
+	}
+
+	recovery := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "promote", "Verify signed bundle checksums"), "run"))
+	for _, name := range []string{
+		"metadata-bundle.digest",
+		"metadata-bundle-manifest.json",
+		"metadata-formula.jws.json",
+		"metadata-migrations.jws.json",
+	} {
+		if !strings.Contains(recovery, name) {
+			t.Fatalf("release recovery asset contract is missing %q", name)
+		}
 	}
 }
 

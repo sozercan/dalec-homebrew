@@ -202,6 +202,8 @@ func TestV2ComponentImagesAreExplicitAndMinimal(t *testing.T) {
 func TestFrontendBuildBindsCompleteNonCoreTuple(t *testing.T) {
 	stage := dockerfileStage(t, dockerfileText(t), "FROM go-source AS frontend-build")
 	for _, want := range []string{
+		"ARG METADATA_BUNDLE_DIGEST",
+		"internal/config.MetadataBundleDigest=${METADATA_BUNDLE_DIGEST}",
 		"internal/config.BottleFetcherRef=${BOTTLE_FETCHER_REF}",
 		"internal/config.CatalogExtractorRef=${CATALOG_EXTRACTOR_REF}",
 		"internal/config.TapPolicyDigest=${TAP_POLICY_DIGEST}",

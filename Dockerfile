@@ -378,6 +378,7 @@ ARG SOURCE_DATE_EPOCH
 ARG RUNTIME_BASE_REF
 ARG MATERIALIZER_REF
 ARG FRONTEND_REF
+ARG METADATA_BUNDLE_DIGEST
 ARG HOMEBREW_COMMIT
 ARG HOMEBREW_KEYS_DIGEST
 ARG HOMEBREW_RUBY_VERSION
@@ -395,6 +396,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -X github.com/sozercan/dalec-homebrew/internal/config.RuntimeBaseRef=${RUNTIME_BASE_REF} \
       -X github.com/sozercan/dalec-homebrew/internal/config.MaterializerRef=${MATERIALIZER_REF} \
       -X github.com/sozercan/dalec-homebrew/internal/config.FrontendRef=${FRONTEND_REF} \
+      -X github.com/sozercan/dalec-homebrew/internal/config.MetadataBundleDigest=${METADATA_BUNDLE_DIGEST} \
       -X github.com/sozercan/dalec-homebrew/internal/config.HomebrewCommit=${HOMEBREW_COMMIT} \
       -X github.com/sozercan/dalec-homebrew/internal/config.VerificationKeysDigest=${HOMEBREW_KEYS_DIGEST} \
       -X github.com/sozercan/dalec-homebrew/internal/config.PortableRubyVersion=${HOMEBREW_RUBY_VERSION} \

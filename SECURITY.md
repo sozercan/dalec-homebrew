@@ -69,18 +69,20 @@ V2 records created before the timestamp trust marker existed may omit
 resolvers always emit the marker, and release signing rejects an omission, so a
 new signed tuple cannot downgrade the timestamp trust evidence.
 
-Release integrations may fetch the same authenticated documents on independent
-runners. Signing therefore requires identical Homebrew commit, signer, payload
-digests, and rollback identity across every observation. PS512 uses randomized
-RSA-PSS signatures, so independently issued valid envelopes for the same
-payload may have different envelope digests. Every envelope digest remains
-required and is retained with its observation; the accepted snapshot takes its
-envelope pair from the same deterministic observation as its timestamp.
-Signed-payload timestamps must be byte-for-byte identical. Only when the V2
-record identifies the aggregate timestamp as `http-last-modified` may those
-unsigned timestamps differ; the signed release evidence retains every
-observation and selects the earliest one deterministically. These exceptions do
-not permit payload, signer, commit, or rollback drift.
+The release workflow fetches and verifies the Formula and migration envelopes
+once, before either frontend child is built. It compiles the resulting bundle
+digest into both children and supplies the same bundle as a read-only named
+BuildKit context to every platform/spec integration. The top-level build
+argument must match the compiled digest, and the context bytes must match the
+bundle manifest; omission, substitution, or partial bundles fail closed.
+Signing still requires identical Homebrew commit, signer, payload digests, and
+rollback identity across every observation and retains both envelope digests
+with each observation. PS512 uses randomized RSA-PSS signatures, so another
+independent capture of the same payload can have different envelope bytes, but
+a single release tuple does not mix independent captures. Signed-payload
+timestamps must be byte-for-byte identical. The existing HTTP timestamp
+fallback remains explicit and does not permit payload, signer, commit, or
+rollback drift.
 
 Callers may supply a metadata rollback floor, but the repository release workflow does not persist one across releases. For release-bound frontends, it limits metadata age to seven days and future skew to 15 minutes, requires every release integration to use the same authenticated snapshot, and records that snapshot in signed evidence. This is not cross-release anti-rollback: a previously superseded but still-fresh signed snapshot may be accepted by a later release.
 

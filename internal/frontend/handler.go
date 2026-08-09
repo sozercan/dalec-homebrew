@@ -108,13 +108,9 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		preflight[i] = preflightPlatform{platform: p, selection: selection, effectiveSpec: effective}
 	}
 
-	baseURL, err := metadataBaseURL(cfg.FormulaURL, cfg.MigrationsURL)
+	snapshot, err := loadMetadataSnapshot(ctx, client, cfg)
 	if err != nil {
 		return nil, err
-	}
-	snapshot, err := metadata.Fetch(ctx, metadata.Config{BaseURL: baseURL, Freshness: metadata.FreshnessPolicy{MaxAge: cfg.MetadataMaxAge, RollbackFloor: cfg.MetadataNotBefore}})
-	if err != nil {
-		return nil, fmt.Errorf("authenticate Homebrew metadata: %w", err)
 	}
 	registry, err := hboci.NewClient("https://ghcr.io")
 	if err != nil {

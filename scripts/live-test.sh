@@ -13,6 +13,7 @@ FINAL_OUTPUT=${DALEC_HOMEBREW_LIVE_OUTPUT:-load}
 PROGRESS=${DALEC_HOMEBREW_LIVE_PROGRESS:-plain}
 SOURCE_DATE_EPOCH=${DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH:-1781049600}
 METADATA_NOT_BEFORE=${DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE:-}
+METADATA_BUNDLE=${DALEC_HOMEBREW_LIVE_METADATA_BUNDLE:-}
 BASE_REF=${DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF:-}
 MATERIALIZER_REF=${DALEC_HOMEBREW_LIVE_MATERIALIZER_REF:-}
 FRONTEND_REF=${DALEC_HOMEBREW_LIVE_FRONTEND_REF:-}
@@ -53,6 +54,20 @@ DALEC_FRONTEND_REF=$(jq -er '.index | select(type == "string" and length > 0)' <
   fail_usage "validated upstream Dalec frontend pin did not contain an index"
 DALEC_ROUTE=$(jq -er '.route | select(type == "string" and length > 0)' <<<"$DALEC_SELECTION") ||
   fail_usage "validated upstream Dalec frontend pin did not contain a route"
+METADATA_BUNDLE_DIGEST=
+if [[ -n "$METADATA_BUNDLE" ]]; then
+  METADATA_BUNDLE=${METADATA_BUNDLE%/}
+  [[ -n "$METADATA_BUNDLE" && -d "$METADATA_BUNDLE" ]] ||
+    fail_usage "DALEC_HOMEBREW_LIVE_METADATA_BUNDLE must name a metadata bundle directory"
+  metadata_bundle_digest_file="${METADATA_BUNDLE}.digest"
+  [[ -f "$metadata_bundle_digest_file" ]] ||
+    fail_usage "DALEC_HOMEBREW_LIVE_METADATA_BUNDLE requires sibling digest file ${metadata_bundle_digest_file}"
+  [[ $(awk 'END { print NR }' "$metadata_bundle_digest_file") -eq 1 ]] ||
+    fail_usage "metadata bundle digest file must contain exactly one line"
+  METADATA_BUNDLE_DIGEST=$(<"$metadata_bundle_digest_file")
+  [[ "$METADATA_BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    fail_usage "metadata bundle digest file must contain one sha256 digest"
+fi
 if [[ -z "$BUILDER" || -z "$PLATFORM" || ( "$USE_PUBLISHED_COMPONENTS" -eq 0 && -z "$REGISTRY" ) ]]; then
   cat >&2 <<'USAGE'
 usage: rebuild components:
@@ -75,6 +90,7 @@ Optional settings for either mode:
        DALEC_HOMEBREW_LIVE_IMAGE=dalec-homebrew-live:dev
        DALEC_HOMEBREW_LIVE_OUTPUT=load|push
        DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=<RFC3339 timestamp>
+       DALEC_HOMEBREW_LIVE_METADATA_BUNDLE=<captured-metadata-directory>
        DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN=release/dalec-frontend.json
        DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF=<index-or-platform-child@sha256:digest>
        DALEC_HOMEBREW_LIVE_TARGET=homebrew/image
@@ -172,7 +188,8 @@ if (( USE_PUBLISHED_COMPONENTS == 0 )); then
     --build-arg "RUNTIME_BASE=$RUNTIME_BASE"
   build_component FRONTEND_REF "gateway frontend" frontend dalec-homebrew \
     --build-arg "RUNTIME_BASE_REF=$BASE_REF" \
-    --build-arg "MATERIALIZER_REF=$MATERIALIZER_REF"
+    --build-arg "MATERIALIZER_REF=$MATERIALIZER_REF" \
+    --build-arg "METADATA_BUNDLE_DIGEST=$METADATA_BUNDLE_DIGEST"
 else
   echo "==> Using published component tuple for $PLATFORM"
 fi
@@ -197,6 +214,10 @@ fi
 if [[ -n "$METADATA_NOT_BEFORE" ]]; then
   FINAL_BUILD_ARGS+=(--build-arg "DALEC_HOMEBREW_METADATA_NOT_BEFORE=$METADATA_NOT_BEFORE")
 fi
+if [[ -n "$METADATA_BUNDLE" ]]; then
+  FINAL_BUILD_ARGS+=(--build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$METADATA_BUNDLE_DIGEST")
+  FINAL_BUILD_ARGS+=(--build-context "dalec-homebrew-metadata=$METADATA_BUNDLE")
+fi
 
 echo "==> Building final runtime image $FINAL_IMAGE"
 docker buildx build \
@@ -220,6 +241,7 @@ DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_REF=$DALEC_FRONTEND_REF
 DALEC_HOMEBREW_LIVE_TARGET=$DALEC_ROUTE
 DALEC_HOMEBREW_LIVE_DALEC_ROUTE=$DALEC_ROUTE
 DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE=$METADATA_NOT_BEFORE
+DALEC_HOMEBREW_LIVE_METADATA_BUNDLE=$METADATA_BUNDLE
 DALEC_HOMEBREW_LIVE_FINAL_IMAGE=$FINAL_IMAGE
 DALEC_HOMEBREW_LIVE_FINAL_DIGEST=$FINAL_DIGEST
 DALEC_HOMEBREW_LIVE_FINAL_REF=$FINAL_REF
