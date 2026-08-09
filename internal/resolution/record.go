@@ -603,12 +603,15 @@ func ValidatePinnedReference(ref string) error {
 }
 
 // SameReferenceRepository reports whether two OCI references resolve to the
-// same normalized repository identity. Tags and digests do not affect the
-// comparison.
+// same normalized repository identity. Registry hostnames are compared
+// case-insensitively; repository paths remain case-sensitive. Tags and digests
+// do not affect the comparison.
 func SameReferenceRepository(a, b string) bool {
 	aNamed, aErr := reference.ParseNormalizedNamed(a)
 	bNamed, bErr := reference.ParseNormalizedNamed(b)
-	return aErr == nil && bErr == nil && reference.TrimNamed(aNamed).String() == reference.TrimNamed(bNamed).String()
+	return aErr == nil && bErr == nil &&
+		strings.EqualFold(reference.Domain(aNamed), reference.Domain(bNamed)) &&
+		reference.Path(aNamed) == reference.Path(bNamed)
 }
 
 func validatePinnedReference(ref string) error { return ValidatePinnedReference(ref) }
