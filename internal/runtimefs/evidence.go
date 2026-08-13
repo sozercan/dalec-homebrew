@@ -106,10 +106,21 @@ func formulaIDForRack(record *resolution.Record, rack string) string {
 
 const homebrewRepositoryRoot = "Homebrew"
 
-type pruneSubtreeCommitment struct {
+type pruneSubtreeCommitmentV1 struct {
 	SchemaVersion string                        `json:"schema_version"`
 	Root          string                        `json:"root"`
 	Reason        PruneReason                   `json:"reason"`
+	EntryCount    int                           `json:"entry_count"`
+	RegularBytes  int64                         `json:"regular_bytes"`
+	Entries       []pruneSubtreeCommitmentEntry `json:"entries"`
+}
+
+type pruneSubtreeCommitmentV2 struct {
+	SchemaVersion string                        `json:"schema_version"`
+	Root          string                        `json:"root"`
+	Reason        PruneReason                   `json:"reason"`
+	Package       string                        `json:"package"`
+	FormulaID     string                        `json:"formula_id"`
 	EntryCount    int                           `json:"entry_count"`
 	RegularBytes  int64                         `json:"regular_bytes"`
 	Entries       []pruneSubtreeCommitmentEntry `json:"entries"`
@@ -126,9 +137,26 @@ type pruneSubtreeCommitmentEntry struct {
 }
 
 func buildPruneManifest(scan *sourceScan, record *resolution.Record, policy *normalizedPolicy, resolutionDigest string) (PruneManifest, error) {
-	subtree, compacted, err := compactHomebrewRepository(scan)
+	subtree, compacted, err := compactHomebrewRepository(scan, record)
 	if err != nil {
 		return PruneManifest{}, runtimeError(CodeEvidence, homebrewRepositoryRoot, "commit pruned repository subtree: %v", err)
+	}
+	var subtrees []PruneSubtree
+	if subtree != nil {
+		subtrees = append(subtrees, *subtree)
+	}
+	if isV2RuntimeRecord(record) {
+		runtimeSubtrees, runtimeCompacted, err := compactV2RuntimeSubtrees(scan, record, compacted)
+		if err != nil {
+			return PruneManifest{}, runtimeError(CodeEvidence, "", "commit pruned runtime subtree: %v", err)
+		}
+		subtrees = append(subtrees, runtimeSubtrees...)
+		if compacted == nil {
+			compacted = make(map[string]struct{}, len(runtimeCompacted))
+		}
+		for rel := range runtimeCompacted {
+			compacted[rel] = struct{}{}
+		}
 	}
 
 	entries := make([]PruneEntry, 0, len(scan.pruned))
@@ -139,10 +167,6 @@ func buildPruneManifest(scan *sourceScan, record *resolution.Record, policy *nor
 		entries = append(entries, buildPruneEntry(entry, record))
 	}
 	slices.SortFunc(entries, func(a, b PruneEntry) int { return strings.Compare(a.Path, b.Path) })
-	var subtrees []PruneSubtree
-	if subtree != nil {
-		subtrees = append(subtrees, *subtree)
-	}
 	slices.SortFunc(subtrees, func(a, b PruneSubtree) int { return strings.Compare(a.Path, b.Path) })
 	return PruneManifest{
 		SchemaVersion:       pruneSchemaVersion(record),
@@ -184,7 +208,7 @@ func buildPruneEntry(entry *sourceEntry, record *resolution.Record) PruneEntry {
 	return item
 }
 
-func compactHomebrewRepository(scan *sourceScan) (*PruneSubtree, map[string]struct{}, error) {
+func compactHomebrewRepository(scan *sourceScan, record *resolution.Record) (*PruneSubtree, map[string]struct{}, error) {
 	root := scan.byPath[homebrewRepositoryRoot]
 	if root == nil || root.typeName != TypeDirectory || root.retain || root.pruneReason != PruneRepository {
 		return nil, nil, nil
@@ -206,7 +230,13 @@ func compactHomebrewRepository(scan *sourceScan) (*PruneSubtree, map[string]stru
 		return nil, nil, nil
 	}
 
-	subtree, err := commitPrunedSubtree(homebrewRepositoryRoot, PruneRepository, entries)
+	var subtree PruneSubtree
+	var err error
+	if isV2RuntimeRecord(record) {
+		subtree, err = commitPrunedSubtreeV2(homebrewRepositoryRoot, PruneRepository, "", "", entries)
+	} else {
+		subtree, err = commitPrunedSubtree(homebrewRepositoryRoot, PruneRepository, entries)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -217,7 +247,91 @@ func compactHomebrewRepository(scan *sourceScan) (*PruneSubtree, map[string]stru
 	return &subtree, compacted, nil
 }
 
+func compactV2RuntimeSubtrees(scan *sourceScan, record *resolution.Record, alreadyCompacted map[string]struct{}) ([]PruneSubtree, map[string]struct{}, error) {
+	entries := slices.Clone(scan.entries)
+	slices.SortFunc(entries, func(a, b *sourceEntry) int { return strings.Compare(a.rel, b.rel) })
+
+	var subtrees []PruneSubtree
+	compacted := map[string]struct{}{}
+	for i := 0; i < len(entries); i++ {
+		root := entries[i]
+		if root == nil || root.typeName != TypeDirectory || root.retain || !compactableV2RuntimeReason(root.pruneReason) {
+			continue
+		}
+		if _, exists := alreadyCompacted[root.rel]; exists {
+			continue
+		}
+		if root.packageName == "" || root.metadataExport != "" {
+			continue
+		}
+		formulaID := formulaIDForRack(record, root.packageName)
+		if formulaID == "" {
+			continue
+		}
+
+		end := i + 1
+		for end < len(entries) && isWithin(entries[end].rel, root.rel) {
+			end++
+		}
+		// A one-row commitment is larger than its explicit directory entry and
+		// provides no compaction benefit.
+		if end-i < 2 {
+			continue
+		}
+		uniform := true
+		for _, entry := range entries[i:end] {
+			if entry == nil || entry.retain || entry.pruneReason != root.pruneReason || entry.packageName != root.packageName || entry.metadataExport != "" {
+				uniform = false
+				break
+			}
+			if _, exists := alreadyCompacted[entry.rel]; exists {
+				uniform = false
+				break
+			}
+		}
+		if !uniform {
+			continue
+		}
+
+		subtree, err := commitPrunedSubtreeV2(root.rel, root.pruneReason, root.packageName, formulaID, entries[i:end])
+		if err != nil {
+			return nil, nil, err
+		}
+		subtrees = append(subtrees, subtree)
+		for _, entry := range entries[i:end] {
+			compacted[entry.rel] = struct{}{}
+		}
+		i = end - 1
+	}
+	return subtrees, compacted, nil
+}
+
+func compactableV2RuntimeReason(reason PruneReason) bool {
+	switch reason {
+	case PruneRuntimeHeaders,
+		PruneRuntimeDocs,
+		PruneRuntimeBuild,
+		PruneRuntimeTests,
+		PruneRuntimeShell,
+		PruneRuntimeShareDoc:
+		return true
+	default:
+		return false
+	}
+}
+
 func commitPrunedSubtree(root string, reason PruneReason, entries []*sourceEntry) (PruneSubtree, error) {
+	return commitPrunedSubtreeVersion(PruneSubtreeCommitmentSchemaVersion, root, reason, "", "", entries)
+}
+
+func commitPrunedSubtreeV2(root string, reason PruneReason, packageName, formulaID string, entries []*sourceEntry) (PruneSubtree, error) {
+	if (packageName == "") != (formulaID == "") {
+		return PruneSubtree{}, fmt.Errorf("package and formula identity must both be empty or both be set")
+	}
+	return commitPrunedSubtreeVersion(PruneSubtreeCommitmentSchemaVersionV2, root, reason, packageName, formulaID, entries)
+}
+
+func commitPrunedSubtreeVersion(schemaVersion, root string, reason PruneReason, packageName, formulaID string, entries []*sourceEntry) (PruneSubtree, error) {
 	if root == "" {
 		return PruneSubtree{}, fmt.Errorf("empty subtree root")
 	}
@@ -278,23 +392,46 @@ func commitPrunedSubtree(root string, reason PruneReason, entries []*sourceEntry
 		return PruneSubtree{}, fmt.Errorf("subtree root %q is not a directory", root)
 	}
 
-	data, err := canonicalJSON(pruneSubtreeCommitment{
-		SchemaVersion: PruneSubtreeCommitmentSchemaVersion,
-		Root:          root,
-		Reason:        reason,
-		EntryCount:    len(commitmentEntries),
-		RegularBytes:  regularBytes,
-		Entries:       commitmentEntries,
-	})
+	var commitment any
+	switch schemaVersion {
+	case PruneSubtreeCommitmentSchemaVersion:
+		if packageName != "" || formulaID != "" {
+			return PruneSubtree{}, fmt.Errorf("v1 subtree commitment cannot carry package attribution")
+		}
+		commitment = pruneSubtreeCommitmentV1{
+			SchemaVersion: schemaVersion,
+			Root:          root,
+			Reason:        reason,
+			EntryCount:    len(commitmentEntries),
+			RegularBytes:  regularBytes,
+			Entries:       commitmentEntries,
+		}
+	case PruneSubtreeCommitmentSchemaVersionV2:
+		commitment = pruneSubtreeCommitmentV2{
+			SchemaVersion: schemaVersion,
+			Root:          root,
+			Reason:        reason,
+			Package:       packageName,
+			FormulaID:     formulaID,
+			EntryCount:    len(commitmentEntries),
+			RegularBytes:  regularBytes,
+			Entries:       commitmentEntries,
+		}
+	default:
+		return PruneSubtree{}, fmt.Errorf("unsupported subtree commitment schema %q", schemaVersion)
+	}
+	data, err := canonicalJSON(commitment)
 	if err != nil {
 		return PruneSubtree{}, err
 	}
 	return PruneSubtree{
 		Path:             root,
 		Reason:           reason,
+		Package:          packageName,
+		FormulaID:        formulaID,
 		EntryCount:       len(commitmentEntries),
 		RegularBytes:     regularBytes,
-		CommitmentSchema: PruneSubtreeCommitmentSchemaVersion,
+		CommitmentSchema: schemaVersion,
 		CommitmentDigest: digest.FromBytes(data).String(),
 	}, nil
 }
@@ -559,7 +696,15 @@ func shortHash(value string) string {
 
 func looksLikeLegalText(filename string) bool {
 	base := strings.ToLower(path.Base(filename))
-	return strings.HasPrefix(base, "license") || strings.HasPrefix(base, "copying") || strings.HasPrefix(base, "notice") || strings.HasPrefix(base, "copyright")
+	for _, name := range []string{"license", "licenses", "copying", "notice", "notices", "copyright", "copyrights"} {
+		if base == name {
+			return true
+		}
+		if strings.HasPrefix(base, name+".") || strings.HasPrefix(base, name+"-") || strings.HasPrefix(base, name+"_") {
+			return true
+		}
+	}
+	return false
 }
 
 func canonicalJSON(value any) ([]byte, error) {

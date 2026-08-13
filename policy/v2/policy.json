@@ -33,6 +33,18 @@
     "waiver": "tap-catalog-buildkit-and-verified-checksum-v1"
   },
   "writable_path_template": "/home/linuxbrew/.linuxbrew/var/<rack-name>",
+  "runtime_profile": {
+    "name": "minimal-v1",
+    "rules": [
+      "transitive-core-build-metadata-v1",
+      "transitive-core-headers-v1",
+      "transitive-core-man-info-v1",
+      "transitive-core-python-stdlib-tests-v1",
+      "transitive-core-share-doc-v1",
+      "transitive-core-shell-completions-v1",
+      "transitive-core-static-archives-v1"
+    ]
+  },
   "package_capabilities": {
     "homebrew/core/certifi": {
       "rules": [
@@ -98,13 +110,15 @@
     "homebrew/core/python@3.13": {
       "rules": [
         "python-venv-template",
-        "runtime-aux-python"
+        "runtime-aux-python",
+        "transitive-core-python-stdlib-tests-v1"
       ]
     },
     "homebrew/core/python@3.14": {
       "rules": [
         "python-venv-template",
-        "runtime-aux-python"
+        "runtime-aux-python",
+        "transitive-core-python-stdlib-tests-v1"
       ]
     },
     "homebrew/core/llvm": {

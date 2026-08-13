@@ -57,6 +57,18 @@ V2 public-tap releases additionally preserve these properties:
 15. Prebuilt executable archives are accepted only for exact Formula IDs in the embedded tap policy. The policy binds the Formula source digest, version, platform URLs and checksums, complete archive inventory, payload mapping, archive limits, static ELF properties, Go module identity, and CGO setting; Dalec input cannot provide or override any of those values.
 16. Build-local ingestion never runs a prebuilt Formula's `install` or `post_install` method. It verifies the upstream archive, derives a canonical receiptless bottle containing only the selected executable and authenticated Formula source, and binds the upstream and derived identities separately. Native bottles take precedence.
 17. Derived bottles pass the same hostile-bottle verification, offline per-package installation, receipt normalization, prefix-delta containment, runtime allowlisting, pruning, and SBOM attribution as upstream bottles. The explicit prebuilt derivation evidence prevents the build-locally generated artifact from being represented as an upstream-published bottle.
+18. A release-bound V2 frontend automatically applies its immutable runtime-
+    minimization policy after complete resolution, verification, and offline
+    installation. Dalec input and build arguments cannot disable or broaden the
+    policy. Requested Formulae are the retention boundary; only exact policy-
+    enumerated headers, man and Info trees, non-legal `share/doc` content,
+    build metadata, Python standard-library test paths, shell completions, and
+    bounded `lib/` static archives in transitive `homebrew/core` kegs are
+    removed. Shared libraries, plugins, `libexec`, configuration, locales,
+    site-packages, `ensurepip`, `venv`, `node_modules`, legal or license text,
+    and static archives in those protected runtime-data locations remain.
+    Unknown identities and paths fail closed, evidence binds the pruning-policy
+    identity and exact decisions, and V1 retains its legacy assembly behavior.
 
 ## Upstream trust limitations
 

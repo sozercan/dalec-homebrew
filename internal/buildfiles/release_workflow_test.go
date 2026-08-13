@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	runtimepolicy "github.com/sozercan/dalec-homebrew/internal/policy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -390,6 +391,33 @@ func TestReleaseWorkflowSpecInventory(t *testing.T) {
 	}
 }
 
+func TestReleaseWorkflowRequiresAutomaticRuntimeMinimizationEvidence(t *testing.T) {
+	workflow := releaseWorkflowText(t)
+	for _, required := range []string{
+		`minimized_runtime_image=`,
+		`if [[ "$spec" == live-hf-curl ]]`,
+		`./scripts/image-size-report.sh`,
+		`dalec-homebrew-runtime-minimization-evidence/v1`,
+		`dalec-homebrew-prune-manifest/v4`,
+		`dalec-homebrew-prune-subtree-commitment/v2`,
+		`transitive_runtime_headers`,
+		`transitive_runtime_man_info`,
+		`transitive_runtime_build_metadata`,
+		`transitive_runtime_python_tests`,
+		`transitive_runtime_share_doc`,
+		`transitive_runtime_shell_completions`,
+		`transitive_runtime_static_archives`,
+		`requested_formulae`,
+		`represented_path_count`,
+		`[$subtrees[].regular_bytes]`,
+		`runtime-minimization-${PLATFORM_SLUG}.json`,
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("release workflow does not require automatic runtime-minimization evidence %q", required)
+		}
+	}
+}
+
 func TestReleaseRuntimeEvidenceAssertionsAcceptOnlyCoherentSchemas(t *testing.T) {
 	workflow := releaseWorkflowText(t)
 	match := regexp.MustCompile(`(?m)^  RELEASE_SPECS: (.+)$`).FindStringSubmatch(workflow)
@@ -415,7 +443,7 @@ func TestReleaseRuntimeEvidenceAssertionsAcceptOnlyCoherentSchemas(t *testing.T)
 		"dalec-homebrew-runtime-manifest/v2",
 		"dalec-homebrew-resolution/v2",
 		"dalec-homebrew-runtime-inventory/v2",
-		"dalec-homebrew-prune-manifest/v3",
+		"dalec-homebrew-prune-manifest/v4",
 	}
 	wantFixtureMaterializationAssertions := []string{
 		`materialization_v1="$evidence_dir/materialization.json"`,
@@ -527,7 +555,7 @@ func TestVMLiveValidateAcceptsOnlyCoherentEvidenceSchemas(t *testing.T) {
 		{name: "manifest.json", v1: "dalec-homebrew-runtime-manifest/v1", v2: "dalec-homebrew-runtime-manifest/v2"},
 		{name: "resolution.json", v1: "dalec-homebrew-resolution/v1", v2: "dalec-homebrew-resolution/v2"},
 		{name: "runtime-inventory.json", v1: "dalec-homebrew-runtime-inventory/v1", v2: "dalec-homebrew-runtime-inventory/v2"},
-		{name: "prune-manifest.json", v1: "dalec-homebrew-prune-manifest/v2", v2: "dalec-homebrew-prune-manifest/v3"},
+		{name: "prune-manifest.json", v1: "dalec-homebrew-prune-manifest/v2", v2: "dalec-homebrew-prune-manifest/v4"},
 	}
 
 	writeDocuments := func(t *testing.T, evidenceDir string, mask int) {
@@ -785,8 +813,38 @@ func TestReleaseWorkflowV2ComponentContract(t *testing.T) {
 		t.Fatal("promotion does not cover all five V2 components")
 	}
 	recovery := yamlScalarValue(t, yamlMappingValue(t, workflowStepByName(t, workflow, "promote", "Verify signed bundle checksums"), "run"))
-	if !strings.Contains(recovery, "expected_contract_count=$((34 + 2 * ${#specs[@]} + ${#amd64_only_specs[@]}))") {
+	if !strings.Contains(recovery, "expected_contract_count=$((36 + 2 * ${#specs[@]} + ${#amd64_only_specs[@]}))") {
 		t.Fatal("recovery asset contract does not count five-component evidence and amd64-only runtime evidence")
+	}
+}
+
+func TestReleaseWorkflowBindsCurrentExecutableRuntimePolicyDigest(t *testing.T) {
+	digest, err := runtimepolicy.V2RuntimePolicyDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(repositoryRoot(t), "release", "components-v2.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		ExecutableRuntimePolicyDigest string `json:"executable_runtime_policy_digest"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.ExecutableRuntimePolicyDigest != digest {
+		t.Fatalf("components-v2 executable runtime policy digest = %q, want %q", manifest.ExecutableRuntimePolicyDigest, digest)
+	}
+
+	workflowData, err := os.ReadFile(filepath.Join(repositoryRoot(t), ".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := `.executable_runtime_policy_digest == "` + digest + `"`
+	if got := strings.Count(string(workflowData), gate); got != 1 {
+		t.Fatalf("release workflow current executable runtime policy digest gate count = %d, want 1", got)
 	}
 }
 
@@ -1397,7 +1455,7 @@ func TestReleaseWorkflowRuntimeEvidenceArtifactLayout(t *testing.T) {
 	upload := yamlMappingValue(t, workflowStepByName(t, workflow, "integration", "Upload runtime evidence"), "with")
 	for key, want := range map[string]string{
 		"name": "runtime-evidence-${{ matrix.slug }}",
-		"path": "runtime-evidence-${{ matrix.slug }}-*.tar.gz",
+		"path": "runtime-evidence-${{ matrix.slug }}-*.tar.gz\nruntime-minimization-${{ matrix.slug }}.json\n",
 	} {
 		if got := yamlScalarValue(t, yamlMappingValue(t, upload, key)); got != want {
 			t.Fatalf("runtime evidence upload %s = %q, want %q", key, got, want)

@@ -230,6 +230,52 @@ func TestCanonicalV2StableAcrossSetOrdering(t *testing.T) {
 	}
 }
 
+func TestV2RuntimeProfileIdentity(t *testing.T) {
+	for _, profile := range []string{"", RuntimeProfileMinimalV1} {
+		record := validRecordV2()
+		record.Runtime.Profile = profile
+		if err := ValidateV2(record); err != nil {
+			t.Fatalf("profile %q: %v", profile, err)
+		}
+	}
+	record := validRecordV2()
+	record.Runtime.Profile = "standard-v1"
+	if err := ValidateV2(record); err == nil || !strings.Contains(err.Error(), "unsupported V2 runtime profile") {
+		t.Fatalf("ValidateV2() error = %v, want unsupported profile rejection", err)
+	}
+}
+
+func TestCanonicalV2OmitsRuntimeProfile(t *testing.T) {
+	withoutProfile := validRecordV2()
+	minimal := cloneRecordV2(*withoutProfile)
+	minimal.Runtime.Profile = RuntimeProfileMinimalV1
+	withoutProfileCanonical, err := CanonicalV2(withoutProfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	minimalCanonical, err := CanonicalV2(&minimal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(withoutProfileCanonical), `"profile"`) || strings.Contains(string(minimalCanonical), `"profile"`) {
+		t.Fatalf("runtime profile leaked into V2 wire JSON:\nwithout profile=%s\nminimal=%s", withoutProfileCanonical, minimalCanonical)
+	}
+	if string(withoutProfileCanonical) != string(minimalCanonical) {
+		t.Fatal("in-memory runtime profile changed V2 JSON without a pruning-policy binding")
+	}
+	decoded, err := DecodeV2(minimalCanonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Runtime.Profile != "" {
+		t.Fatalf("decoded runtime profile = %q, want empty", decoded.Runtime.Profile)
+	}
+	withProfile := strings.Replace(string(minimalCanonical), `"runtime":{`, `"runtime":{"profile":"minimal-v1",`, 1)
+	if _, err := DecodeV2([]byte(withProfile)); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("DecodeV2() error = %v, want runtime profile wire-field rejection", err)
+	}
+}
+
 func TestV1CanonicalAndDecodeCompatibility(t *testing.T) {
 	record := validRecord()
 	canonical, err := Canonical(record)

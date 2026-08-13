@@ -86,3 +86,16 @@ dependencies:
 		t.Fatalf("error=%v, want obsolete extension rejection", err)
 	}
 }
+
+func TestRuntimeProfileExtensionRejectedForV2(t *testing.T) {
+	data := `x-dalec-homebrew:
+  runtime_profile: minimal-v1
+dependencies:
+  runtime:
+    hello: {}
+`
+	_, err := Validate(load(t, data), "", "amd64", Capabilities{NonCoreTaps: true})
+	if err == nil || !strings.Contains(err.Error(), `top-level extension "x-dalec-homebrew" is unsupported`) {
+		t.Fatalf("error=%v, want runtime profile extension rejection", err)
+	}
+}

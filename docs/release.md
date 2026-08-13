@@ -12,6 +12,12 @@ A V2 release frontend must bind digest-pinned runtime-base, materializer,
 bottle-fetcher, and catalog-extractor images plus the exact non-core policy
 tuple. The frontend itself must also be invoked by digest.
 
+Automatic runtime minimization is part of that immutable V2 policy tuple. The
+release-bound policy defines the exact Formula/path classes eligible for
+pruning; invocation input cannot disable, select, supply, or broaden those
+rules. V1 components retain their legacy assembly behavior. A policy change
+requires a newly built, tested, and signed component tuple.
+
 At invocation, the frontend accepts these gateway build options as bindings:
 
 ```text
@@ -199,7 +205,9 @@ The example runtimes are integration fixtures and are not promoted.
    on native `amd64` and `arm64` workers against that exact bundle, and run the
    release-owned non-core fixture through the published helper tuple while
    producing runtime evidence, component-child SPDX SBOMs, and vulnerability
-   reports.
+   reports. The core matrix must exercise automatic V2 minimization, including
+   requested-Formula preservation, exact safe pruning classes, retained
+   runtime-sensitive paths, and a size report for the minimized runtime.
 5. Sign all ten component children and five indexes, attach the SLSA v0.2
    predicate to every subject and the matching SPDX predicate to each child,
    then blob-sign the component manifest, accepted metadata snapshot, and
@@ -212,6 +220,11 @@ The example runtimes are integration fixtures and are not promoted.
 7. Build platform runtime images, test and scan them by manifest digest, then assemble the final index from those exact manifests.
 8. Attach signed SPDX, provenance, resolution, inventory, prune, materialization, base evidence, and vulnerability or VEX evidence.
 9. Promote by adding references to existing digests; never rebuild or re-resolve during promotion.
+
+Promotion preserves the pruning-policy identity and exact decisions already
+recorded in each tested runtime's resolution, inventory, prune, and manifest
+evidence. It must not reinterpret the runtime under newer rules or regenerate
+evidence with a different policy.
 
 Release CI must reject:
 

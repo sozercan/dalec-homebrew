@@ -404,6 +404,7 @@ func verifyWithPolicyDigest(root string, record *resolution.Record, inventory *I
 	}
 
 	expected := make(map[string]InventoryEntry, len(inventory.Entries))
+	profileAncestors := minimalInventoryExceptionAncestors(inventory.Entries, policy)
 	previous := ""
 	for _, entry := range inventory.Entries {
 		if err := validateRelativePath(entry.Path); err != nil {
@@ -416,7 +417,7 @@ func verifyWithPolicyDigest(root string, record *resolution.Record, inventory *I
 		if _, duplicate := expected[entry.Path]; duplicate {
 			return runtimeError(CodeVerification, entry.Path, "duplicate inventory path")
 		}
-		if err := validateInventoryPolicy(entry, record, policy); err != nil {
+		if err := validateInventoryPolicy(entry, record, policy, profileAncestors); err != nil {
 			return err
 		}
 		expected[entry.Path] = entry
@@ -528,7 +529,7 @@ func verifyOnePath(filename string, info os.FileInfo, expected InventoryEntry, r
 	return nil
 }
 
-func validateInventoryPolicy(entry InventoryEntry, record *resolution.Record, policy *normalizedPolicy) error {
+func validateInventoryPolicy(entry InventoryEntry, record *resolution.Record, policy *normalizedPolicy, profileAncestors map[string]struct{}) error {
 	if reason, _ := forcedPrune(entry.Path); reason != "" {
 		return runtimeError(CodeVerification, entry.Path, "inventory retains forbidden package-manager path (%s)", reason)
 	}
@@ -538,6 +539,11 @@ func validateInventoryPolicy(entry InventoryEntry, record *resolution.Record, po
 		}
 	} else if entry.Type != TypeDirectory {
 		return runtimeError(CodeUnattributed, entry.Path, "non-directory inventory entry has no package")
+	}
+	if reason := minimalRuntimePruneReason(entry.Path, entry.Package, policy); reason != "" && (reason != PruneRuntimeStatic || entry.Type != TypeDirectory) {
+		if _, approvedAncestor := profileAncestors[entry.Path]; !approvedAncestor || entry.Type != TypeDirectory {
+			return runtimeError(CodeVerification, entry.Path, "inventory retains path forbidden by runtime profile (%s)", reason)
+		}
 	}
 
 	allowed := false
@@ -596,6 +602,24 @@ func validateInventoryPolicy(entry InventoryEntry, record *resolution.Record, po
 		return runtimeError(CodeUnexpectedWritable, entry.Path, "immutable code/data path is owner-writable")
 	}
 	return nil
+}
+
+func minimalInventoryExceptionAncestors(entries []InventoryEntry, policy *normalizedPolicy) map[string]struct{} {
+	approved := map[string]struct{}{}
+	for _, entry := range entries {
+		reason, _ := minimalRuntimePathClass(entry.Path, entry.Package, policy)
+		if reason == "" || minimalRuntimePruneReason(entry.Path, entry.Package, policy) != "" {
+			continue
+		}
+		for parent := path.Dir(entry.Path); parent != "."; parent = path.Dir(parent) {
+			parentReason, _ := minimalRuntimePathClass(parent, entry.Package, policy)
+			if parentReason != reason {
+				continue
+			}
+			approved[parent] = struct{}{}
+		}
+	}
+	return approved
 }
 
 func finalInventoryTarget(entries map[string]InventoryEntry, rel string, _ map[string]bool, installPrefix string) (string, error) {

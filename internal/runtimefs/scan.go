@@ -154,7 +154,13 @@ func scanAndPlan(ctx context.Context, sourceRoot string, record *resolution.Reco
 	if err := attributeEntries(scan, policy); err != nil {
 		return nil, err
 	}
+	if err := pruneMinimalRuntimeProfile(scan, policy); err != nil {
+		return nil, err
+	}
 	pruneOptionalDependencyTooling(scan, policy)
+	if err := validateRetainedLinks(scan); err != nil {
+		return nil, err
+	}
 	if err := validateRequestedExecutables(scan, record, policy); err != nil {
 		return nil, err
 	}
@@ -656,6 +662,291 @@ func pruneOptionalDependencyTooling(scan *sourceScan, policy *normalizedPolicy) 
 		entry.retain = false
 		entry.pruneReason = PruneOptionalTooling
 	}
+}
+
+func pruneMinimalRuntimeProfile(scan *sourceScan, policy *normalizedPolicy) error {
+	if policy.allowlist.PruningProfile != policyv2.RuntimeProfileMinimalV1 {
+		return nil
+	}
+
+	candidates := make(map[string]PruneReason)
+	for _, entry := range scan.entries {
+		if !entry.retain {
+			continue
+		}
+		if reason := minimalRuntimePruneReason(entry.rel, entry.packageName, policy); reason != "" && (reason != PruneRuntimeStatic || entry.typeName != TypeDirectory) {
+			candidates[entry.rel] = reason
+		}
+	}
+	// A retained exception such as legal text still needs its directory
+	// ancestors. Keep only those ancestors; siblings remain independently
+	// classified.
+	for _, entry := range scan.entries {
+		if !entry.retain {
+			continue
+		}
+		if _, pruned := candidates[entry.rel]; pruned {
+			continue
+		}
+		for parent := path.Dir(entry.rel); parent != "."; parent = path.Dir(parent) {
+			delete(candidates, parent)
+		}
+	}
+
+	// Homebrew exposes man pages, Info pages, and build metadata through global
+	// symlinks, hardlinks, and copies. Prune an alias only when it matches an
+	// already-classified path from the same exact transitive core Formula and
+	// the alias itself is in the matching bounded global path class.
+	for _, entry := range scan.entries {
+		if !entry.retain {
+			continue
+		}
+		if _, direct := candidates[entry.rel]; direct {
+			continue
+		}
+
+		var target *sourceEntry
+		var reason PruneReason
+		switch entry.typeName {
+		case TypeSymlink:
+			final, err := finalLinkTarget(scan.byPath, entry.rel, nil)
+			if err != nil {
+				return err
+			}
+			reason = candidates[final]
+			target = scan.byPath[final]
+		case TypeRegular:
+			node, ok := policy.nodes[entry.packageName]
+			if !ok {
+				continue
+			}
+			target = scan.byPath[path.Join("Cellar", node.Name, node.PkgVersion, entry.rel)]
+			if target != nil {
+				reason = candidates[target.rel]
+			}
+			if reason == "" || !minimalRuntimeAliasContentMatches(entry, target) {
+				continue
+			}
+		default:
+			continue
+		}
+		if reason == "" || !minimalRuntimeAliasPath(entry.rel, reason) || target == nil || entry.packageName == "" || entry.packageName != target.packageName {
+			continue
+		}
+		candidates[entry.rel] = reason
+	}
+
+	for _, entry := range scan.entries {
+		reason, ok := candidates[entry.rel]
+		if !ok {
+			continue
+		}
+		entry.retain = false
+		entry.pruneReason = reason
+	}
+	return nil
+}
+
+func minimalRuntimePruneReason(rel, packageName string, policy *normalizedPolicy) PruneReason {
+	reason, sub := minimalRuntimePathClass(rel, packageName, policy)
+	if reason == "" {
+		return ""
+	}
+	// Only archives below lib are eligible. Archive-looking files in headers,
+	// documentation, configuration, or other package data remain untouched.
+	if strings.EqualFold(path.Ext(sub), ".a") && !staticArchiveRuntimePath(sub) {
+		return ""
+	}
+	if reason == PruneRuntimeDocs || reason == PruneRuntimeShareDoc || reason == PruneRuntimeShell {
+		if pathContainsLegalText(sub) {
+			return ""
+		}
+	}
+	return reason
+}
+
+func minimalRuntimePathClass(rel, packageName string, policy *normalizedPolicy) (PruneReason, string) {
+	if policy == nil || policy.allowlist.PruningProfile != policyv2.RuntimeProfileMinimalV1 {
+		return "", ""
+	}
+	pkg, sub, ok := kegLocation(rel, policy.nodes)
+	if !ok || pkg != packageName {
+		return "", ""
+	}
+	if _, requested := policy.requested[pkg]; requested {
+		return "", ""
+	}
+	node, ok := policy.nodes[pkg]
+	if !ok || !exactCoreRuntimeProfileNode(node) {
+		return "", ""
+	}
+	if isWithin(sub, "include") {
+		return PruneRuntimeHeaders, sub
+	}
+	if isWithin(sub, "share/man") || isWithin(sub, "share/info") {
+		return PruneRuntimeDocs, sub
+	}
+	if slices.Contains(policy.allowlist.PruningRules, policyv2.RuntimePruneShareDocV1) && isWithin(sub, "share/doc") {
+		return PruneRuntimeShareDoc, sub
+	}
+	for _, root := range []string{"lib/pkgconfig", "share/pkgconfig", "lib/cmake", "share/cmake", "share/aclocal"} {
+		if isWithin(sub, root) {
+			return PruneRuntimeBuild, sub
+		}
+	}
+	if pythonStdlibTestPath(node, sub) {
+		return PruneRuntimeTests, sub
+	}
+	if shellCompletionRuntimePath(sub) {
+		return PruneRuntimeShell, sub
+	}
+	if staticArchiveRuntimePath(sub) {
+		return PruneRuntimeStatic, sub
+	}
+	return "", sub
+}
+
+func exactCoreRuntimeProfileNode(node resolution.Node) bool {
+	id := "homebrew/core/" + node.Name
+	return node.PolicyFormulaID != "" && node.PolicyFormulaID == id && node.FullName == id
+}
+
+func pathContainsLegalText(rel string) bool {
+	for _, component := range strings.Split(rel, "/") {
+		if looksLikeLegalText(component) {
+			return true
+		}
+	}
+	return false
+}
+
+func pythonStdlibTestPath(node resolution.Node, sub string) bool {
+	var minor string
+	switch node.PolicyFormulaID {
+	case "homebrew/core/python@3.13":
+		minor = "3.13"
+	case "homebrew/core/python@3.14":
+		minor = "3.14"
+	default:
+		return false
+	}
+	if !policyv2.HasEmbeddedRule(node.PolicyFormulaID, policyv2.RuntimePrunePythonTestsV1) {
+		return false
+	}
+	testRoot := "lib/python" + minor + "/test"
+	return isWithin(sub, testRoot)
+}
+
+func minimalRuntimeAliasContentMatches(alias, target *sourceEntry) bool {
+	if alias == nil || target == nil || alias.typeName != TypeRegular || target.typeName != TypeRegular {
+		return false
+	}
+	if alias.inode != "" && alias.inode == target.inode {
+		return true
+	}
+	return alias.sha256 != "" && alias.sha256 == target.sha256 && alias.size == target.size && alias.mode.Perm()&0o111 == target.mode.Perm()&0o111
+}
+
+func minimalRuntimeAliasPath(rel string, reason PruneReason) bool {
+	switch reason {
+	case PruneRuntimeHeaders:
+		return headerAliasRuntimePath(rel)
+	case PruneRuntimeDocs:
+		return (isWithin(rel, "share/man") || isWithin(rel, "share/info")) && !pathContainsLegalText(rel)
+	case PruneRuntimeShareDoc:
+		return isWithin(rel, "share/doc") && !pathContainsLegalText(rel)
+	case PruneRuntimeBuild:
+		for _, root := range []string{"lib/pkgconfig", "share/pkgconfig", "lib/cmake", "share/cmake", "share/aclocal"} {
+			if isWithin(rel, root) {
+				return true
+			}
+		}
+	case PruneRuntimeTests:
+		return pythonStdlibTestAliasRuntimePath(rel)
+	case PruneRuntimeShell:
+		return shellCompletionRuntimePath(rel) && !pathContainsLegalText(rel)
+	case PruneRuntimeStatic:
+		return staticArchiveAliasRuntimePath(rel)
+	}
+	return false
+}
+
+func pythonStdlibTestAliasRuntimePath(rel string) bool {
+	return isWithin(rel, "lib/python3.13/test") || isWithin(rel, "lib/python3.14/test")
+}
+
+func headerAliasRuntimePath(rel string) bool {
+	if isWithin(rel, "include") {
+		return true
+	}
+	parts := strings.Split(rel, "/")
+	if len(parts) < 4 || parts[0] != "Cellar" {
+		return false
+	}
+	for _, component := range parts[3:] {
+		if component == "include" {
+			return true
+		}
+	}
+	return false
+}
+
+func shellCompletionRuntimePath(rel string) bool {
+	for _, root := range []string{
+		"share/bash-completion/completions",
+		"share/fish/vendor_completions.d",
+		"share/zsh/site-functions",
+	} {
+		if isWithin(rel, root) {
+			return true
+		}
+	}
+	return false
+}
+
+func staticArchiveRuntimePath(rel string) bool {
+	if !strings.EqualFold(path.Ext(rel), ".a") || !strings.HasPrefix(rel, "lib/") {
+		return false
+	}
+	for _, component := range strings.Split(rel, "/") {
+		switch strings.ToLower(component) {
+		case "site-packages", "ensurepip", "venv", "plugins", "plugin", "node_modules":
+			return false
+		}
+	}
+	return true
+}
+
+func staticArchiveAliasRuntimePath(rel string) bool {
+	if staticArchiveRuntimePath(rel) {
+		return true
+	}
+	parts := strings.Split(rel, "/")
+	if len(parts) < 5 || parts[0] != "Cellar" || !strings.EqualFold(path.Ext(rel), ".a") {
+		return false
+	}
+	hasLib := false
+	for _, component := range parts[3 : len(parts)-1] {
+		switch strings.ToLower(component) {
+		case "site-packages", "ensurepip", "venv", "plugins", "plugin", "node_modules":
+			return false
+		case "lib":
+			hasLib = true
+		}
+	}
+	return hasLib
+}
+
+func validateRetainedLinks(scan *sourceScan) error {
+	for _, entry := range scan.entries {
+		if !entry.retain || entry.typeName != TypeSymlink {
+			continue
+		}
+		if _, err := finalLinkTarget(scan.byPath, entry.rel, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateRequestedExecutables(scan *sourceScan, record *resolution.Record, policy *normalizedPolicy) error {

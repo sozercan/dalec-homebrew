@@ -272,6 +272,193 @@ func TestHomebrewRepositoryCompactionFallsBackForSensitivePaths(t *testing.T) {
 	}
 }
 
+func TestV2RuntimePruneEvidenceCompactsAttributedUniformSubtrees(t *testing.T) {
+	node := minimalCoreNode("dep", "1")
+	record := &resolution.Record{
+		PolicyVersion:   resolution.PolicyVersionV2,
+		SourceDateEpoch: 1,
+		Nodes:           []resolution.Node{node},
+	}
+	entries := []*sourceEntry{
+		pruneEvidenceDirectory("Cellar/dep/1/include", "dep", PruneRuntimeHeaders, false),
+		pruneEvidenceFile("Cellar/dep/1/include/dep.h", "dep", PruneRuntimeHeaders),
+		pruneEvidenceDirectory("Cellar/dep/1/include/nested", "dep", PruneRuntimeHeaders, false),
+		pruneEvidenceFile("Cellar/dep/1/include/nested/more.h", "dep", PruneRuntimeHeaders),
+		pruneEvidenceDirectory("Cellar/dep/1/share/man", "dep", PruneRuntimeDocs, false),
+		pruneEvidenceDirectory("Cellar/dep/1/share/man/man1", "dep", PruneRuntimeDocs, false),
+		pruneEvidenceFile("Cellar/dep/1/share/man/man1/dep.1", "dep", PruneRuntimeBuild),
+		pruneEvidenceDirectory("Cellar/dep/1/share/doc", "dep", PruneRuntimeShareDoc, false),
+		pruneEvidenceFile("Cellar/dep/1/share/doc/LICENSE", "dep", PruneRuntimeShareDoc),
+		pruneEvidenceDirectory("Cellar/dep/1/lib/pkgconfig", "dep", PruneRuntimeBuild, false),
+		pruneEvidenceFile("Cellar/dep/1/lib/pkgconfig/dep.pc", "dep", PruneRuntimeBuild),
+	}
+	entries[8].retain = true
+	entries[10].metadataExport = "sensitive"
+	scan := pruneEvidenceScan(entries)
+
+	manifest, err := buildPruneManifest(scan, record, &normalizedPolicy{installPrefix: DefaultInstallPrefix, digest: "sha256:policy"}, "sha256:resolution")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.SchemaVersion != PruneSchemaVersionV2 {
+		t.Fatalf("prune schema = %q, want %q", manifest.SchemaVersion, PruneSchemaVersionV2)
+	}
+	if len(manifest.Subtrees) != 1 {
+		t.Fatalf("subtrees = %#v", manifest.Subtrees)
+	}
+	subtree := manifest.Subtrees[0]
+	if subtree.Path != "Cellar/dep/1/include" || subtree.Reason != PruneRuntimeHeaders {
+		t.Fatalf("compacted subtree = %#v", subtree)
+	}
+	if subtree.Package != "dep" || subtree.FormulaID != node.FullName {
+		t.Fatalf("subtree attribution = package %q formula %q", subtree.Package, subtree.FormulaID)
+	}
+	if subtree.CommitmentSchema != PruneSubtreeCommitmentSchemaVersionV2 || subtree.EntryCount != 4 {
+		t.Fatalf("subtree commitment = %#v", subtree)
+	}
+	for _, entry := range manifest.Entries {
+		if isWithin(entry.Path, subtree.Path) {
+			t.Fatalf("compacted path remains explicit: %#v", entry)
+		}
+	}
+	for _, rel := range []string{
+		"Cellar/dep/1/share/man",
+		"Cellar/dep/1/share/man/man1",
+		"Cellar/dep/1/share/man/man1/dep.1",
+		"Cellar/dep/1/share/doc",
+		"Cellar/dep/1/lib/pkgconfig",
+		"Cellar/dep/1/lib/pkgconfig/dep.pc",
+	} {
+		if !hasExplicitPrunePath(manifest, rel) {
+			t.Fatalf("mixed or sensitive path %q was not kept explicit", rel)
+		}
+	}
+
+	retained := map[string]struct{}{}
+	for _, entry := range entries {
+		if entry.retain {
+			retained[entry.rel] = struct{}{}
+		}
+	}
+	for _, entry := range entries {
+		partitions := 0
+		if _, ok := retained[entry.rel]; ok {
+			partitions++
+		}
+		if hasExplicitPrunePath(manifest, entry.rel) {
+			partitions++
+		}
+		for _, summarized := range manifest.Subtrees {
+			if isWithin(entry.rel, summarized.Path) {
+				partitions++
+			}
+		}
+		if partitions != 1 {
+			t.Fatalf("path %q belongs to %d evidence partitions", entry.rel, partitions)
+		}
+	}
+}
+
+func TestV2RuntimePruneCompactionFallsBackForNonUniformTrees(t *testing.T) {
+	node := minimalCoreNode("dep", "1")
+	tests := []struct {
+		name   string
+		mutate func(*resolution.Record, []*sourceEntry)
+	}{
+		{name: "retained descendant", mutate: func(_ *resolution.Record, entries []*sourceEntry) { entries[1].retain = true }},
+		{name: "mixed reason", mutate: func(_ *resolution.Record, entries []*sourceEntry) { entries[1].pruneReason = PruneRuntimeBuild }},
+		{name: "mixed package", mutate: func(_ *resolution.Record, entries []*sourceEntry) { entries[1].packageName = "other" }},
+		{name: "metadata export", mutate: func(_ *resolution.Record, entries []*sourceEntry) { entries[1].metadataExport = "formula" }},
+		{name: "missing formula identity", mutate: func(record *resolution.Record, _ []*sourceEntry) { record.Nodes = nil }},
+		{name: "non-runtime reason", mutate: func(_ *resolution.Record, entries []*sourceEntry) {
+			entries[0].pruneReason = PruneManagerState
+			entries[1].pruneReason = PruneManagerState
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			record := &resolution.Record{PolicyVersion: resolution.PolicyVersionV2, Nodes: []resolution.Node{node}}
+			entries := []*sourceEntry{
+				pruneEvidenceDirectory("Cellar/dep/1/include", "dep", PruneRuntimeHeaders, false),
+				pruneEvidenceFile("Cellar/dep/1/include/dep.h", "dep", PruneRuntimeHeaders),
+			}
+			tc.mutate(record, entries)
+			scan := pruneEvidenceScan(entries)
+			subtrees, compacted, err := compactV2RuntimeSubtrees(scan, record, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(subtrees) != 0 || len(compacted) != 0 {
+				t.Fatalf("non-uniform tree compacted: subtrees=%#v compacted=%#v", subtrees, compacted)
+			}
+		})
+	}
+}
+
+func TestV2PruneSubtreeCommitmentBindsAttribution(t *testing.T) {
+	entries := []*sourceEntry{
+		pruneEvidenceDirectory("Cellar/dep/1/include", "dep", PruneRuntimeHeaders, false),
+		pruneEvidenceFile("Cellar/dep/1/include/dep.h", "dep", PruneRuntimeHeaders),
+	}
+	baseline, err := commitPrunedSubtreeV2(entries[0].rel, PruneRuntimeHeaders, "dep", "homebrew/core/dep", entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline.Package != "dep" || baseline.FormulaID != "homebrew/core/dep" || baseline.CommitmentSchema != PruneSubtreeCommitmentSchemaVersionV2 {
+		t.Fatalf("commitment header = %#v", baseline)
+	}
+	for _, tc := range []struct {
+		name      string
+		pkg       string
+		formulaID string
+	}{
+		{name: "package", pkg: "other", formulaID: "homebrew/core/dep"},
+		{name: "formula", pkg: "dep", formulaID: "homebrew/core/other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed, err := commitPrunedSubtreeV2(entries[0].rel, PruneRuntimeHeaders, tc.pkg, tc.formulaID, entries)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed.CommitmentDigest == baseline.CommitmentDigest {
+				t.Fatalf("%s mutation did not change commitment", tc.name)
+			}
+		})
+	}
+	if _, err := commitPrunedSubtreeV2(entries[0].rel, PruneRuntimeHeaders, "dep", "", entries); err == nil {
+		t.Fatal("partial attribution was accepted")
+	}
+}
+
+func pruneEvidenceDirectory(rel, packageName string, reason PruneReason, retain bool) *sourceEntry {
+	return &sourceEntry{rel: rel, typeName: TypeDirectory, mode: 0o755, packageName: packageName, pruneReason: reason, retain: retain}
+}
+
+func pruneEvidenceFile(rel, packageName string, reason PruneReason) *sourceEntry {
+	return &sourceEntry{rel: rel, typeName: TypeRegular, mode: 0o644, size: 4, sha256: sha256String("data"), packageName: packageName, pruneReason: reason}
+}
+
+func pruneEvidenceScan(entries []*sourceEntry) *sourceScan {
+	byPath := make(map[string]*sourceEntry, len(entries))
+	pruned := make([]*sourceEntry, 0, len(entries))
+	for _, entry := range entries {
+		byPath[entry.rel] = entry
+		if !entry.retain {
+			pruned = append(pruned, entry)
+		}
+	}
+	return &sourceScan{entries: entries, byPath: byPath, pruned: pruned}
+}
+
+func hasExplicitPrunePath(manifest PruneManifest, rel string) bool {
+	for _, entry := range manifest.Entries {
+		if entry.Path == rel {
+			return true
+		}
+	}
+	return false
+}
+
 func commitmentFixtureEntries() []*sourceEntry {
 	content := sha256String("data")
 	return []*sourceEntry{

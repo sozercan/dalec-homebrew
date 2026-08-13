@@ -11,13 +11,14 @@ import (
 const (
 	DefaultInstallPrefix = "/home/linuxbrew/.linuxbrew"
 
-	InventorySchemaVersion              = "dalec-homebrew-runtime-inventory/v1"
-	InventorySchemaVersionV2            = "dalec-homebrew-runtime-inventory/v2"
-	PruneSchemaVersion                  = "dalec-homebrew-prune-manifest/v2"
-	PruneSchemaVersionV2                = "dalec-homebrew-prune-manifest/v3"
-	PruneSubtreeCommitmentSchemaVersion = "dalec-homebrew-prune-subtree-commitment/v1"
-	ManifestSchemaVersion               = "dalec-homebrew-runtime-manifest/v1"
-	ManifestSchemaVersionV2             = "dalec-homebrew-runtime-manifest/v2"
+	InventorySchemaVersion                = "dalec-homebrew-runtime-inventory/v1"
+	InventorySchemaVersionV2              = "dalec-homebrew-runtime-inventory/v2"
+	PruneSchemaVersion                    = "dalec-homebrew-prune-manifest/v2"
+	PruneSchemaVersionV2                  = "dalec-homebrew-prune-manifest/v4"
+	PruneSubtreeCommitmentSchemaVersion   = "dalec-homebrew-prune-subtree-commitment/v1"
+	PruneSubtreeCommitmentSchemaVersionV2 = "dalec-homebrew-prune-subtree-commitment/v2"
+	ManifestSchemaVersion                 = "dalec-homebrew-runtime-manifest/v1"
+	ManifestSchemaVersionV2               = "dalec-homebrew-runtime-manifest/v2"
 
 	InventoryFileName = "runtime-inventory.json"
 	PruneFileName     = "prune-manifest.json"
@@ -50,6 +51,12 @@ type Allowlist struct {
 	Sbin   bool `json:"sbin,omitempty"`
 	Lib    bool `json:"lib,omitempty"`
 	Share  bool `json:"share,omitempty"`
+
+	// PruningProfile and PruningRules select one release-bound, executable
+	// runtime-minimization policy. Empty values retain the complete allowlisted
+	// package payload and preserve the legacy V1 behavior.
+	PruningProfile string   `json:"pruning_profile,omitempty"`
+	PruningRules   []string `json:"pruning_rules,omitempty"`
 
 	Etc    []PathRule `json:"etc,omitempty"`
 	Var    []PathRule `json:"var,omitempty"`
@@ -129,6 +136,13 @@ const (
 	PruneTooling         PruneReason = "materializer_tooling"
 	PruneOptionalTooling PruneReason = "optional_dependency_tooling"
 	PruneRuntimeBase     PruneReason = "runtime_base_provided"
+	PruneRuntimeHeaders  PruneReason = "transitive_runtime_headers"
+	PruneRuntimeDocs     PruneReason = "transitive_runtime_man_info"
+	PruneRuntimeBuild    PruneReason = "transitive_runtime_build_metadata"
+	PruneRuntimeTests    PruneReason = "transitive_runtime_python_tests"
+	PruneRuntimeStatic   PruneReason = "transitive_runtime_static_archives"
+	PruneRuntimeShell    PruneReason = "transitive_runtime_shell_completions"
+	PruneRuntimeShareDoc PruneReason = "transitive_runtime_share_doc"
 )
 
 // PruneEntry records every omitted source path. Regular files are hashed before
@@ -150,14 +164,17 @@ type PruneEntry struct {
 
 // PruneSubtree commits a completely excluded source subtree without embedding
 // one manifest row per descendant. CommitmentDigest is the digest of the
-// versioned, path-sorted commitment tuples described by
-// PruneSubtreeCommitmentSchemaVersion. Each tuple includes path, type, mode,
-// normalized size, and either a content digest or link target. EntryCount
-// includes the subtree root; RegularBytes is the sum of regular-file entry
-// sizes represented by the commitment.
+// versioned, path-sorted commitment tuples identified by CommitmentSchema.
+// Each tuple includes path, type, mode, normalized size, and either a content
+// digest or link target. V2 attributed commitments also bind Package and
+// FormulaID in their header. EntryCount includes the subtree root;
+// RegularBytes is the sum of regular-file entry sizes represented by the
+// commitment.
 type PruneSubtree struct {
 	Path             string      `json:"path"`
 	Reason           PruneReason `json:"reason"`
+	Package          string      `json:"package,omitempty"`
+	FormulaID        string      `json:"formula_id,omitempty"`
 	EntryCount       int         `json:"entry_count"`
 	RegularBytes     int64       `json:"regular_bytes"`
 	CommitmentSchema string      `json:"commitment_schema"`

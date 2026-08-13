@@ -3,6 +3,7 @@ package policyv2
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -28,6 +29,14 @@ func TestEmbeddedPolicyValidAndStable(t *testing.T) {
 	}
 	if digest, err := Digest(); err != nil || !strings.HasPrefix(digest, "sha256:") || len(digest) != len("sha256:")+64 {
 		t.Fatalf("digest=%q err=%v", digest, err)
+	}
+	profile := p.MinimalRuntimeProfile()
+	if profile.Name != RuntimeProfileMinimalV1 || !slices.Equal(profile.Rules, MinimalV1RuntimePruneRules()) {
+		t.Fatalf("runtime profile=%+v", profile)
+	}
+	profile.Rules[0] = "mutated"
+	if p.RuntimeProfile.Rules[0] == "mutated" {
+		t.Fatal("runtime profile accessor returned mutable policy storage")
 	}
 }
 

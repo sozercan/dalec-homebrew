@@ -212,6 +212,26 @@ Runtime ELF verification treats non-exposed inventory files with object-data ext
 
 The installed prefix is scanned into an inventory. Only allowlist-selected prefix entries are copied into the materialized overlay; the materializer then adds the explicit resolution, inventory, prune, manifest, SPDX, base, and installation evidence files under `/usr/share/dalec-homebrew`. Ownership and modes are normalized before static runtime checks and Dalec tests run.
 
+Runtime minimization is an automatic V2 release-policy step, not dependency
+resolution or a caller-selected mode. After the complete closure has been
+resolved, every bottle verified, and every Formula installed offline, V2 omits
+exact policy-classified paths only from transitive `homebrew/core` kegs.
+Requested Formulae remain outside the added pruning pass. The bounded classes
+are headers, man and Info trees, non-legal `share/doc` content, exact build-
+metadata locations, policy-authorized Python standard-library test subtrees,
+shell completions, and static archives in bounded `lib/` locations. V1 retains
+its legacy assembly behavior.
+
+The classifier is fail-closed by canonical Formula identity and relative path.
+It never generalizes from a basename such as `test`, and it preserves shared
+libraries, plugins, `libexec`, configuration, locales, site-packages,
+`ensurepip`, `venv`, `node_modules`, legal or license text, and static archives
+inside those protected runtime-data locations. Retained links and runtime
+validation must still succeed on the final state. The pruning-policy identity
+and exact decisions are committed into resolution, inventory, prune, and
+runtime-manifest evidence; changing the policy requires a new V2 release tuple.
+Invocation input cannot disable or broaden it.
+
 Each declared Dalec test runs on an independent branch derived from the final pruned state. The frontend injects an ephemeral test runner and plan under `/__dalec_homebrew`; those files are not exported. Commands inherit the final image user, environment, and working directory, after which the supported test-level directory, test environment, and step environment overrides apply. BuildKit disables networking for each branch. Development frontends may set `DALEC_SKIP_TESTS`; release-bound frontends reject that bypass.
 
 The image contents and evidence files are listed in the [usage reference](usage.md).

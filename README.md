@@ -141,6 +141,24 @@ so dependencies precede dependents. Each global or selected-target
 `dependencies` scope must either be omitted or contain a non-empty runtime map;
 omit the selected scope to inherit global roots.
 
+### Automatic V2 runtime minimization
+
+A release-bound V2 frontend automatically removes policy-enumerated
+development-only paths from transitive `homebrew/core` Formulae during final
+runtime assembly. Requested Formulae are the retention boundary: their package
+payload is not subject to this added minimization. The bounded removable
+classes are headers, manuals and Info pages, non-legal `share/doc` content,
+build metadata, exact policy-authorized Python standard-library tests, shell
+completions, and static archives in bounded `lib/` locations.
+
+There is no Dalec input or build argument that enables, disables, or broadens
+the policy. Shared libraries, plugins, `libexec`, configuration, locales,
+Python site-packages, `ensurepip`, `venv`, `node_modules`, and legal or license
+text remain. Static archives under those protected runtime-data locations also
+remain. V1 frontends retain their legacy assembly behavior. See the
+[usage reference](docs/usage.md#automatic-v2-runtime-minimization) for the
+exact contract.
+
 See the [usage reference](docs/usage.md) for image settings, tests, dependency rules, and the complete supported contract.
 
 ## Scope

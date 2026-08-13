@@ -49,36 +49,82 @@ func RuntimeAllowlistV2(record *resolution.RecordV2) (runtimefs.Allowlist, []str
 	if err != nil {
 		return runtimefs.Allowlist{}, nil, err
 	}
-	allow, writable := RuntimeAllowlist(projected)
-	slices.Sort(writable)
-	return allow, writable, nil
+	binding, err := minimalRuntimePolicyBindingV2(projected)
+	if err != nil {
+		return runtimefs.Allowlist{}, nil, err
+	}
+	if err := validateRuntimePolicyBindingV2(record, binding, false); err != nil {
+		return runtimefs.Allowlist{}, nil, err
+	}
+	return binding.allow, binding.writable, nil
 }
 
-func runtimePolicyBindingsV2(record *resolution.RecordV2) (runtimefs.Allowlist, []string, string, error) {
-	if record == nil {
-		return runtimefs.Allowlist{}, nil, "", fmt.Errorf("nil V2 resolution")
-	}
-	if err := VerifyReleaseBindingsV2(record); err != nil {
-		return runtimefs.Allowlist{}, nil, "", err
-	}
-	localPolicyDigest, err := V2RuntimePolicyDigest()
-	if err != nil {
-		return runtimefs.Allowlist{}, nil, "", err
-	}
-	if record.Components.ExecutableRuntimePolicyDigest != localPolicyDigest {
-		return runtimefs.Allowlist{}, nil, "", fmt.Errorf("V2 executable runtime policy digest %s does not match embedded policy %s", record.Components.ExecutableRuntimePolicyDigest, localPolicyDigest)
-	}
-	projected, _, err := resolution.ProjectV2ForRuntime(record)
-	if err != nil {
-		return runtimefs.Allowlist{}, nil, "", err
-	}
+type runtimePolicyBindingV2 struct {
+	profile  string
+	allow    runtimefs.Allowlist
+	writable []string
+	digest   string
+}
+
+func minimalRuntimePolicyBindingV2(projected *resolution.Record) (runtimePolicyBindingV2, error) {
 	allow, writable := RuntimeAllowlist(projected)
+	p, err := V2RuntimePolicy()
+	if err != nil {
+		return runtimePolicyBindingV2{}, err
+	}
+	profile := p.MinimalRuntimeProfile()
+	allow.PruningProfile = profile.Name
+	allow.PruningRules = profile.Rules
 	slices.Sort(writable)
 	digest, err := runtimefs.PolicyDigest(allow, runtimefs.DefaultInstallPrefix, projected.Nodes)
 	if err != nil {
-		return runtimefs.Allowlist{}, nil, "", err
+		return runtimePolicyBindingV2{}, err
 	}
-	return allow, writable, digest, nil
+	return runtimePolicyBindingV2{profile: profile.Name, allow: allow, writable: writable, digest: digest}, nil
+}
+
+func validateRuntimePolicyBindingV2(record *resolution.RecordV2, binding runtimePolicyBindingV2, requireBoundDigest bool) error {
+	if profile := record.Runtime.Profile; profile != "" && profile != binding.profile {
+		return fmt.Errorf("unsupported V2 runtime profile %q; release requires %q", profile, binding.profile)
+	}
+	if record.PruningPolicyDigest == "" {
+		if requireBoundDigest {
+			return fmt.Errorf("V2 pruning policy digest is missing")
+		}
+		return nil
+	}
+	if record.PruningPolicyDigest != binding.digest {
+		return fmt.Errorf("V2 pruning policy digest %s does not match minimal runtime policy %s", record.PruningPolicyDigest, binding.digest)
+	}
+	return nil
+}
+
+func runtimePolicyBindingsV2(record *resolution.RecordV2, requireBoundDigest bool) (runtimePolicyBindingV2, error) {
+	if record == nil {
+		return runtimePolicyBindingV2{}, fmt.Errorf("nil V2 resolution")
+	}
+	if err := VerifyReleaseBindingsV2(record); err != nil {
+		return runtimePolicyBindingV2{}, err
+	}
+	localPolicyDigest, err := V2RuntimePolicyDigest()
+	if err != nil {
+		return runtimePolicyBindingV2{}, err
+	}
+	if record.Components.ExecutableRuntimePolicyDigest != localPolicyDigest {
+		return runtimePolicyBindingV2{}, fmt.Errorf("V2 executable runtime policy digest %s does not match embedded policy %s", record.Components.ExecutableRuntimePolicyDigest, localPolicyDigest)
+	}
+	projected, _, err := resolution.ProjectV2ForRuntime(record)
+	if err != nil {
+		return runtimePolicyBindingV2{}, err
+	}
+	binding, err := minimalRuntimePolicyBindingV2(projected)
+	if err != nil {
+		return runtimePolicyBindingV2{}, err
+	}
+	if err := validateRuntimePolicyBindingV2(record, binding, requireBoundDigest); err != nil {
+		return runtimePolicyBindingV2{}, err
+	}
+	return binding, nil
 }
 
 // VerifyReleaseBindingsV2 checks the embedded policy authorities for every V2
@@ -155,19 +201,17 @@ func VerifyReleaseBindingsV2(record *resolution.RecordV2) error {
 // BindRuntimePolicyV2 binds writable paths and the pruning policy digest to the
 // V2 record before canonical serialization.
 func BindRuntimePolicyV2(record *resolution.RecordV2) (runtimefs.Allowlist, error) {
-	allow, writable, digest, err := runtimePolicyBindingsV2(record)
+	binding, err := runtimePolicyBindingsV2(record, false)
 	if err != nil {
 		return runtimefs.Allowlist{}, err
 	}
-	if len(record.Runtime.WritablePaths) > 0 && !slices.Equal(record.Runtime.WritablePaths, writable) {
+	if len(record.Runtime.WritablePaths) > 0 && !slices.Equal(record.Runtime.WritablePaths, binding.writable) {
 		return runtimefs.Allowlist{}, fmt.Errorf("runtime writable paths do not match V2 policy")
 	}
-	if record.PruningPolicyDigest != "" && record.PruningPolicyDigest != digest {
-		return runtimefs.Allowlist{}, fmt.Errorf("V2 pruning policy digest mismatch")
-	}
-	record.Runtime.WritablePaths = slices.Clone(writable)
-	record.PruningPolicyDigest = digest
-	return allow, nil
+	record.Runtime.Profile = binding.profile
+	record.Runtime.WritablePaths = slices.Clone(binding.writable)
+	record.PruningPolicyDigest = binding.digest
+	return binding.allow, nil
 }
 
 // VerifyRuntimePolicyV2 verifies the release-bound runtime-policy fields of an
@@ -175,23 +219,17 @@ func BindRuntimePolicyV2(record *resolution.RecordV2) (runtimefs.Allowlist, erro
 // may populate these fields before serialization; replay and materialization
 // must require their exact presence and value.
 func VerifyRuntimePolicyV2(record *resolution.RecordV2) (runtimefs.Allowlist, error) {
-	allow, writable, digest, err := runtimePolicyBindingsV2(record)
+	binding, err := runtimePolicyBindingsV2(record, true)
 	if err != nil {
 		return runtimefs.Allowlist{}, err
 	}
-	if len(writable) > 0 && len(record.Runtime.WritablePaths) == 0 {
+	if len(binding.writable) > 0 && len(record.Runtime.WritablePaths) == 0 {
 		return runtimefs.Allowlist{}, fmt.Errorf("V2 runtime writable paths are missing")
 	}
-	if !slices.Equal(record.Runtime.WritablePaths, writable) {
+	if !slices.Equal(record.Runtime.WritablePaths, binding.writable) {
 		return runtimefs.Allowlist{}, fmt.Errorf("runtime writable paths do not match V2 policy")
 	}
-	if record.PruningPolicyDigest == "" {
-		return runtimefs.Allowlist{}, fmt.Errorf("V2 pruning policy digest is missing")
-	}
-	if record.PruningPolicyDigest != digest {
-		return runtimefs.Allowlist{}, fmt.Errorf("V2 pruning policy digest %s does not match policy %s", record.PruningPolicyDigest, digest)
-	}
-	return allow, nil
+	return binding.allow, nil
 }
 
 // VerifyMaterializerRuntimePolicyV2 requires the complete non-circular tuple

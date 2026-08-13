@@ -27,6 +27,28 @@ func TestProjectV2ForRuntimePreservesFullIdentity(t *testing.T) {
 	}
 }
 
+func TestProjectV2ForRuntimePreservesInMemoryProfile(t *testing.T) {
+	legacy := validRecordV2()
+	legacy.Runtime.Profile = ""
+	projected, _, err := ProjectV2ForRuntime(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projected.Runtime.Profile != "" {
+		t.Fatalf("empty projected profile = %q, want empty for digest inference", projected.Runtime.Profile)
+	}
+
+	minimal := validRecordV2()
+	minimal.Runtime.Profile = RuntimeProfileMinimalV1
+	projected, _, err = ProjectV2ForRuntime(minimal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projected.Runtime.Profile != RuntimeProfileMinimalV1 {
+		t.Fatalf("minimal projected profile = %q, want %q", projected.Runtime.Profile, RuntimeProfileMinimalV1)
+	}
+}
+
 func TestProjectV2ForRuntimePreservesHistoricalTabDependencyIdentity(t *testing.T) {
 	record := validRecordV2()
 	historical := RuntimeDependencyV2{
