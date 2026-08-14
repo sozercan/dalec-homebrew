@@ -708,11 +708,29 @@ func looksLikeLegalText(filename string) bool {
 		if base == name {
 			return true
 		}
-		if strings.HasPrefix(base, name+".") || strings.HasPrefix(base, name+"-") || strings.HasPrefix(base, name+"_") {
+		suffix := strings.TrimPrefix(base, name)
+		if suffix != base && legalTextSuffix(suffix) {
 			return true
 		}
 	}
 	return false
+}
+
+func legalTextSuffix(suffix string) bool {
+	if suffix == "" {
+		return true
+	}
+	if suffix[0] == '.' || suffix[0] == '-' || suffix[0] == '_' {
+		return true
+	}
+	if suffix[0] == 'v' && len(suffix) > 1 {
+		suffix = suffix[1:]
+	}
+	i := 0
+	for i < len(suffix) && suffix[i] >= '0' && suffix[i] <= '9' {
+		i++
+	}
+	return i > 0 && (i == len(suffix) || suffix[i] == '.' || suffix[i] == '-' || suffix[i] == '_')
 }
 
 func canonicalJSON(value any) ([]byte, error) {

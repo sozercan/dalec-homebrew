@@ -492,6 +492,30 @@ func TestMinimalRuntimeProfilePreservesRuntimeBearingPathsBeforeEveryPruneClass(
 	assertMinimalPruned(t, scan, noticeRef, PruneRuntimeShareDoc)
 }
 
+func TestLooksLikeLegalTextRecognizesVersionedNamesWithoutPrefixFalsePositives(t *testing.T) {
+	for _, name := range []string{
+		"COPYING3",
+		"COPYING3.LIB",
+		"LICENSE2",
+		"LICENCEv3.txt",
+		"PATENTS-2.0",
+	} {
+		if !looksLikeLegalText(name) {
+			t.Errorf("%q was not recognized as legal text", name)
+		}
+	}
+	for _, name := range []string{
+		"NOTICEREF_notes.md",
+		"LICENSEHEADER",
+		"COPYING3REF",
+		"PATENTED.txt",
+	} {
+		if looksLikeLegalText(name) {
+			t.Errorf("%q was recognized as legal text", name)
+		}
+	}
+}
+
 func TestValidateInventoryPolicyRejectsMinimalProfileForgery(t *testing.T) {
 	nodes := map[string]resolution.Node{
 		"dep":       minimalCoreNode("dep", "1"),
