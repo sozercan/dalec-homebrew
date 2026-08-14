@@ -404,7 +404,6 @@ func verifyWithPolicyDigest(root string, record *resolution.Record, inventory *I
 	}
 
 	expected := make(map[string]InventoryEntry, len(inventory.Entries))
-	profileAncestors := minimalInventoryExceptionAncestors(inventory.Entries, policy)
 	previous := ""
 	for _, entry := range inventory.Entries {
 		if err := validateRelativePath(entry.Path); err != nil {
@@ -417,10 +416,10 @@ func verifyWithPolicyDigest(root string, record *resolution.Record, inventory *I
 		if _, duplicate := expected[entry.Path]; duplicate {
 			return runtimeError(CodeVerification, entry.Path, "duplicate inventory path")
 		}
-		if err := validateInventoryPolicy(entry, record, policy, profileAncestors); err != nil {
-			return err
-		}
 		expected[entry.Path] = entry
+	}
+	if err := validateInventoryEntriesPolicy(inventory.Entries, record, policy); err != nil {
+		return err
 	}
 
 	actual := map[string]os.FileInfo{}
@@ -529,36 +528,102 @@ func verifyOnePath(filename string, info os.FileInfo, expected InventoryEntry, r
 	return nil
 }
 
+type inventoryAttribution struct {
+	path        string
+	packageName string
+}
+
+type inventoryProfilePlan struct {
+	forbidden  map[inventoryAttribution]PruneReason
+	exceptions map[inventoryAttribution]struct{}
+}
+
+func inventoryEntryAttribution(entry InventoryEntry) inventoryAttribution {
+	return inventoryAttribution{path: entry.Path, packageName: entry.Package}
+}
+
+func validateInventoryEntriesPolicy(entries []InventoryEntry, record *resolution.Record, policy *normalizedPolicy) error {
+	for _, entry := range entries {
+		if err := validateInventoryPolicyBase(entry, record, policy); err != nil {
+			return err
+		}
+	}
+	plan, err := planMinimalInventoryProfile(entries, policy)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if reason, forbidden := plan.forbidden[inventoryEntryAttribution(entry)]; forbidden {
+			return runtimeError(CodeVerification, entry.Path, "inventory retains path forbidden by runtime profile (%s)", reason)
+		}
+	}
+	return nil
+}
+
 func validateInventoryPolicy(entry InventoryEntry, record *resolution.Record, policy *normalizedPolicy, profileAncestors map[string]struct{}) error {
+	if err := validateInventoryPolicyBase(entry, record, policy); err != nil {
+		return err
+	}
+	if reason := minimalRuntimePruneReason(entry.Path, entry.Package, policy); reason != "" && (reason != PruneRuntimeStatic || entry.Type != TypeDirectory) {
+		_, approvedAncestor := profileAncestors[entry.Path]
+		if !approvedAncestor || entry.Type != TypeDirectory {
+			return runtimeError(CodeVerification, entry.Path, "inventory retains path forbidden by runtime profile (%s)", reason)
+		}
+	}
+	return nil
+}
+
+func validateInventoryPolicyBase(entry InventoryEntry, record *resolution.Record, policy *normalizedPolicy) error {
 	if reason, _ := forcedPrune(entry.Path); reason != "" {
 		return runtimeError(CodeVerification, entry.Path, "inventory retains forbidden package-manager path (%s)", reason)
+	}
+	if !isV2RuntimeRecord(record) && entry.FormulaID != "" {
+		return runtimeError(CodeVerification, entry.Path, "V1 inventory entry has formula identity %q", entry.FormulaID)
 	}
 	if entry.Package != "" {
 		if _, ok := policy.nodes[entry.Package]; !ok {
 			return runtimeError(CodeVerification, entry.Path, "inventory names unknown package %q", entry.Package)
 		}
+		if isV2RuntimeRecord(record) {
+			expectedFormulaID := formulaIDForRack(record, entry.Package)
+			if expectedFormulaID == "" || entry.FormulaID != expectedFormulaID {
+				return runtimeError(CodeVerification, entry.Path, "inventory formula identity %q does not match package %q identity %q", entry.FormulaID, entry.Package, expectedFormulaID)
+			}
+		}
 	} else if entry.Type != TypeDirectory {
 		return runtimeError(CodeUnattributed, entry.Path, "non-directory inventory entry has no package")
+	} else if isV2RuntimeRecord(record) && entry.FormulaID != "" {
+		return runtimeError(CodeVerification, entry.Path, "unattributed inventory directory has formula identity %q", entry.FormulaID)
 	}
-	if reason := minimalRuntimePruneReason(entry.Path, entry.Package, policy); reason != "" && (reason != PruneRuntimeStatic || entry.Type != TypeDirectory) {
-		if _, approvedAncestor := profileAncestors[entry.Path]; !approvedAncestor || entry.Type != TypeDirectory {
-			return runtimeError(CodeVerification, entry.Path, "inventory retains path forbidden by runtime profile (%s)", reason)
+
+	root := firstSegment(entry.Path)
+	if root == "Cellar" {
+		parts := strings.Split(entry.Path, "/")
+		if len(parts) < 2 {
+			if entry.Package != "" {
+				return runtimeError(CodeVerification, entry.Path, "inventory package %q is attributed to the Cellar root", entry.Package)
+			}
+		} else {
+			node, ok := policy.nodes[parts[1]]
+			if !ok || len(parts) >= 3 && parts[2] != node.PkgVersion {
+				return runtimeError(CodeUnexpectedKeg, entry.Path, "inventory keg is not in the exact resolution closure")
+			}
+			if isV2RuntimeRecord(record) {
+				if entry.Package == "" {
+					return runtimeError(CodeUnattributed, entry.Path, "Cellar inventory path has no package attribution")
+				}
+				if entry.Package != parts[1] {
+					return runtimeError(CodeVerification, entry.Path, "inventory package %q does not match Cellar rack %q", entry.Package, parts[1])
+				}
+			}
 		}
 	}
 
 	allowed := false
 	writable := false
-	root := firstSegment(entry.Path)
 	switch root {
 	case "Cellar":
 		allowed = policy.allowlist.Cellar
-		parts := strings.Split(entry.Path, "/")
-		if len(parts) >= 2 {
-			node, ok := policy.nodes[parts[1]]
-			if !ok || len(parts) >= 3 && parts[2] != node.PkgVersion {
-				return runtimeError(CodeUnexpectedKeg, entry.Path, "inventory keg is not in the exact resolution closure")
-			}
-		}
 	case "opt":
 		allowed = policy.allowlist.Opt
 	case "bin", "sbin", "lib", "share":
@@ -602,6 +667,220 @@ func validateInventoryPolicy(entry InventoryEntry, record *resolution.Record, po
 		return runtimeError(CodeUnexpectedWritable, entry.Path, "immutable code/data path is owner-writable")
 	}
 	return nil
+}
+
+func planMinimalInventoryProfile(entries []InventoryEntry, policy *normalizedPolicy) (*inventoryProfilePlan, error) {
+	plan := &inventoryProfilePlan{
+		forbidden:  map[inventoryAttribution]PruneReason{},
+		exceptions: map[inventoryAttribution]struct{}{},
+	}
+	if policy == nil || policy.allowlist.PruningProfile == "" {
+		return plan, nil
+	}
+
+	byPath := make(map[string]InventoryEntry, len(entries))
+	for _, entry := range entries {
+		byPath[entry.Path] = entry
+		if reason := minimalRuntimePruneReason(entry.Path, entry.Package, policy); reason != "" && (reason != PruneRuntimeStatic || entry.Type != TypeDirectory) {
+			plan.forbidden[inventoryEntryAttribution(entry)] = reason
+		}
+	}
+
+	for rel := range minimalInventoryExceptionAncestors(entries, policy) {
+		entry, ok := byPath[rel]
+		if !ok {
+			continue
+		}
+		key := inventoryEntryAttribution(entry)
+		if _, candidate := plan.forbidden[key]; candidate {
+			delete(plan.forbidden, key)
+			plan.exceptions[key] = struct{}{}
+		}
+	}
+
+	// Attribute matching regular copies before symlinks so a symlink to a
+	// matching global copy observes the same candidate set regardless of
+	// inventory ordering.
+	for _, entry := range entries {
+		if entry.Type != TypeRegular && entry.Type != TypeHardlink {
+			continue
+		}
+		key := inventoryEntryAttribution(entry)
+		if _, direct := plan.forbidden[key]; direct {
+			continue
+		}
+		node, ok := policy.nodes[entry.Package]
+		if !ok {
+			continue
+		}
+		target, ok := byPath[path.Join("Cellar", node.Name, node.PkgVersion, entry.Path)]
+		if !ok || target.Package != entry.Package {
+			continue
+		}
+		reason, candidate := plan.forbidden[inventoryEntryAttribution(target)]
+		if !candidate || !minimalRuntimeAliasPath(entry.Path, reason) {
+			continue
+		}
+		matches, err := inventoryAliasContentMatches(entry, target)
+		if err != nil {
+			return nil, err
+		}
+		if matches {
+			plan.forbidden[key] = reason
+		}
+	}
+
+	for _, entry := range entries {
+		if entry.Type != TypeSymlink {
+			continue
+		}
+		key := inventoryEntryAttribution(entry)
+		if _, direct := plan.forbidden[key]; direct {
+			continue
+		}
+		trace, err := traceInventoryTarget(byPath, entry.Path, policy.installPrefix)
+		if err != nil {
+			return nil, err
+		}
+		target := byPath[trace.final]
+		reason, candidate := plan.forbidden[inventoryEntryAttribution(target)]
+		if candidate && entry.Package != "" && entry.Package == target.Package && minimalRuntimeAliasPath(entry.Path, reason) {
+			plan.forbidden[key] = reason
+		}
+	}
+
+	// A bounded protected runtime alias may require an otherwise prunable
+	// target. Mirror the scanner's fixed point over only the exact link graph
+	// reachable from a protected or requested-keg seed. Each exception retains
+	// its own independently validated package/formula attribution.
+	queue := make([]InventoryEntry, 0)
+	for _, entry := range entries {
+		if entry.Type == TypeSymlink && minimalRuntimeAliasRetainsTarget(entry.Path, entry.Package, policy) {
+			queue = append(queue, entry)
+		}
+	}
+	seen := make(map[string]struct{}, len(queue))
+	for len(queue) > 0 {
+		entry := queue[0]
+		queue = queue[1:]
+		if _, ok := seen[entry.Path]; ok {
+			continue
+		}
+		seen[entry.Path] = struct{}{}
+		if _, candidate := plan.forbidden[inventoryEntryAttribution(entry)]; candidate {
+			continue
+		}
+		trace, err := traceInventoryTarget(byPath, entry.Path, policy.installPrefix)
+		if err != nil {
+			return nil, err
+		}
+		exempt := func(rel string) {
+			candidate, ok := byPath[rel]
+			if !ok {
+				return
+			}
+			key := inventoryEntryAttribution(candidate)
+			if _, forbidden := plan.forbidden[key]; !forbidden {
+				return
+			}
+			delete(plan.forbidden, key)
+			plan.exceptions[key] = struct{}{}
+		}
+		for _, rel := range trace.paths {
+			exempt(rel)
+			if required := byPath[rel]; required.Type == TypeSymlink {
+				queue = append(queue, required)
+			}
+		}
+		target := byPath[trace.final]
+		if target.Type == TypeDirectory {
+			for _, candidate := range entries {
+				if isWithin(candidate.Path, trace.final) {
+					exempt(candidate.Path)
+					if candidate.Type == TypeSymlink {
+						queue = append(queue, candidate)
+					}
+				}
+			}
+		}
+	}
+
+	return plan, nil
+}
+
+func inventoryAliasContentMatches(alias, target InventoryEntry) (bool, error) {
+	if (alias.Type != TypeRegular && alias.Type != TypeHardlink) || (target.Type != TypeRegular && target.Type != TypeHardlink) {
+		return false, nil
+	}
+	aliasMode, err := strconv.ParseUint(alias.Mode, 8, 32)
+	if err != nil {
+		return false, runtimeError(CodeVerification, alias.Path, "invalid inventory mode %q", alias.Mode)
+	}
+	targetMode, err := strconv.ParseUint(target.Mode, 8, 32)
+	if err != nil {
+		return false, runtimeError(CodeVerification, target.Path, "invalid inventory mode %q", target.Mode)
+	}
+	return alias.SHA256 != "" && alias.SHA256 == target.SHA256 && alias.Size == target.Size && (aliasMode&0o111 != 0) == (targetMode&0o111 != 0), nil
+}
+
+type inventoryTargetTrace struct {
+	final string
+	paths []string
+}
+
+func traceInventoryTarget(entries map[string]InventoryEntry, rel, installPrefix string) (inventoryTargetTrace, error) {
+	queue := strings.Split(rel, "/")
+	stack := []string{}
+	visited := map[string]bool{}
+	traced := map[string]struct{}{}
+	trace := inventoryTargetTrace{}
+	steps := 0
+	for len(queue) > 0 {
+		component := queue[0]
+		queue = queue[1:]
+		if component == "" || component == "." {
+			continue
+		}
+		if component == ".." {
+			if len(stack) == 0 {
+				return inventoryTargetTrace{}, runtimeError(CodeUnsafeLink, rel, "target escapes prefix")
+			}
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		stack = append(stack, component)
+		candidate := strings.Join(stack, "/")
+		entry, ok := entries[candidate]
+		if !ok {
+			continue
+		}
+		if _, seen := traced[candidate]; !seen {
+			trace.paths = append(trace.paths, candidate)
+			traced[candidate] = struct{}{}
+		}
+		if entry.Type != TypeSymlink {
+			if len(queue) > 0 && entry.Type != TypeDirectory {
+				return inventoryTargetTrace{}, runtimeError(CodeDanglingLink, rel, "component %q is not a directory", candidate)
+			}
+			continue
+		}
+		steps++
+		if steps > 64 || visited[candidate] {
+			return inventoryTargetTrace{}, runtimeError(CodeUnsafeLink, rel, "inventory symlink cycle through %q", candidate)
+		}
+		visited[candidate] = true
+		resolved, _, err := normalizeLinkTarget(candidate, entry.LinkTarget, "", installPrefix)
+		if err != nil {
+			return inventoryTargetTrace{}, runtimeError(CodeUnsafeLink, candidate, "%v", err)
+		}
+		stack = nil
+		queue = append(strings.Split(resolved, "/"), queue...)
+	}
+	trace.final = strings.Join(stack, "/")
+	if _, ok := entries[trace.final]; !ok {
+		return inventoryTargetTrace{}, runtimeError(CodeDanglingLink, rel, "inventory target %q is absent", trace.final)
+	}
+	return trace, nil
 }
 
 func minimalInventoryExceptionAncestors(entries []InventoryEntry, policy *normalizedPolicy) map[string]struct{} {

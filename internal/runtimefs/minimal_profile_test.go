@@ -179,7 +179,7 @@ func TestMinimalRuntimeProfilePropagatesBoundedAliasesAndRevalidatesLinks(t *tes
 		}
 	})
 
-	t.Run("bounded nested keg header alias", func(t *testing.T) {
+	t.Run("protected libexec header alias retains target", func(t *testing.T) {
 		target := minimalEntry("Cellar/libedit/1/include/editline/readline.h", "libedit", TypeRegular)
 		alias := minimalEntry("Cellar/libedit/1/libexec/include/readline/history.h", "libedit", TypeSymlink)
 		alias.linkResolved = target.rel
@@ -187,27 +187,29 @@ func TestMinimalRuntimeProfilePropagatesBoundedAliasesAndRevalidatesLinks(t *tes
 		if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(map[string]resolution.Node{"libedit": minimalCoreNode("libedit", "1")}, nil)); err != nil {
 			t.Fatal(err)
 		}
-		assertMinimalPruned(t, scan, target.rel, PruneRuntimeHeaders)
-		assertMinimalPruned(t, scan, alias.rel, PruneRuntimeHeaders)
+		assertMinimalRetained(t, scan, target.rel)
+		assertMinimalRetained(t, scan, alias.rel)
 		if err := validateRetainedLinks(scan); err != nil {
 			t.Fatal(err)
 		}
 	})
 
-	t.Run("unbounded header alias fails closed", func(t *testing.T) {
+	t.Run("protected configuration alias retains target", func(t *testing.T) {
 		target := minimalEntry("Cellar/dep/1/include/dep.h", "dep", TypeRegular)
-		alias := minimalEntry("Cellar/dep/1/libexec/runtime-header", "dep", TypeSymlink)
+		alias := minimalEntry("Cellar/dep/1/etc/runtime-header", "dep", TypeSymlink)
 		alias.linkResolved = target.rel
 		scan := minimalScan([]*sourceEntry{target, alias})
 		if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(map[string]resolution.Node{"dep": minimalCoreNode("dep", "1")}, nil)); err != nil {
 			t.Fatal(err)
 		}
-		if err := validateRetainedLinks(scan); errorCode(err) != CodeDanglingLink {
-			t.Fatalf("error=%v code=%s", err, errorCode(err))
+		assertMinimalRetained(t, scan, target.rel)
+		assertMinimalRetained(t, scan, alias.rel)
+		if err := validateRetainedLinks(scan); err != nil {
+			t.Fatal(err)
 		}
 	})
 
-	t.Run("bounded nested keg static archive aliases", func(t *testing.T) {
+	t.Run("protected libexec static archive aliases retain target", func(t *testing.T) {
 		target := minimalEntry("Cellar/libedit/1/lib/libedit.a", "libedit", TypeRegular)
 		history := minimalEntry("Cellar/libedit/1/libexec/lib/libhistory.a", "libedit", TypeSymlink)
 		history.linkResolved = target.rel
@@ -217,15 +219,15 @@ func TestMinimalRuntimeProfilePropagatesBoundedAliasesAndRevalidatesLinks(t *tes
 		if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(map[string]resolution.Node{"libedit": minimalCoreNode("libedit", "1")}, nil)); err != nil {
 			t.Fatal(err)
 		}
-		assertMinimalPruned(t, scan, target.rel, PruneRuntimeStatic)
-		assertMinimalPruned(t, scan, history.rel, PruneRuntimeStatic)
-		assertMinimalPruned(t, scan, readline.rel, PruneRuntimeStatic)
+		assertMinimalRetained(t, scan, target.rel)
+		assertMinimalRetained(t, scan, history.rel)
+		assertMinimalRetained(t, scan, readline.rel)
 		if err := validateRetainedLinks(scan); err != nil {
 			t.Fatal(err)
 		}
 	})
 
-	t.Run("sensitive static archive alias fails closed", func(t *testing.T) {
+	t.Run("protected plugin alias retains target", func(t *testing.T) {
 		target := minimalEntry("Cellar/dep/1/lib/libdep.a", "dep", TypeRegular)
 		alias := minimalEntry("Cellar/dep/1/libexec/plugins/libdep.a", "dep", TypeSymlink)
 		alias.linkResolved = target.rel
@@ -233,8 +235,81 @@ func TestMinimalRuntimeProfilePropagatesBoundedAliasesAndRevalidatesLinks(t *tes
 		if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(map[string]resolution.Node{"dep": minimalCoreNode("dep", "1")}, nil)); err != nil {
 			t.Fatal(err)
 		}
-		if err := validateRetainedLinks(scan); errorCode(err) != CodeDanglingLink {
-			t.Fatalf("error=%v code=%s", err, errorCode(err))
+		assertMinimalRetained(t, scan, target.rel)
+		assertMinimalRetained(t, scan, alias.rel)
+		if err := validateRetainedLinks(scan); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("loader alias retains target", func(t *testing.T) {
+		target := minimalEntry("Cellar/dep/1/lib/libdep.a", "dep", TypeRegular)
+		alias := minimalEntry("Cellar/dep/1/lib/cmake/dep/libdep.so.1", "dep", TypeSymlink)
+		alias.linkResolved = target.rel
+		scan := minimalScan([]*sourceEntry{target, alias})
+		if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(map[string]resolution.Node{"dep": minimalCoreNode("dep", "1")}, nil)); err != nil {
+			t.Fatal(err)
+		}
+		assertMinimalRetained(t, scan, target.rel)
+		assertMinimalRetained(t, scan, alias.rel)
+		if err := validateRetainedLinks(scan); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("legal alias retains target", func(t *testing.T) {
+		target := minimalEntry("Cellar/dep/1/share/doc/dep/reference.txt", "dep", TypeRegular)
+		alias := minimalEntry("Cellar/dep/1/share/doc/dep/LICENCE.txt", "dep", TypeSymlink)
+		alias.linkResolved = target.rel
+		scan := minimalScan([]*sourceEntry{target, alias})
+		if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(map[string]resolution.Node{"dep": minimalCoreNode("dep", "1")}, nil)); err != nil {
+			t.Fatal(err)
+		}
+		assertMinimalRetained(t, scan, target.rel)
+		assertMinimalRetained(t, scan, alias.rel)
+		if err := validateRetainedLinks(scan); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("protected directory alias retains target subtree", func(t *testing.T) {
+		target := minimalEntry("Cellar/dep/1/include", "dep", TypeDirectory)
+		child := minimalEntry("Cellar/dep/1/include/dep.h", "dep", TypeRegular)
+		nestedAlias := minimalEntry("Cellar/dep/1/include/libdep.a", "dep", TypeSymlink)
+		nestedTarget := minimalEntry("Cellar/dep/1/lib/libdep.a", "dep", TypeRegular)
+		nestedAlias.linkResolved = nestedTarget.rel
+		alias := minimalEntry("Cellar/dep/1/libexec/runtime-include", "dep", TypeSymlink)
+		alias.linkResolved = target.rel
+		scan := minimalScan([]*sourceEntry{target, child, nestedAlias, nestedTarget, alias})
+		if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(map[string]resolution.Node{"dep": minimalCoreNode("dep", "1")}, nil)); err != nil {
+			t.Fatal(err)
+		}
+		assertMinimalRetained(t, scan, target.rel)
+		assertMinimalRetained(t, scan, child.rel)
+		assertMinimalRetained(t, scan, nestedAlias.rel)
+		assertMinimalRetained(t, scan, nestedTarget.rel)
+		assertMinimalRetained(t, scan, alias.rel)
+		if err := validateRetainedLinks(scan); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("requested keg alias retains transitive target", func(t *testing.T) {
+		target := minimalEntry("Cellar/dep/1/include/dep.h", "dep", TypeRegular)
+		alias := minimalEntry("Cellar/requested/1/share/runtime-header", "requested", TypeSymlink)
+		alias.linkResolved = target.rel
+		nodes := map[string]resolution.Node{
+			"dep":       minimalCoreNode("dep", "1"),
+			"requested": minimalCoreNode("requested", "1"),
+		}
+		scan := minimalScan([]*sourceEntry{target, alias})
+		if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(nodes, map[string]struct{}{"requested": {}})); err != nil {
+			t.Fatal(err)
+		}
+		assertMinimalRetained(t, scan, target.rel)
+		assertMinimalRetained(t, scan, alias.rel)
+		if err := validateRetainedLinks(scan); err != nil {
+			t.Fatal(err)
 		}
 	})
 
@@ -310,6 +385,27 @@ func TestMinimalRuntimeProfilePropagatesBoundedAliasesAndRevalidatesLinks(t *tes
 		assertMinimalPruned(t, scan, hardlink.rel, PruneRuntimeDocs)
 	})
 
+	t.Run("symlink classification is independent of regular alias order", func(t *testing.T) {
+		target := minimalEntry("Cellar/dep/1/share/pkgconfig/dep.pc", "dep", TypeRegular)
+		target.sha256, target.size = "same", 4
+		alias := minimalEntry("lib/pkgconfig/dep.pc", "dep", TypeSymlink)
+		copy := minimalEntry("share/pkgconfig/dep.pc", "dep", TypeRegular)
+		copy.sha256, copy.size = "same", 4
+		alias.linkResolved = copy.rel
+		// This is the lexical order produced by scanAndPlan: the symlink precedes
+		// the regular global copy that establishes its removable target.
+		scan := minimalScan([]*sourceEntry{target, alias, copy})
+		if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(map[string]resolution.Node{"dep": minimalCoreNode("dep", "1")}, nil)); err != nil {
+			t.Fatal(err)
+		}
+		assertMinimalPruned(t, scan, target.rel, PruneRuntimeBuild)
+		assertMinimalPruned(t, scan, copy.rel, PruneRuntimeBuild)
+		assertMinimalPruned(t, scan, alias.rel, PruneRuntimeBuild)
+		if err := validateRetainedLinks(scan); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	t.Run("matching static archive copy", func(t *testing.T) {
 		target := minimalEntry("Cellar/dep/1/lib/libdep.a", "dep", TypeRegular)
 		target.sha256, target.size = "same", 4
@@ -336,6 +432,66 @@ func TestMinimalRuntimeProfilePropagatesBoundedAliasesAndRevalidatesLinks(t *tes
 	})
 }
 
+func TestMinimalRuntimeProfilePreservesRuntimeBearingPathsBeforeEveryPruneClass(t *testing.T) {
+	nodes := map[string]resolution.Node{
+		"dep":         minimalCoreNode("dep", "1"),
+		"pcre2":       minimalCoreNode("pcre2", "1"),
+		"python@3.14": minimalCoreNode("python@3.14", "3.14.6"),
+	}
+	retained := []string{
+		// Legal names are checked before every prune reason.
+		"Cellar/dep/1/include/LICENCE.md",
+		"Cellar/dep/1/share/man/man1/PATENTS.1",
+		"Cellar/pcre2/1/share/doc/pcre2/LICENCE.md",
+		"Cellar/dep/1/lib/cmake/dep/UNLICENSE",
+		"Cellar/python@3.14/3.14.6/lib/python3.14/test/UNLICENCE.txt",
+		"Cellar/dep/1/share/zsh/site-functions/LEGAL",
+		"Cellar/dep/1/lib/LEGAL.a",
+
+		// Shared objects remain loader-visible even inside otherwise removable
+		// headers, docs, build metadata, tests, and completion trees.
+		"Cellar/dep/1/include/libheader.so",
+		"Cellar/dep/1/share/man/man1/libmanual.so.1",
+		"Cellar/dep/1/share/doc/dep/libdoc.so",
+		"Cellar/dep/1/lib/cmake/dep/plugin.so",
+		"Cellar/python@3.14/3.14.6/lib/python3.14/test/extension.so.1",
+		"Cellar/dep/1/share/zsh/site-functions/module.so",
+
+		// Protected runtime-data components use one predicate across every class.
+		"Cellar/dep/1/include/config/generated.h",
+		"Cellar/dep/1/share/man/locale/en/dep.1",
+		"Cellar/dep/1/share/doc/dep/plugins/runtime.dat",
+		"Cellar/dep/1/lib/cmake/node_modules/runtime.cmake",
+		"Cellar/python@3.14/3.14.6/lib/python3.14/test/site-packages/runtime.py",
+		"Cellar/dep/1/share/zsh/site-functions/venv/_dep",
+		"Cellar/dep/1/lib/libexec/runtime.a",
+	}
+	entries := make([]*sourceEntry, 0, len(retained)+1)
+	for _, rel := range retained {
+		pkg := "dep"
+		switch {
+		case rel == "Cellar/pcre2/1/share/doc/pcre2/LICENCE.md":
+			pkg = "pcre2"
+		case rel == "Cellar/python@3.14/3.14.6/lib/python3.14/test/UNLICENCE.txt",
+			rel == "Cellar/python@3.14/3.14.6/lib/python3.14/test/extension.so.1",
+			rel == "Cellar/python@3.14/3.14.6/lib/python3.14/test/site-packages/runtime.py":
+			pkg = "python@3.14"
+		}
+		entries = append(entries, minimalEntry(rel, pkg, TypeRegular))
+	}
+	noticeRef := "Cellar/dep/1/share/doc/dep/NOTICEREF_notes.md"
+	entries = append(entries, minimalEntry(noticeRef, "dep", TypeRegular))
+
+	scan := minimalScan(entries)
+	if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(nodes, nil)); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range retained {
+		assertMinimalRetained(t, scan, rel)
+	}
+	assertMinimalPruned(t, scan, noticeRef, PruneRuntimeShareDoc)
+}
+
 func TestValidateInventoryPolicyRejectsMinimalProfileForgery(t *testing.T) {
 	nodes := map[string]resolution.Node{
 		"dep":       minimalCoreNode("dep", "1"),
@@ -346,7 +502,7 @@ func TestValidateInventoryPolicyRejectsMinimalProfileForgery(t *testing.T) {
 		Nodes:         []resolution.Node{nodes["dep"], nodes["requested"]},
 		Runtime:       resolution.RuntimePolicy{UID: 1000, GID: 1000},
 	}
-	entry := InventoryEntry{Path: "Cellar/dep/1/include/dep.h", Type: TypeRegular, Mode: "0444", Package: "dep"}
+	entry := InventoryEntry{Path: "Cellar/dep/1/include/dep.h", Type: TypeRegular, Mode: "0444", Package: "dep", FormulaID: "homebrew/core/dep"}
 	policy := minimalPolicy(nodes, map[string]struct{}{"requested": {}})
 	if err := validateInventoryPolicy(entry, record, policy, nil); errorCode(err) != CodeVerification {
 		t.Fatalf("error=%v code=%s", err, errorCode(err))
@@ -362,6 +518,7 @@ func TestValidateInventoryPolicyRejectsMinimalProfileForgery(t *testing.T) {
 	requested := entry
 	requested.Path = "Cellar/requested/1/include/requested.h"
 	requested.Package = "requested"
+	requested.FormulaID = "homebrew/core/requested"
 	if err := validateInventoryPolicy(requested, record, policy, nil); err != nil {
 		t.Fatalf("requested inventory entry rejected: %v", err)
 	}
@@ -370,14 +527,14 @@ func TestValidateInventoryPolicyRejectsMinimalProfileForgery(t *testing.T) {
 	legal.Path = "Cellar/dep/1/share/man/man1/LICENSE.txt"
 	legalPolicy := minimalPolicy(nodes, nil)
 	legalAncestors := minimalInventoryExceptionAncestors([]InventoryEntry{
-		{Path: "Cellar/dep/1/share/man", Type: TypeDirectory, Mode: "0555", Package: "dep"},
-		{Path: "Cellar/dep/1/share/man/man1", Type: TypeDirectory, Mode: "0555", Package: "dep"},
+		{Path: "Cellar/dep/1/share/man", Type: TypeDirectory, Mode: "0555", Package: "dep", FormulaID: "homebrew/core/dep"},
+		{Path: "Cellar/dep/1/share/man/man1", Type: TypeDirectory, Mode: "0555", Package: "dep", FormulaID: "homebrew/core/dep"},
 		legal,
 	}, legalPolicy)
 	if err := validateInventoryPolicy(legal, record, legalPolicy, legalAncestors); err != nil {
 		t.Fatalf("legal text inventory entry rejected: %v", err)
 	}
-	legalParent := InventoryEntry{Path: "Cellar/dep/1/share/man/man1", Type: TypeDirectory, Mode: "0555", Package: "dep"}
+	legalParent := InventoryEntry{Path: "Cellar/dep/1/share/man/man1", Type: TypeDirectory, Mode: "0555", Package: "dep", FormulaID: "homebrew/core/dep"}
 	if err := validateInventoryPolicy(legalParent, record, legalPolicy, legalAncestors); err != nil {
 		t.Fatalf("proven legal-text ancestor rejected: %v", err)
 	}
@@ -390,14 +547,14 @@ func TestValidateInventoryPolicyRejectsMinimalProfileForgery(t *testing.T) {
 	shareDocLegal := shareDoc
 	shareDocLegal.Path = "Cellar/dep/1/share/doc/dep/NOTICE"
 	shareDocAncestors := minimalInventoryExceptionAncestors([]InventoryEntry{
-		{Path: "Cellar/dep/1/share/doc", Type: TypeDirectory, Mode: "0555", Package: "dep"},
-		{Path: "Cellar/dep/1/share/doc/dep", Type: TypeDirectory, Mode: "0555", Package: "dep"},
+		{Path: "Cellar/dep/1/share/doc", Type: TypeDirectory, Mode: "0555", Package: "dep", FormulaID: "homebrew/core/dep"},
+		{Path: "Cellar/dep/1/share/doc/dep", Type: TypeDirectory, Mode: "0555", Package: "dep", FormulaID: "homebrew/core/dep"},
 		shareDocLegal,
 	}, policy)
 	if err := validateInventoryPolicy(shareDocLegal, record, policy, shareDocAncestors); err != nil {
 		t.Fatalf("share/doc legal text rejected: %v", err)
 	}
-	shareDocParent := InventoryEntry{Path: "Cellar/dep/1/share/doc/dep", Type: TypeDirectory, Mode: "0555", Package: "dep"}
+	shareDocParent := InventoryEntry{Path: "Cellar/dep/1/share/doc/dep", Type: TypeDirectory, Mode: "0555", Package: "dep", FormulaID: "homebrew/core/dep"}
 	if err := validateInventoryPolicy(shareDocParent, record, policy, shareDocAncestors); err != nil {
 		t.Fatalf("share/doc legal ancestor rejected: %v", err)
 	}

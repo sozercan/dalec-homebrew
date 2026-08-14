@@ -696,7 +696,15 @@ func shortHash(value string) string {
 
 func looksLikeLegalText(filename string) bool {
 	base := strings.ToLower(path.Base(filename))
-	for _, name := range []string{"license", "licenses", "copying", "notice", "notices", "copyright", "copyrights"} {
+	for _, name := range []string{
+		"license", "licenses", "licence", "licences",
+		"copying",
+		"notice", "notices",
+		"copyright", "copyrights",
+		"patent", "patents",
+		"unlicense", "unlicenses", "unlicence", "unlicences",
+		"legal",
+	} {
 		if base == name {
 			return true
 		}
