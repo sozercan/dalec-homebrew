@@ -16,26 +16,27 @@ import (
 )
 
 const (
-	SchemaVersion                  = "dalec-homebrew-policy/v2"
-	ResolverPolicyVersion          = "homebrew-runtime-v2"
-	RuntimeProfileMinimalV1        = "minimal-v1"
-	RuntimePruneHeadersV1          = "transitive-core-headers-v1"
-	RuntimePruneManInfoV1          = "transitive-core-man-info-v1"
-	RuntimePruneBuildMetaV1        = "transitive-core-build-metadata-v1"
-	RuntimePrunePythonTestsV1      = "transitive-core-python-stdlib-tests-v1"
-	RuntimePruneShellCompletionsV1 = "transitive-core-shell-completions-v1"
-	RuntimePruneStaticArchivesV1   = "transitive-core-static-archives-v1"
-	RuntimeRetainToolchainDevV1    = "transitive-core-toolchain-development-retention-v1"
-	FetchPolicyVersion             = "homebrew-bottle-fetch-v1"
-	ProvenancePolicyVersion        = "homebrew-bottle-provenance-v1"
-	NonCoreProvenanceWaiver        = "tap-catalog-buildkit-and-verified-checksum-v1"
-	DefaultMaxNonCoreTaps          = 16
-	DefaultMaxClosureNodes         = 256
-	DefaultMaxCatalogBytes         = int64(64 << 20)
-	DefaultMaxMetadataBytes        = int64(256 << 20)
-	DefaultMaxBottleBytes          = int64(1 << 30)
-	DefaultMaxRedirects            = 5
-	DefaultFetchTimeoutSecond      = 15 * 60
+	SchemaVersion                     = "dalec-homebrew-policy/v2"
+	ResolverPolicyVersion             = "homebrew-runtime-v2"
+	RuntimeProfileMinimalV1           = "minimal-v1"
+	RuntimePruneHeadersV1             = "transitive-core-headers-v1"
+	RuntimePruneManInfoV1             = "transitive-core-man-info-v1"
+	RuntimePruneBuildMetaV1           = "transitive-core-build-metadata-v1"
+	RuntimePrunePythonTestsV1         = "transitive-core-python-stdlib-tests-v1"
+	RuntimePruneShellCompletionsV1    = "transitive-core-shell-completions-v1"
+	RuntimePruneStaticArchivesV1      = "transitive-core-static-archives-v1"
+	RuntimeRetainToolchainDevV1       = "transitive-core-toolchain-development-retention-v1"
+	RuntimeToolchainDevelopmentRootV1 = "toolchain-development-retention-root-v1"
+	FetchPolicyVersion                = "homebrew-bottle-fetch-v1"
+	ProvenancePolicyVersion           = "homebrew-bottle-provenance-v1"
+	NonCoreProvenanceWaiver           = "tap-catalog-buildkit-and-verified-checksum-v1"
+	DefaultMaxNonCoreTaps             = 16
+	DefaultMaxClosureNodes            = 256
+	DefaultMaxCatalogBytes            = int64(64 << 20)
+	DefaultMaxMetadataBytes           = int64(256 << 20)
+	DefaultMaxBottleBytes             = int64(1 << 30)
+	DefaultMaxRedirects               = 5
+	DefaultFetchTimeoutSecond         = 15 * 60
 )
 
 //go:embed policy.json

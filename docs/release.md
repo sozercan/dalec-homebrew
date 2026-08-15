@@ -14,11 +14,13 @@ tuple. The frontend itself must also be invoked by digest.
 
 Automatic runtime minimization is part of that immutable V2 policy tuple. The
 release-bound policy defines six exact Formula/path classes eligible for
-pruning plus the development-payload retention rule derived from authenticated
-V2 executable-path metadata; invocation input cannot disable, select, supply,
-or broaden those rules. Formula `share/doc` content remains retained. V1
-components retain their legacy assembly behavior. A policy change requires a
-newly built, tested, and signed component tuple.
+pruning plus exact release-bound V2 Formula policy capabilities that activate
+compiler or MPI development-payload retention across the verified dependency
+closure; invocation input cannot disable, select, supply, or broaden those
+rules. Unsigned OCI executable-path annotations cannot activate retention.
+Formula `share/doc` content remains retained. V1 components retain their legacy
+assembly behavior. A policy change requires a newly built, tested, and signed
+component tuple.
 
 Prune-manifest schema v4 and its reason vocabulary remain compatible with the
 inactive `transitive_runtime_share_doc` reason, but a new release must not emit

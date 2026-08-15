@@ -95,6 +95,36 @@ func TestRuntimeRulesAreExactFormulaIDs(t *testing.T) {
 	}
 }
 
+func TestToolchainDevelopmentRootsRequireExactFormulaIDs(t *testing.T) {
+	policy, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{
+		"homebrew/core/gcc",
+		"homebrew/core/llvm",
+		"homebrew/core/llvm@20",
+		"homebrew/core/llvm@21",
+		"homebrew/core/open-mpi",
+	} {
+		if !policy.HasRule(id, RuntimeToolchainDevelopmentRootV1) {
+			t.Errorf("toolchain development root capability is absent for %s", id)
+		}
+	}
+	for _, id := range []string{
+		"acme/tools/gcc",
+		"acme/tools/open-mpi",
+		"homebrew/core/gcc@14",
+		"homebrew/core/llvm@22",
+		"homebrew/core/mpich",
+		"gcc",
+	} {
+		if policy.HasRule(id, RuntimeToolchainDevelopmentRootV1) {
+			t.Errorf("unlisted Formula %s received the toolchain development root capability", id)
+		}
+	}
+}
+
 func TestGeneratedGlobalPathOwnersAreExactFormulaIDs(t *testing.T) {
 	policy, err := Load()
 	if err != nil {

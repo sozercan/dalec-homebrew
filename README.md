@@ -155,12 +155,13 @@ There is no Dalec input or build argument that enables, disables, or broadens
 the policy. Shared libraries, plugins, `libexec`, configuration, locales,
 Python site-packages, `ensurepip`, `venv`, `node_modules`, Formula `share/doc`
 content, and legal or license text remain. Static archives under those
-protected runtime-data locations also remain. When authenticated
-executable-path metadata under `bin/` identifies a policy-recognized compiler
-driver, including an MPI wrapper driver, headers, build metadata, and static
-archives also remain for that Formula and its dependency closure; unrelated
-Formulae still use the six normal pruning classes. V1 frontends retain their
-legacy assembly behavior.
+protected runtime-data locations also remain. Only an exact release-bound V2
+Formula policy capability can activate compiler or MPI development retention.
+For a capability-authorized Formula, headers, build metadata, and static
+archives also remain across its verified dependency closure; unrelated
+Formulae still use the six normal pruning classes. Unsigned OCI executable-path
+annotations cannot activate this retention. V1 frontends retain their legacy
+assembly behavior.
 See the [usage reference](docs/usage.md#automatic-v2-runtime-minimization) for
 the exact contract.
 

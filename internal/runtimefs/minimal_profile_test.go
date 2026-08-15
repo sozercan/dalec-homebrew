@@ -1,25 +1,24 @@
 package runtimefs
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
-func TestMinimalRuntimeProfileRetainsAuthenticatedCompilerDriverClosure(t *testing.T) {
+func TestMinimalRuntimeProfileRetainsReleaseBoundToolchainDevelopmentClosure(t *testing.T) {
 	app := minimalCoreNode("app", "1")
 	app.Dependencies = []resolution.Requirement{{Name: "open-mpi"}, {Name: "unrelated"}}
 	openMPI := minimalCoreNode("open-mpi", "1")
 	openMPI.Dependencies = []resolution.Requirement{{Name: "gcc"}, {Name: "libevent"}}
-	openMPI.ExecutablePaths = []string{"bin/mpicc", "bin/mpirun"}
 	gcc := minimalCoreNode("gcc", "1")
 	gcc.Dependencies = []resolution.Requirement{{Name: "gmp"}}
-	gcc.ExecutablePaths = []string{"bin/gcc-15"}
 	gmp := minimalCoreNode("gmp", "1")
 	libevent := minimalCoreNode("libevent", "1")
 	unrelated := minimalCoreNode("unrelated", "1")
-	unrelated.ExecutablePaths = []string{"bin/gcc-ar-15"}
+	unrelated.ExecutablePaths = []string{"bin/mpicc"}
 	nodes := map[string]resolution.Node{
 		app.Name:       app,
 		openMPI.Name:   openMPI,
@@ -61,48 +60,58 @@ func TestMinimalRuntimeProfileRetainsAuthenticatedCompilerDriverClosure(t *testi
 	assertMinimalPruned(t, scan, "Cellar/unrelated/1/lib/libunrelated.a", PruneRuntimeStatic)
 }
 
-func TestCompilerDriverExecutablePath(t *testing.T) {
-	for _, rel := range []string{
-		"bin/cc",
-		"bin/g++-15",
-		"bin/clang++-19.1",
-		"bin/gfortran-15",
-		"bin/mpiCC",
-		"bin/mpifort",
-		"bin/mpif90-4.1",
-	} {
-		if !compilerDriverExecutablePath(rel) {
-			t.Errorf("%q was not recognized as a compiler driver", rel)
-		}
-	}
-	for _, rel := range []string{
-		"libexec/gcc-15",
-		"bin/gcc-ar-15",
-		"bin/gcc-helper",
-		"bin/mpiexec",
-		"bin/mpirun",
-		"bin/ccache",
-		"bin/gcc-15rc1",
-	} {
-		if compilerDriverExecutablePath(rel) {
-			t.Errorf("%q was recognized as a compiler driver", rel)
-		}
-	}
-}
-
-func TestToolchainDevelopmentClosureRequiresAuthenticatedV2Identity(t *testing.T) {
-	legacy := minimalCoreNode("open-mpi", "1")
-	legacy.PolicyFormulaID = ""
-	legacy.ExecutablePaths = []string{"bin/mpicc"}
-	dependency := minimalCoreNode("gcc", "1")
-	legacy.Dependencies = []resolution.Requirement{{Name: dependency.Name}}
-	nodes := map[string]resolution.Node{legacy.Name: legacy, dependency.Name: dependency}
+func TestToolchainDevelopmentClosureUsesExactReleasePolicy(t *testing.T) {
 	allowlist := normalizedAllowlist{
 		PruningProfile: policyv2.RuntimeProfileMinimalV1,
 		PruningRules:   policyv2.MinimalV1RuntimePruneRules(),
 	}
-	if retained := toolchainDevelopmentClosure(nodes, allowlist); len(retained) != 0 {
-		t.Fatalf("legacy executable metadata activated V2 retention: %#v", retained)
+
+	dependency := minimalCoreNode("libevent", "1")
+	exact := minimalCoreNode("open-mpi", "1")
+	exact.Dependencies = []resolution.Requirement{{Name: dependency.Name}}
+	nodes := map[string]resolution.Node{exact.Name: exact, dependency.Name: dependency}
+	want := map[string]struct{}{exact.Name: {}, dependency.Name: {}}
+	if retained := toolchainDevelopmentClosure(nodes, allowlist); !maps.Equal(retained, want) {
+		t.Fatalf("exact release-policy root closure = %#v, want %#v", retained, want)
+	}
+	exact.ExecutablePaths = []string{"bin/not-a-compiler"}
+	nodes[exact.Name] = exact
+	if retained := toolchainDevelopmentClosure(nodes, allowlist); !maps.Equal(retained, want) {
+		t.Fatalf("executable hints changed release-policy closure: %#v", retained)
+	}
+	withoutRule := allowlist
+	withoutRule.PruningRules = nil
+	if retained := toolchainDevelopmentClosure(nodes, withoutRule); len(retained) != 0 {
+		t.Fatalf("inactive runtime rule retained toolchain development closure: %#v", retained)
+	}
+
+	for name, node := range map[string]resolution.Node{
+		"V1": {
+			Name:            "open-mpi",
+			FullName:        "homebrew/core/open-mpi",
+			PkgVersion:      "1",
+			ExecutablePaths: []string{"bin/mpicc"},
+		},
+		"non-core spoof": {
+			Name:            "open-mpi",
+			FullName:        "acme/tools/open-mpi",
+			PolicyFormulaID: "acme/tools/open-mpi",
+			PkgVersion:      "1",
+			ExecutablePaths: []string{"bin/mpicc"},
+		},
+		"unlisted core": {
+			Name:            "mpich",
+			FullName:        "homebrew/core/mpich",
+			PolicyFormulaID: "homebrew/core/mpich",
+			PkgVersion:      "1",
+			ExecutablePaths: []string{"bin/mpicc"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if retained := toolchainDevelopmentClosure(map[string]resolution.Node{node.Name: node}, allowlist); len(retained) != 0 {
+				t.Fatalf("untrusted or unlisted executable metadata activated retention: %#v", retained)
+			}
+		})
 	}
 }
 

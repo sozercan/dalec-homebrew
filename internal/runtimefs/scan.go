@@ -1003,6 +1003,68 @@ func staticArchiveAliasRuntimePath(rel string) bool {
 	return hasLib
 }
 
+type descendantPathRange struct {
+	start int
+	end   int
+}
+
+// descendantPathIndex consumes lexical path ranges without revisiting paths
+// covered by an earlier, overlapping directory closure. The successor cursor
+// keeps total traversal proportional to the indexed paths rather than to the
+// product of protected links and installed entries.
+type descendantPathIndex struct {
+	paths  []string
+	next   []int
+	ranges map[string]descendantPathRange
+}
+
+func newDescendantPathIndex(paths []string) *descendantPathIndex {
+	paths = slices.Clone(paths)
+	slices.Sort(paths)
+	paths = slices.Compact(paths)
+
+	next := make([]int, len(paths)+1)
+	for i := range next {
+		next[i] = i
+	}
+	return &descendantPathIndex{
+		paths:  paths,
+		next:   next,
+		ranges: make(map[string]descendantPathRange),
+	}
+}
+
+func (i *descendantPathIndex) consumeDescendants(root string, consume func(string)) {
+	pathRange, ok := i.ranges[root]
+	if !ok {
+		// A slash-delimited subtree is the lexical interval [root+"/",
+		// root+"0"): ASCII '0' immediately follows '/'. The target directory
+		// itself is retained separately by link tracing.
+		pathRange.start, _ = slices.BinarySearch(i.paths, root+"/")
+		pathRange.end, _ = slices.BinarySearch(i.paths, root+"0")
+		i.ranges[root] = pathRange
+	}
+
+	for current := i.nextUnconsumed(pathRange.start); current < pathRange.end; current = i.nextUnconsumed(current) {
+		rel := i.paths[current]
+		i.next[current] = i.nextUnconsumed(current + 1)
+		consume(rel)
+	}
+}
+
+func (i *descendantPathIndex) nextUnconsumed(pos int) int {
+	representative := pos
+	for i.next[representative] != representative {
+		representative = i.next[representative]
+	}
+	for i.next[pos] != pos {
+		next := i.next[pos]
+		i.next[pos] = representative
+		pos = next
+	}
+	return representative
+}
+
 func retainMinimalRuntimeAliasTargets(scan *sourceScan, policy *normalizedPolicy, candidates map[string]PruneReason) error {
 	queue := make([]*sourceEntry, 0)
 	for _, entry := range scan.entries {
@@ -1013,6 +1075,7 @@ func retainMinimalRuntimeAliasTargets(scan *sourceScan, policy *normalizedPolicy
 	}
 
 	seen := make(map[string]struct{}, len(queue))
+	var descendants *descendantPathIndex
 	for len(queue) > 0 {
 		entry := queue[0]
 		queue = queue[1:]
@@ -1037,15 +1100,20 @@ func retainMinimalRuntimeAliasTargets(scan *sourceScan, policy *normalizedPolicy
 		if target == nil || target.typeName != TypeDirectory {
 			continue
 		}
-		for _, descendant := range scan.entries {
-			if !isWithin(descendant.rel, final) {
-				continue
+		if descendants == nil {
+			paths := make([]string, 0, len(scan.entries))
+			for _, candidate := range scan.entries {
+				paths = append(paths, candidate.rel)
 			}
-			delete(candidates, descendant.rel)
-			if descendant.typeName == TypeSymlink {
+			descendants = newDescendantPathIndex(paths)
+		}
+		descendants.consumeDescendants(final, func(rel string) {
+			descendant := scan.byPath[rel]
+			delete(candidates, rel)
+			if descendant != nil && descendant.typeName == TypeSymlink {
 				queue = append(queue, descendant)
 			}
-		}
+		})
 	}
 	return nil
 }

@@ -2314,7 +2314,7 @@ jobs:
             .dalec_module == $inputs[0].dalec_module and
             .buildkit_module == $inputs[0].buildkit_module and
             .tap_policy_digest == "sha256:9f5b47c9d241dc16464dd81c350fc6c7755fa35c992bc821e6c3927573a3f217" and
-            .executable_runtime_policy_digest == "sha256:c3313d851210803822f9a088a9bb7e5901691044c733ea513f361b464666a499" and
+            .executable_runtime_policy_digest == "sha256:d84e068f9ba7329a1399d598e26ef219ecba60ba3a3fc2f0244e46d234faf37a" and
             .supported_catalog_policy_versions == ["tap-catalog-v1"] and
             .supported_fetch_policy_versions == ["homebrew-bottle-fetch-v1"] and
             .supported_provenance_policy_versions == [

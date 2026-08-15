@@ -67,10 +67,11 @@ V2 public-tap releases additionally preserve these properties:
     libraries, plugins, `libexec`, configuration, locales, site-packages,
     `ensurepip`, `venv`, `node_modules`, Formula `share/doc` content, legal or
     license text, and static archives in protected runtime-data locations
-    remain. Authenticated executable-path metadata under `bin/` that identifies
-    a policy-recognized compiler driver, including an MPI wrapper driver,
-    additionally retains headers, build metadata, and static archives for that
-    Formula and its dependency closure. Unrelated Formulae remain eligible for
+    remain. Only an exact release-bound V2 Formula policy capability can
+    activate compiler or MPI development retention. For a capability-authorized
+    Formula, headers, build metadata, and static archives remain across its
+    verified dependency closure. Unsigned OCI executable-path annotations
+    cannot activate this retention. Unrelated Formulae remain eligible for
     normal pruning.
     Unknown identities and paths fail closed, evidence binds the pruning-policy
     identity and exact decisions, and V1 retains its legacy assembly behavior.
@@ -108,7 +109,11 @@ The Formula JWS authenticates the compressed bottle checksum, but it does not bi
 1. treats signed Formula declarations as package identity authority,
 2. verifies the complete fetched OCI descriptor chain by digest and size,
 3. requires the selected layer digest to equal the signed Homebrew checksum,
-4. treats bottle-tab dependencies as minimum and consistency evidence and uses `changed_files` and executable-path metadata only as bounded reconciliation and runtime-scope hints, and
+4. treats bottle-tab dependencies as minimum and consistency evidence, uses
+   `changed_files` and executable-path metadata only as bounded reconciliation
+   and runtime-scope hints, and never permits the unsigned
+   `sh.brew.path_exec_files` OCI annotation to activate compiler or MPI
+   development retention, and
 5. records the fixed V1 upstream-attestation waiver. A stronger upstream attestation policy is not currently configured and would require an explicit policy and component change.
 
 Current Homebrew bottle tarballs generally do not contain `INSTALL_RECEIPT.json`; Homebrew creates it while pouring the bottle. The archive verifier can require a pre-install receipt for fixtures or alternate producers, while production verifies the generated receipt after offline installation. For legacy receipt dependency entries, only an omitted `pkg_version` is derived from `version` and `revision`; explicit empty, null, non-string, or inconsistent dependency values fail. A top-level receipt `pkg_version` may be absent, but when present it must match the resolved node, and source version, version scheme, and closure membership are checked independently.

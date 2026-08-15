@@ -59,6 +59,11 @@
         "shared-etc-fonts"
       ]
     },
+    "homebrew/core/gcc": {
+      "rules": [
+        "toolchain-development-retention-root-v1"
+      ]
+    },
     "homebrew/core/gdk-pixbuf": {
       "generated_global_paths": [
         "lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
@@ -124,19 +129,27 @@
     "homebrew/core/llvm": {
       "rules": [
         "optional-llvm-tooling",
-        "runtime-aux-llvm"
+        "runtime-aux-llvm",
+        "toolchain-development-retention-root-v1"
       ]
     },
     "homebrew/core/llvm@20": {
       "rules": [
         "optional-llvm-tooling",
-        "runtime-aux-llvm"
+        "runtime-aux-llvm",
+        "toolchain-development-retention-root-v1"
       ]
     },
     "homebrew/core/llvm@21": {
       "rules": [
         "optional-llvm-tooling",
-        "runtime-aux-llvm"
+        "runtime-aux-llvm",
+        "toolchain-development-retention-root-v1"
+      ]
+    },
+    "homebrew/core/open-mpi": {
+      "rules": [
+        "toolchain-development-retention-root-v1"
       ]
     },
     "homebrew/core/libpsl": {

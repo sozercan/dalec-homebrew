@@ -176,13 +176,13 @@ exactly one of the six documented classes, and that retained shared libraries,
 plugins, `libexec`, configuration, locales, Python site-packages, `ensurepip`,
 `venv`, Formula `share/doc` content, and static archives in protected
 runtime-data locations remain usable. Legal and license text must also remain.
-Exercise the
-compiler-driver retention rule from authenticated V2 executable-path metadata,
-including an MPI wrapper driver, and prove that headers, build metadata, and
-static archives remain across that node's dependency closure while unrelated
-nodes still prune. Review the generated inventory and prune evidence as well as
-the image-size report; a smaller image is not sufficient if runtime behavior or
-release-policy binding changes.
+Add focused coverage for compiler and MPI development retention activated by an
+exact release-bound V2 Formula policy capability. Prove that headers, build
+metadata, and static archives remain across that node's verified dependency
+closure while unrelated nodes still prune, and that unsigned OCI
+executable-path annotations cannot activate retention. Review the generated
+inventory and prune evidence as well as the image-size report; a smaller image
+is not sufficient if runtime behavior or release-policy binding changes.
 
 ## Run the non-core production-path E2E
 

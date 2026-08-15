@@ -157,10 +157,11 @@ func toolchainDevelopmentClosure(nodes map[string]resolution.Node, allowlist nor
 
 	queue := make([]string, 0)
 	for name, node := range nodes {
-		if authenticatedCompilerDriverNode(node) {
+		if toolchainDevelopmentRoot(node) {
 			queue = append(queue, name)
 		}
 	}
+	slices.Sort(queue)
 	for len(queue) > 0 {
 		name := queue[0]
 		queue = queue[1:]
@@ -172,59 +173,23 @@ func toolchainDevelopmentClosure(nodes map[string]resolution.Node, allowlist nor
 			continue
 		}
 		retained[name] = struct{}{}
+		dependencies := make([]string, 0, len(node.Dependencies))
 		for _, dependency := range node.Dependencies {
 			if _, ok := nodes[dependency.Name]; ok {
-				queue = append(queue, dependency.Name)
+				dependencies = append(dependencies, dependency.Name)
 			}
 		}
+		slices.Sort(dependencies)
+		queue = append(queue, dependencies...)
 	}
 	return retained
 }
 
-func authenticatedCompilerDriverNode(node resolution.Node) bool {
+func toolchainDevelopmentRoot(node resolution.Node) bool {
 	// PolicyFormulaID is populated only by the independently verified V2
-	// projection. V1 executable annotations must not activate V2 retention.
-	if node.PolicyFormulaID == "" {
-		return false
-	}
-	for _, executable := range node.ExecutablePaths {
-		if compilerDriverExecutablePath(executable) {
-			return true
-		}
-	}
-	return false
-}
-
-func compilerDriverExecutablePath(rel string) bool {
-	if path.Dir(rel) != "bin" {
-		return false
-	}
-	name := strings.ToLower(path.Base(rel))
-	drivers := []string{
-		"cc", "c++", "gcc", "g++", "gfortran", "clang", "clang++", "flang", "flang-new",
-		"mpicc", "mpic++", "mpicxx", "mpifc", "mpif77", "mpif90", "mpif08", "mpifort",
-	}
-	if slices.Contains(drivers, name) {
-		return true
-	}
-	for _, stem := range drivers {
-		if suffix, ok := strings.CutPrefix(name, stem+"-"); ok && compilerDriverVersionSuffix(suffix) {
-			return true
-		}
-	}
-	return false
-}
-
-func compilerDriverVersionSuffix(value string) bool {
-	if value == "" || value[0] == '.' || value[len(value)-1] == '.' || strings.Contains(value, "..") {
-		return false
-	}
-	for _, r := range value {
-		if (r < '0' || r > '9') && r != '.' {
-			return false
-		}
-	}
-	return true
+	// projection. Exact release-bound Formula policy is the sole authority for
+	// this retention root; OCI executable annotations are only runtime hints.
+	return node.PolicyFormulaID != "" && policyv2.HasEmbeddedRule(node.PolicyFormulaID, policyv2.RuntimeToolchainDevelopmentRootV1)
 }
 
 // PolicyDigest returns the digest that can be placed in

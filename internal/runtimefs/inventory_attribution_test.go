@@ -167,10 +167,10 @@ func TestValidateInventoryPolicyRetainsToolchainDevelopmentClosure(t *testing.T)
 	app := inventoryVerifierNode("app", "homebrew/core/app", "homebrew/core/app")
 	app.Dependencies = []resolution.Requirement{{Name: "open-mpi"}, {Name: "unrelated"}}
 	openMPI := inventoryVerifierNode("open-mpi", "homebrew/core/open-mpi", "homebrew/core/open-mpi")
-	openMPI.ExecutablePaths = []string{"bin/mpicc"}
 	openMPI.Dependencies = []resolution.Requirement{{Name: "gcc"}}
 	gcc := inventoryVerifierNode("gcc", "homebrew/core/gcc", "homebrew/core/gcc")
 	unrelated := inventoryVerifierNode("unrelated", "homebrew/core/unrelated", "homebrew/core/unrelated")
+	unrelated.ExecutablePaths = []string{"bin/mpicc"}
 	nodes := []resolution.Node{app, openMPI, gcc, unrelated}
 	policy := inventoryVerifierPolicy(nodes, true, app.Name)
 	record := inventoryVerifierRecord(resolution.PolicyVersionV2, nodes)

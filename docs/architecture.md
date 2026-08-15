@@ -229,11 +229,13 @@ libraries, plugins, `libexec`, configuration, locales, site-packages,
 license text, and static archives inside protected runtime-data locations.
 
 Before classifying paths, the V2 policy derives a development-payload retention
-set from authenticated V2 executable-path metadata. A policy-recognized
-compiler driver under `bin/`, including an MPI wrapper driver, retains headers,
-build metadata, and static archives for its Formula node and transitive
-dependency closure. This is a retention rule rather than a seventh prune class;
-unrelated nodes remain eligible for all six classes.
+set from exact release-bound V2 Formula policy capabilities and the verified
+dependency graph. A capability-authorized compiler or MPI Formula retains
+headers, build metadata, and static archives for its node and verified
+dependency closure.
+Unsigned OCI executable-path annotations cannot activate this rule. This is a
+retention rule rather than a seventh prune class; unrelated nodes remain
+eligible for all six classes.
 
 Retained links and runtime validation must still succeed on the final state.
 The pruning-policy identity and exact decisions are committed into resolution,

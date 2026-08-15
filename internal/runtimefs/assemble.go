@@ -760,6 +760,7 @@ func planMinimalInventoryProfile(entries []InventoryEntry, policy *normalizedPol
 		}
 	}
 	seen := make(map[string]struct{}, len(queue))
+	var descendants *descendantPathIndex
 	for len(queue) > 0 {
 		entry := queue[0]
 		queue = queue[1:]
@@ -794,14 +795,19 @@ func planMinimalInventoryProfile(entries []InventoryEntry, policy *normalizedPol
 		}
 		target := byPath[trace.final]
 		if target.Type == TypeDirectory {
-			for _, candidate := range entries {
-				if isWithin(candidate.Path, trace.final) {
-					exempt(candidate.Path)
-					if candidate.Type == TypeSymlink {
-						queue = append(queue, candidate)
-					}
+			if descendants == nil {
+				paths := make([]string, 0, len(entries))
+				for _, candidate := range entries {
+					paths = append(paths, candidate.Path)
 				}
+				descendants = newDescendantPathIndex(paths)
 			}
+			descendants.consumeDescendants(trace.final, func(rel string) {
+				exempt(rel)
+				if candidate := byPath[rel]; candidate.Type == TypeSymlink {
+					queue = append(queue, candidate)
+				}
+			})
 		}
 	}
 

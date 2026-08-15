@@ -162,12 +162,13 @@ configuration, locales, Python site-packages, `ensurepip`, `venv`, any
 Formula `share/doc/` content, or static archives in protected runtime-data
 locations. Legal and license text is also retained.
 
-The release policy has one additional development-payload retention rule. If
-authenticated executable-path metadata under `bin/` identifies a
-policy-recognized compiler driver, including an MPI wrapper driver, headers,
-build metadata, and static archives remain for that Formula and its dependency
-closure. This does not disable the other pruning classes, and unrelated
-Formulae remain eligible for all six.
+The release policy has one additional development-payload retention rule. Only
+an exact release-bound V2 Formula policy capability can activate compiler or
+MPI development retention. For a capability-authorized Formula, headers, build
+metadata, and static archives remain across its verified dependency closure.
+Unsigned OCI executable-path annotations cannot activate this rule. This does
+not disable the other pruning classes, and unrelated Formulae remain eligible
+for all six.
 
 The added classes do not apply to non-core Formulae. If an exact path
 classification is missing or a retained path or link would become invalid,
