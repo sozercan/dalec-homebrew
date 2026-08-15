@@ -404,9 +404,9 @@ func TestReleaseWorkflowRequiresAutomaticRuntimeMinimizationEvidence(t *testing.
 		`transitive_runtime_man_info`,
 		`transitive_runtime_build_metadata`,
 		`transitive_runtime_python_tests`,
-		`transitive_runtime_share_doc`,
 		`transitive_runtime_shell_completions`,
 		`transitive_runtime_static_archives`,
+		`all(.reason != "transitive_runtime_share_doc")`,
 		`requested_formulae`,
 		`represented_path_count`,
 		`[$subtrees[].regular_bytes]`,
@@ -415,6 +415,13 @@ func TestReleaseWorkflowRequiresAutomaticRuntimeMinimizationEvidence(t *testing.
 		if !strings.Contains(workflow, required) {
 			t.Errorf("release workflow does not require automatic runtime-minimization evidence %q", required)
 		}
+	}
+	const inactiveShareDocGate = `all(.reason != "transitive_runtime_share_doc")`
+	if got := strings.Count(workflow, inactiveShareDocGate); got != 2 {
+		t.Errorf("release workflow inactive share/doc gates = %d, want 2", got)
+	}
+	if got := strings.Count(workflow, `transitive_runtime_share_doc`); got != 2 {
+		t.Errorf("release workflow inactive share/doc reason occurrences = %d, want only the 2 rejection gates", got)
 	}
 }
 

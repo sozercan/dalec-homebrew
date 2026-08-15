@@ -163,6 +163,38 @@ func TestPlanMinimalInventoryProfileRejectsUnboundedAlias(t *testing.T) {
 	}
 }
 
+func TestValidateInventoryPolicyRetainsToolchainDevelopmentClosure(t *testing.T) {
+	app := inventoryVerifierNode("app", "homebrew/core/app", "homebrew/core/app")
+	app.Dependencies = []resolution.Requirement{{Name: "open-mpi"}, {Name: "unrelated"}}
+	openMPI := inventoryVerifierNode("open-mpi", "homebrew/core/open-mpi", "homebrew/core/open-mpi")
+	openMPI.ExecutablePaths = []string{"bin/mpicc"}
+	openMPI.Dependencies = []resolution.Requirement{{Name: "gcc"}}
+	gcc := inventoryVerifierNode("gcc", "homebrew/core/gcc", "homebrew/core/gcc")
+	unrelated := inventoryVerifierNode("unrelated", "homebrew/core/unrelated", "homebrew/core/unrelated")
+	nodes := []resolution.Node{app, openMPI, gcc, unrelated}
+	policy := inventoryVerifierPolicy(nodes, true, app.Name)
+	record := inventoryVerifierRecord(resolution.PolicyVersionV2, nodes)
+
+	for _, rel := range []string{
+		"Cellar/gcc/1/include/gcc.h",
+		"Cellar/gcc/1/lib/pkgconfig/gcc.pc",
+		"Cellar/gcc/1/lib/libgcc.a",
+	} {
+		entry := inventoryVerifierEntry(rel, TypeRegular, gcc.Name, gcc.FullName)
+		if err := validateInventoryPolicy(entry, record, policy, nil); err != nil {
+			t.Fatalf("toolchain development path %q rejected: %v", rel, err)
+		}
+	}
+	unrelatedHeader := inventoryVerifierEntry("Cellar/unrelated/1/include/unrelated.h", TypeRegular, unrelated.Name, unrelated.FullName)
+	if err := validateInventoryPolicy(unrelatedHeader, record, policy, nil); errorCode(err) != CodeVerification {
+		t.Fatalf("unrelated header error=%v code=%s, want %s", err, errorCode(err), CodeVerification)
+	}
+	gccManual := inventoryVerifierEntry("Cellar/gcc/1/share/man/man1/gcc.1", TypeRegular, gcc.Name, gcc.FullName)
+	if err := validateInventoryPolicy(gccManual, record, policy, nil); errorCode(err) != CodeVerification {
+		t.Fatalf("toolchain manual error=%v code=%s, want %s", err, errorCode(err), CodeVerification)
+	}
+}
+
 func inventoryVerifierNode(name, fullName, policyFormulaID string) resolution.Node {
 	return resolution.Node{Name: name, FullName: fullName, PolicyFormulaID: policyFormulaID, PkgVersion: "1"}
 }
@@ -189,12 +221,14 @@ func inventoryVerifierPolicy(nodes []resolution.Node, minimal bool, requested ..
 		allowlist.PruningProfile = policyv2.RuntimeProfileMinimalV1
 		allowlist.PruningRules = policyv2.MinimalV1RuntimePruneRules()
 	}
-	return &normalizedPolicy{
+	policy := &normalizedPolicy{
 		installPrefix: DefaultInstallPrefix,
 		allowlist:     allowlist,
 		nodes:         byName,
 		requested:     requestedSet,
 	}
+	policy.toolchainDev = toolchainDevelopmentClosure(byName, allowlist)
+	return policy
 }
 
 func inventoryVerifierEntry(rel string, entryType EntryType, packageName, formulaID string) InventoryEntry {

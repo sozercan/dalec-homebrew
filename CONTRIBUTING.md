@@ -172,12 +172,17 @@ Use `DALEC_HOMEBREW_LIVE_SPEC` to run the same helper with a focused example:
 
 Runtime-minimization changes require focused V2 coverage. Verify that requested
 Formulae remain the retention boundary, that every removed path belongs to an
-exact documented class, and that retained shared libraries, plugins, `libexec`,
-configuration, locales, Python site-packages, `ensurepip`, `venv`, and static
-archives in protected runtime-data locations remain usable. Legal and license
-text must also remain. Review the generated inventory and prune evidence as well
-as the image-size report; a smaller image is not sufficient if runtime behavior
-or release-policy binding changes.
+exactly one of the six documented classes, and that retained shared libraries,
+plugins, `libexec`, configuration, locales, Python site-packages, `ensurepip`,
+`venv`, Formula `share/doc` content, and static archives in protected
+runtime-data locations remain usable. Legal and license text must also remain.
+Exercise the
+compiler-driver retention rule from authenticated V2 executable-path metadata,
+including an MPI wrapper driver, and prove that headers, build metadata, and
+static archives remain across that node's dependency closure while unrelated
+nodes still prune. Review the generated inventory and prune evidence as well as
+the image-size report; a smaller image is not sufficient if runtime behavior or
+release-policy binding changes.
 
 ## Run the non-core production-path E2E
 

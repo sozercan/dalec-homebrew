@@ -60,13 +60,18 @@ V2 public-tap releases additionally preserve these properties:
 18. A release-bound V2 frontend automatically applies its immutable runtime-
     minimization policy after complete resolution, verification, and offline
     installation. Dalec input and build arguments cannot disable or broaden the
-    policy. Requested Formulae are the retention boundary; only exact policy-
-    enumerated headers, man and Info trees, non-legal `share/doc` content,
-    build metadata, Python standard-library test paths, shell completions, and
-    bounded `lib/` static archives in transitive `homebrew/core` kegs are
-    removed. Shared libraries, plugins, `libexec`, configuration, locales,
-    site-packages, `ensurepip`, `venv`, `node_modules`, legal or license text,
-    and static archives in those protected runtime-data locations remain.
+    policy. Requested Formulae are the retention boundary; only the six exact
+    policy-enumerated classes of headers, man and Info trees, build metadata,
+    Python standard-library test paths, shell completions, and bounded `lib/`
+    static archives in transitive `homebrew/core` kegs are removed. Shared
+    libraries, plugins, `libexec`, configuration, locales, site-packages,
+    `ensurepip`, `venv`, `node_modules`, Formula `share/doc` content, legal or
+    license text, and static archives in protected runtime-data locations
+    remain. Authenticated executable-path metadata under `bin/` that identifies
+    a policy-recognized compiler driver, including an MPI wrapper driver,
+    additionally retains headers, build metadata, and static archives for that
+    Formula and its dependency closure. Unrelated Formulae remain eligible for
+    normal pruning.
     Unknown identities and paths fail closed, evidence binds the pruning-policy
     identity and exact decisions, and V1 retains its legacy assembly behavior.
 

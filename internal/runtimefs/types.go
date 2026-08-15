@@ -142,6 +142,8 @@ const (
 	PruneRuntimeTests    PruneReason = "transitive_runtime_python_tests"
 	PruneRuntimeStatic   PruneReason = "transitive_runtime_static_archives"
 	PruneRuntimeShell    PruneReason = "transitive_runtime_shell_completions"
+	// PruneRuntimeShareDoc is retained for evidence compatibility. The current
+	// minimal-v1 policy never emits this reason.
 	PruneRuntimeShareDoc PruneReason = "transitive_runtime_share_doc"
 )
 

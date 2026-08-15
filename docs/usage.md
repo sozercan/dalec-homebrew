@@ -143,7 +143,7 @@ runtime assembly behavior.
 Requested Formulae are excluded from the added minimization; the existing
 baseline removal of package-manager state, receipts, and Formula source still
 applies. Only transitive `homebrew/core` Formulae are eligible, and only these
-release-policy-enumerated path classes may be removed:
+six release-policy-enumerated path classes may be removed:
 
 - headers rooted at `include/`;
 - manual and Info trees rooted at `share/man/` and `share/info/`;
@@ -151,7 +151,6 @@ release-policy-enumerated path classes may be removed:
 - an exact Formula- and path-specific Python standard-library test subtree
   authorized by the V2 policy. A directory merely named `test` elsewhere does
   not qualify;
-- non-legal documentation under `share/doc/`;
 - shell completions under `share/bash-completion/completions/`,
   `share/fish/vendor_completions.d/`, and `share/zsh/site-functions/`; and
 - static `.a` archives below `lib/`, except in protected runtime-data
@@ -159,13 +158,22 @@ release-policy-enumerated path classes may be removed:
   `node_modules`.
 
 The minimizer does not prune shared libraries, plugins, `libexec`,
-configuration, locales, Python site-packages, `ensurepip`, `venv`, or static
-archives in those protected runtime-data locations. Legal and license text is
-also retained. The added classes do not apply to non-core Formulae. If an exact
-path classification is missing or a retained path or link would become
-invalid, assembly fails or retains the content; it does not infer that the
-content is safe to remove. Resolution, inventory, prune, and runtime-manifest
-evidence bind the release pruning policy and exact decisions.
+configuration, locales, Python site-packages, `ensurepip`, `venv`, any
+Formula `share/doc/` content, or static archives in protected runtime-data
+locations. Legal and license text is also retained.
+
+The release policy has one additional development-payload retention rule. If
+authenticated executable-path metadata under `bin/` identifies a
+policy-recognized compiler driver, including an MPI wrapper driver, headers,
+build metadata, and static archives remain for that Formula and its dependency
+closure. This does not disable the other pruning classes, and unrelated
+Formulae remain eligible for all six.
+
+The added classes do not apply to non-core Formulae. If an exact path
+classification is missing or a retained path or link would become invalid,
+assembly fails or retains the content; it does not infer that the content is
+safe to remove. Resolution, inventory, prune, and runtime-manifest evidence
+bind the release pruning policy and exact decisions.
 
 Target-specific dependencies, image settings, and tests belong to the fixed
 `homebrew` target alongside its child-routing metadata:

@@ -83,6 +83,9 @@ tests:
           test ! -e "$zlib_root/lib/libz.a"
           test -n "$(find "$zlib_root/lib" -maxdepth 1 -name 'libz.so*' -print -quit)"
 
+          share_doc_file="$(find "$HOMEBREW_PREFIX/Cellar" -path '*/share/doc/*' -type f -print -quit)"
+          test -n "$share_doc_file"
+
           prune_manifest=/usr/share/dalec-homebrew/prune-manifest.json
           test -s "$prune_manifest"
           "$python_root/bin/python3.14" - "$HOMEBREW_PREFIX" "$prune_manifest" <<'PY'
@@ -96,10 +99,10 @@ tests:
               "transitive_runtime_headers",
               "transitive_runtime_man_info",
               "transitive_runtime_python_tests",
-              "transitive_runtime_share_doc",
               "transitive_runtime_shell_completions",
               "transitive_runtime_static_archives",
           }
+          inactive_reasons = {"transitive_runtime_share_doc"}
           requested = {"homebrew/core/curl", "homebrew/core/hf"}
           with open(manifest_path, encoding="utf-8") as stream:
               manifest = json.load(stream)
@@ -108,6 +111,7 @@ tests:
           observed = set()
           for record in records:
               reason = record.get("reason")
+              assert reason not in inactive_reasons, record
               if reason not in expected_reasons:
                   continue
               observed.add(reason)

@@ -838,7 +838,6 @@ jobs:
               . == "transitive_runtime_man_info" or
               . == "transitive_runtime_build_metadata" or
               . == "transitive_runtime_python_tests" or
-              . == "transitive_runtime_share_doc" or
               . == "transitive_runtime_shell_completions" or
               . == "transitive_runtime_static_archives";
             def minimized_entries:
@@ -852,12 +851,12 @@ jobs:
             ((.subtrees // []) | length) > 0 and
             (.subtrees // [] | all(.commitment_schema == "dalec-homebrew-prune-subtree-commitment/v2")) and
             ($subtrees | all(.entry_count > 0 and .regular_bytes >= 0)) and
+            ([.entries[], (.subtrees // [])[]] | all(.reason != "transitive_runtime_share_doc")) and
             (($entries + $subtrees) | map(.reason) | sort | unique) == [
               "transitive_runtime_build_metadata",
               "transitive_runtime_headers",
               "transitive_runtime_man_info",
               "transitive_runtime_python_tests",
-              "transitive_runtime_share_doc",
               "transitive_runtime_shell_completions",
               "transitive_runtime_static_archives"
             ] and
@@ -894,7 +893,6 @@ jobs:
               . == "transitive_runtime_man_info" or
               . == "transitive_runtime_build_metadata" or
               . == "transitive_runtime_python_tests" or
-              . == "transitive_runtime_share_doc" or
               . == "transitive_runtime_shell_completions" or
               . == "transitive_runtime_static_archives";
             def minimized_entries:
@@ -1548,7 +1546,6 @@ jobs:
                     . == "transitive_runtime_man_info" or
                     . == "transitive_runtime_build_metadata" or
                     . == "transitive_runtime_python_tests" or
-                    . == "transitive_runtime_share_doc" or
                     . == "transitive_runtime_shell_completions" or
                     . == "transitive_runtime_static_archives";
                   def minimized_entries:
@@ -1573,6 +1570,7 @@ jobs:
                     (($prune[0].subtrees // []) | length) > 0 and
                     ($prune[0].subtrees // [] | all(.commitment_schema == "dalec-homebrew-prune-subtree-commitment/v2")) and
                     ($subtrees | all(.entry_count > 0 and .regular_bytes >= 0)) and
+                    ([$prune[0].entries[], ($prune[0].subtrees // [])[]] | all(.reason != "transitive_runtime_share_doc")) and
                     .pruning.manifest_sha256 == $prune_manifest_digest and
                     .pruning.resolution_digest == $prune[0].resolution_digest and
                     .pruning.pruning_policy_digest == $prune[0].pruning_policy_digest and
@@ -1593,7 +1591,6 @@ jobs:
                       "transitive_runtime_headers",
                       "transitive_runtime_man_info",
                       "transitive_runtime_python_tests",
-                      "transitive_runtime_share_doc",
                       "transitive_runtime_shell_completions",
                       "transitive_runtime_static_archives"
                     ]
@@ -2317,7 +2314,7 @@ jobs:
             .dalec_module == $inputs[0].dalec_module and
             .buildkit_module == $inputs[0].buildkit_module and
             .tap_policy_digest == "sha256:9f5b47c9d241dc16464dd81c350fc6c7755fa35c992bc821e6c3927573a3f217" and
-            .executable_runtime_policy_digest == "sha256:3b530f587e23f5e6870438b00ede822ed7bcab00b40d827e54555e9dc1a415fb" and
+            .executable_runtime_policy_digest == "sha256:c3313d851210803822f9a088a9bb7e5901691044c733ea513f361b464666a499" and
             .supported_catalog_policy_versions == ["tap-catalog-v1"] and
             .supported_fetch_policy_versions == ["homebrew-bottle-fetch-v1"] and
             .supported_provenance_policy_versions == [

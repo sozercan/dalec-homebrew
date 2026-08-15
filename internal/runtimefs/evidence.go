@@ -312,8 +312,7 @@ func compactableV2RuntimeReason(reason PruneReason) bool {
 		PruneRuntimeDocs,
 		PruneRuntimeBuild,
 		PruneRuntimeTests,
-		PruneRuntimeShell,
-		PruneRuntimeShareDoc:
+		PruneRuntimeShell:
 		return true
 	default:
 		return false

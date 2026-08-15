@@ -40,9 +40,9 @@
       "transitive-core-headers-v1",
       "transitive-core-man-info-v1",
       "transitive-core-python-stdlib-tests-v1",
-      "transitive-core-share-doc-v1",
       "transitive-core-shell-completions-v1",
-      "transitive-core-static-archives-v1"
+      "transitive-core-static-archives-v1",
+      "transitive-core-toolchain-development-retention-v1"
     ]
   },
   "package_capabilities": {

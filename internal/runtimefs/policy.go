@@ -42,6 +42,7 @@ type normalizedPolicy struct {
 	digest        string
 	nodes         map[string]resolution.Node
 	requested     map[string]struct{}
+	toolchainDev  map[string]struct{}
 	writable      map[string]struct{}
 }
 
@@ -143,8 +144,87 @@ func normalizeOptionsUnchecked(record *resolution.Record, opts Options) (*normal
 		digest:        policyDigest,
 		nodes:         nodes,
 		requested:     requested,
+		toolchainDev:  toolchainDevelopmentClosure(nodes, allowlist),
 		writable:      writable,
 	}, nil
+}
+
+func toolchainDevelopmentClosure(nodes map[string]resolution.Node, allowlist normalizedAllowlist) map[string]struct{} {
+	retained := make(map[string]struct{})
+	if allowlist.PruningProfile != policyv2.RuntimeProfileMinimalV1 || !slices.Contains(allowlist.PruningRules, policyv2.RuntimeRetainToolchainDevV1) {
+		return retained
+	}
+
+	queue := make([]string, 0)
+	for name, node := range nodes {
+		if authenticatedCompilerDriverNode(node) {
+			queue = append(queue, name)
+		}
+	}
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		if _, ok := retained[name]; ok {
+			continue
+		}
+		node, ok := nodes[name]
+		if !ok {
+			continue
+		}
+		retained[name] = struct{}{}
+		for _, dependency := range node.Dependencies {
+			if _, ok := nodes[dependency.Name]; ok {
+				queue = append(queue, dependency.Name)
+			}
+		}
+	}
+	return retained
+}
+
+func authenticatedCompilerDriverNode(node resolution.Node) bool {
+	// PolicyFormulaID is populated only by the independently verified V2
+	// projection. V1 executable annotations must not activate V2 retention.
+	if node.PolicyFormulaID == "" {
+		return false
+	}
+	for _, executable := range node.ExecutablePaths {
+		if compilerDriverExecutablePath(executable) {
+			return true
+		}
+	}
+	return false
+}
+
+func compilerDriverExecutablePath(rel string) bool {
+	if path.Dir(rel) != "bin" {
+		return false
+	}
+	name := strings.ToLower(path.Base(rel))
+	drivers := []string{
+		"cc", "c++", "gcc", "g++", "gfortran", "clang", "clang++", "flang", "flang-new",
+		"mpicc", "mpic++", "mpicxx", "mpifc", "mpif77", "mpif90", "mpif08", "mpifort",
+	}
+	if slices.Contains(drivers, name) {
+		return true
+	}
+	for _, stem := range drivers {
+		if suffix, ok := strings.CutPrefix(name, stem+"-"); ok && compilerDriverVersionSuffix(suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func compilerDriverVersionSuffix(value string) bool {
+	if value == "" || value[0] == '.' || value[len(value)-1] == '.' || strings.Contains(value, "..") {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && r != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 // PolicyDigest returns the digest that can be placed in

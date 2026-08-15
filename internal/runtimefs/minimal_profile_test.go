@@ -1,12 +1,110 @@
 package runtimefs
 
 import (
-	"slices"
 	"testing"
 
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
 	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
+
+func TestMinimalRuntimeProfileRetainsAuthenticatedCompilerDriverClosure(t *testing.T) {
+	app := minimalCoreNode("app", "1")
+	app.Dependencies = []resolution.Requirement{{Name: "open-mpi"}, {Name: "unrelated"}}
+	openMPI := minimalCoreNode("open-mpi", "1")
+	openMPI.Dependencies = []resolution.Requirement{{Name: "gcc"}, {Name: "libevent"}}
+	openMPI.ExecutablePaths = []string{"bin/mpicc", "bin/mpirun"}
+	gcc := minimalCoreNode("gcc", "1")
+	gcc.Dependencies = []resolution.Requirement{{Name: "gmp"}}
+	gcc.ExecutablePaths = []string{"bin/gcc-15"}
+	gmp := minimalCoreNode("gmp", "1")
+	libevent := minimalCoreNode("libevent", "1")
+	unrelated := minimalCoreNode("unrelated", "1")
+	unrelated.ExecutablePaths = []string{"bin/gcc-ar-15"}
+	nodes := map[string]resolution.Node{
+		app.Name:       app,
+		openMPI.Name:   openMPI,
+		gcc.Name:       gcc,
+		gmp.Name:       gmp,
+		libevent.Name:  libevent,
+		unrelated.Name: unrelated,
+	}
+
+	var entries []*sourceEntry
+	for _, name := range []string{"open-mpi", "gcc", "gmp", "libevent", "unrelated"} {
+		entries = append(entries,
+			minimalEntry("Cellar/"+name+"/1/include/"+name+".h", name, TypeRegular),
+			minimalEntry("Cellar/"+name+"/1/lib/pkgconfig/"+name+".pc", name, TypeRegular),
+			minimalEntry("Cellar/"+name+"/1/lib/lib"+name+".a", name, TypeRegular),
+			minimalEntry("Cellar/"+name+"/1/share/man/man1/"+name+".1", name, TypeRegular),
+			minimalEntry("Cellar/"+name+"/1/share/zsh/site-functions/_"+name, name, TypeRegular),
+		)
+	}
+	scan := minimalScan(entries)
+	if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(nodes, map[string]struct{}{"app": {}})); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"open-mpi", "gcc", "gmp", "libevent"} {
+		for _, rel := range []string{
+			"Cellar/" + name + "/1/include/" + name + ".h",
+			"Cellar/" + name + "/1/lib/pkgconfig/" + name + ".pc",
+			"Cellar/" + name + "/1/lib/lib" + name + ".a",
+		} {
+			assertMinimalRetained(t, scan, rel)
+		}
+		assertMinimalPruned(t, scan, "Cellar/"+name+"/1/share/man/man1/"+name+".1", PruneRuntimeDocs)
+		assertMinimalPruned(t, scan, "Cellar/"+name+"/1/share/zsh/site-functions/_"+name, PruneRuntimeShell)
+	}
+
+	assertMinimalPruned(t, scan, "Cellar/unrelated/1/include/unrelated.h", PruneRuntimeHeaders)
+	assertMinimalPruned(t, scan, "Cellar/unrelated/1/lib/pkgconfig/unrelated.pc", PruneRuntimeBuild)
+	assertMinimalPruned(t, scan, "Cellar/unrelated/1/lib/libunrelated.a", PruneRuntimeStatic)
+}
+
+func TestCompilerDriverExecutablePath(t *testing.T) {
+	for _, rel := range []string{
+		"bin/cc",
+		"bin/g++-15",
+		"bin/clang++-19.1",
+		"bin/gfortran-15",
+		"bin/mpiCC",
+		"bin/mpifort",
+		"bin/mpif90-4.1",
+	} {
+		if !compilerDriverExecutablePath(rel) {
+			t.Errorf("%q was not recognized as a compiler driver", rel)
+		}
+	}
+	for _, rel := range []string{
+		"libexec/gcc-15",
+		"bin/gcc-ar-15",
+		"bin/gcc-helper",
+		"bin/mpiexec",
+		"bin/mpirun",
+		"bin/ccache",
+		"bin/gcc-15rc1",
+	} {
+		if compilerDriverExecutablePath(rel) {
+			t.Errorf("%q was recognized as a compiler driver", rel)
+		}
+	}
+}
+
+func TestToolchainDevelopmentClosureRequiresAuthenticatedV2Identity(t *testing.T) {
+	legacy := minimalCoreNode("open-mpi", "1")
+	legacy.PolicyFormulaID = ""
+	legacy.ExecutablePaths = []string{"bin/mpicc"}
+	dependency := minimalCoreNode("gcc", "1")
+	legacy.Dependencies = []resolution.Requirement{{Name: dependency.Name}}
+	nodes := map[string]resolution.Node{legacy.Name: legacy, dependency.Name: dependency}
+	allowlist := normalizedAllowlist{
+		PruningProfile: policyv2.RuntimeProfileMinimalV1,
+		PruningRules:   policyv2.MinimalV1RuntimePruneRules(),
+	}
+	if retained := toolchainDevelopmentClosure(nodes, allowlist); len(retained) != 0 {
+		t.Fatalf("legacy executable metadata activated V2 retention: %#v", retained)
+	}
+}
 
 func TestPruneMinimalRuntimeProfileClasses(t *testing.T) {
 	nodes := map[string]resolution.Node{
@@ -89,7 +187,7 @@ func TestPruneMinimalRuntimeProfileClasses(t *testing.T) {
 	assertMinimalRetained(t, scan, "Cellar/dep/1/share/man")
 	assertMinimalRetained(t, scan, "Cellar/dep/1/share/man/man1")
 	assertMinimalRetained(t, scan, "Cellar/dep/1/share/man/man1/LICENSE.txt")
-	assertMinimalPruned(t, scan, "Cellar/dep/1/share/doc/dep/README.md", PruneRuntimeShareDoc)
+	assertMinimalRetained(t, scan, "Cellar/dep/1/share/doc/dep/README.md")
 	assertMinimalRetained(t, scan, "Cellar/dep/1/share/doc")
 	assertMinimalRetained(t, scan, "Cellar/dep/1/share/doc/dep")
 	assertMinimalRetained(t, scan, "Cellar/dep/1/share/doc/dep/LICENSE.txt")
@@ -343,7 +441,7 @@ func TestMinimalRuntimeProfilePropagatesBoundedAliasesAndRevalidatesLinks(t *tes
 		}
 	})
 
-	t.Run("bounded share doc alias", func(t *testing.T) {
+	t.Run("share doc alias is retained", func(t *testing.T) {
 		target := minimalEntry("Cellar/dep/1/share/doc/dep/README.md", "dep", TypeRegular)
 		alias := minimalEntry("share/doc/dep/README.md", "dep", TypeSymlink)
 		alias.linkResolved = target.rel
@@ -351,8 +449,11 @@ func TestMinimalRuntimeProfilePropagatesBoundedAliasesAndRevalidatesLinks(t *tes
 		if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(map[string]resolution.Node{"dep": minimalCoreNode("dep", "1")}, nil)); err != nil {
 			t.Fatal(err)
 		}
-		assertMinimalPruned(t, scan, target.rel, PruneRuntimeShareDoc)
-		assertMinimalPruned(t, scan, alias.rel, PruneRuntimeShareDoc)
+		assertMinimalRetained(t, scan, target.rel)
+		assertMinimalRetained(t, scan, alias.rel)
+		if err := validateRetainedLinks(scan); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	t.Run("unbounded alias fails closed", func(t *testing.T) {
@@ -489,7 +590,7 @@ func TestMinimalRuntimeProfilePreservesRuntimeBearingPathsBeforeEveryPruneClass(
 	for _, rel := range retained {
 		assertMinimalRetained(t, scan, rel)
 	}
-	assertMinimalPruned(t, scan, noticeRef, PruneRuntimeShareDoc)
+	assertMinimalRetained(t, scan, noticeRef)
 }
 
 func TestLooksLikeLegalTextRecognizesVersionedNamesWithoutPrefixFalsePositives(t *testing.T) {
@@ -565,22 +666,12 @@ func TestValidateInventoryPolicyRejectsMinimalProfileForgery(t *testing.T) {
 
 	shareDoc := entry
 	shareDoc.Path = "Cellar/dep/1/share/doc/dep/README.md"
-	if err := validateInventoryPolicy(shareDoc, record, policy, nil); errorCode(err) != CodeVerification {
-		t.Fatalf("forged share/doc entry error=%v code=%s", err, errorCode(err))
-	}
-	shareDocLegal := shareDoc
-	shareDocLegal.Path = "Cellar/dep/1/share/doc/dep/NOTICE"
-	shareDocAncestors := minimalInventoryExceptionAncestors([]InventoryEntry{
-		{Path: "Cellar/dep/1/share/doc", Type: TypeDirectory, Mode: "0555", Package: "dep", FormulaID: "homebrew/core/dep"},
-		{Path: "Cellar/dep/1/share/doc/dep", Type: TypeDirectory, Mode: "0555", Package: "dep", FormulaID: "homebrew/core/dep"},
-		shareDocLegal,
-	}, policy)
-	if err := validateInventoryPolicy(shareDocLegal, record, policy, shareDocAncestors); err != nil {
-		t.Fatalf("share/doc legal text rejected: %v", err)
+	if err := validateInventoryPolicy(shareDoc, record, policy, nil); err != nil {
+		t.Fatalf("share/doc entry rejected: %v", err)
 	}
 	shareDocParent := InventoryEntry{Path: "Cellar/dep/1/share/doc/dep", Type: TypeDirectory, Mode: "0555", Package: "dep", FormulaID: "homebrew/core/dep"}
-	if err := validateInventoryPolicy(shareDocParent, record, policy, shareDocAncestors); err != nil {
-		t.Fatalf("share/doc legal ancestor rejected: %v", err)
+	if err := validateInventoryPolicy(shareDocParent, record, policy, nil); err != nil {
+		t.Fatalf("share/doc directory rejected: %v", err)
 	}
 
 	standard := minimalPolicy(nodes, nil)
@@ -601,11 +692,7 @@ func minimalPolicy(nodes map[string]resolution.Node, requested map[string]struct
 		requested = map[string]struct{}{}
 	}
 	rules := policyv2.MinimalV1RuntimePruneRules()
-	if !slices.Contains(rules, policyv2.RuntimePruneShareDocV1) {
-		rules = append(rules, policyv2.RuntimePruneShareDocV1)
-		slices.Sort(rules)
-	}
-	return &normalizedPolicy{
+	policy := &normalizedPolicy{
 		nodes:     nodes,
 		requested: requested,
 		allowlist: normalizedAllowlist{
@@ -619,6 +706,8 @@ func minimalPolicy(nodes map[string]resolution.Node, requested map[string]struct
 			PruningRules:   rules,
 		},
 	}
+	policy.toolchainDev = toolchainDevelopmentClosure(nodes, policy.allowlist)
+	return policy
 }
 
 func minimalEntry(rel, packageName string, typ EntryType) *sourceEntry {

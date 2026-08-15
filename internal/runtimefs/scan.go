@@ -773,6 +773,12 @@ func minimalRuntimePruneReason(rel, packageName string, policy *normalizedPolicy
 	if reason == "" {
 		return ""
 	}
+	if _, retained := policy.toolchainDev[packageName]; retained {
+		switch reason {
+		case PruneRuntimeHeaders, PruneRuntimeBuild, PruneRuntimeStatic:
+			return ""
+		}
+	}
 	// These paths are runtime-bearing regardless of which removable class an
 	// ancestor otherwise matches. Keep the predicate path-only so assembly and
 	// independent inventory verification enforce the same conservative rule.
@@ -807,9 +813,6 @@ func minimalRuntimePathClass(rel, packageName string, policy *normalizedPolicy) 
 	}
 	if isWithin(sub, "share/man") || isWithin(sub, "share/info") {
 		return PruneRuntimeDocs, sub
-	}
-	if slices.Contains(policy.allowlist.PruningRules, policyv2.RuntimePruneShareDocV1) && isWithin(sub, "share/doc") {
-		return PruneRuntimeShareDoc, sub
 	}
 	for _, root := range []string{"lib/pkgconfig", "share/pkgconfig", "lib/cmake", "share/cmake", "share/aclocal"} {
 		if isWithin(sub, root) {
@@ -924,8 +927,6 @@ func minimalRuntimeAliasPath(rel string, reason PruneReason) bool {
 		return headerAliasRuntimePath(rel)
 	case PruneRuntimeDocs:
 		return isWithin(rel, "share/man") || isWithin(rel, "share/info")
-	case PruneRuntimeShareDoc:
-		return isWithin(rel, "share/doc")
 	case PruneRuntimeBuild:
 		for _, root := range []string{"lib/pkgconfig", "share/pkgconfig", "lib/cmake", "share/cmake", "share/aclocal"} {
 			if isWithin(rel, root) {

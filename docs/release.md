@@ -13,10 +13,17 @@ bottle-fetcher, and catalog-extractor images plus the exact non-core policy
 tuple. The frontend itself must also be invoked by digest.
 
 Automatic runtime minimization is part of that immutable V2 policy tuple. The
-release-bound policy defines the exact Formula/path classes eligible for
-pruning; invocation input cannot disable, select, supply, or broaden those
-rules. V1 components retain their legacy assembly behavior. A policy change
-requires a newly built, tested, and signed component tuple.
+release-bound policy defines six exact Formula/path classes eligible for
+pruning plus the development-payload retention rule derived from authenticated
+V2 executable-path metadata; invocation input cannot disable, select, supply,
+or broaden those rules. Formula `share/doc` content remains retained. V1
+components retain their legacy assembly behavior. A policy change requires a
+newly built, tested, and signed component tuple.
+
+Prune-manifest schema v4 and its reason vocabulary remain compatible with the
+inactive `transitive_runtime_share_doc` reason, but a new release must not emit
+that reason. Release integration requires all six active reasons and rejects an
+inactive share/doc record in either explicit entries or subtree commitments.
 
 At invocation, the frontend accepts these gateway build options as bindings:
 
@@ -206,8 +213,10 @@ The example runtimes are integration fixtures and are not promoted.
    release-owned non-core fixture through the published helper tuple while
    producing runtime evidence, component-child SPDX SBOMs, and vulnerability
    reports. The core matrix must exercise automatic V2 minimization, including
-   requested-Formula preservation, exact safe pruning classes, retained
-   runtime-sensitive paths, and a size report for the minimized runtime.
+   requested-Formula preservation, all six active safe pruning classes,
+   retained Formula `share/doc` and runtime-sensitive paths, rejection of
+   inactive share/doc prune records, and a size report for the minimized
+   runtime.
 5. Sign all ten component children and five indexes, attach the SLSA v0.2
    predicate to every subject and the matching SPDX predicate to each child,
    then blob-sign the component manifest, accepted metadata snapshot, and
