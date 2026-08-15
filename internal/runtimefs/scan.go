@@ -853,8 +853,16 @@ func formulaShareDocRuntimePath(rel string) bool {
 	if isWithin(rel, "share/doc") {
 		return true
 	}
+	sub, ok := cellarKegSubpath(rel)
+	return ok && isWithin(sub, "share/doc")
+}
+
+func cellarKegSubpath(rel string) (string, bool) {
 	parts := strings.Split(rel, "/")
-	return len(parts) >= 4 && parts[0] == "Cellar" && isWithin(strings.Join(parts[3:], "/"), "share/doc")
+	if len(parts) < 4 || parts[0] != "Cellar" {
+		return "", false
+	}
+	return strings.Join(parts[3:], "/"), true
 }
 
 func minimalRuntimeProtectedDataPath(rel string) bool {
@@ -959,16 +967,8 @@ func headerAliasRuntimePath(rel string) bool {
 	if isWithin(rel, "include") {
 		return true
 	}
-	parts := strings.Split(rel, "/")
-	if len(parts) < 4 || parts[0] != "Cellar" {
-		return false
-	}
-	for _, component := range parts[3:] {
-		if component == "include" {
-			return true
-		}
-	}
-	return false
+	sub, ok := cellarKegSubpath(rel)
+	return ok && isWithin(sub, "include")
 }
 
 func shellCompletionRuntimePath(rel string) bool {
@@ -998,17 +998,8 @@ func staticArchiveAliasRuntimePath(rel string) bool {
 	if staticArchiveRuntimePath(rel) {
 		return true
 	}
-	parts := strings.Split(rel, "/")
-	if len(parts) < 5 || parts[0] != "Cellar" || !strings.EqualFold(path.Ext(rel), ".a") {
-		return false
-	}
-	hasLib := false
-	for _, component := range parts[3 : len(parts)-1] {
-		if strings.EqualFold(component, "lib") {
-			hasLib = true
-		}
-	}
-	return hasLib
+	sub, ok := cellarKegSubpath(rel)
+	return ok && staticArchiveRuntimePath(sub)
 }
 
 type descendantPathRange struct {

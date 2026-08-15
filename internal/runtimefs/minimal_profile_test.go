@@ -398,6 +398,31 @@ func TestMinimalRuntimeProfilePropagatesBoundedAliasesAndRevalidatesLinks(t *tes
 		}
 	})
 
+	t.Run("out-of-class keg aliases fail closed", func(t *testing.T) {
+		for name, entries := range map[string][]*sourceEntry{
+			"nested include": {
+				minimalEntry("Cellar/dep/1/include/api.h", "dep", TypeRegular),
+				minimalEntry("Cellar/dep/1/share/runtime/include/api.h", "dep", TypeSymlink),
+			},
+			"nested lib": {
+				minimalEntry("Cellar/dep/1/lib/data.a", "dep", TypeRegular),
+				minimalEntry("Cellar/dep/1/share/runtime/lib/data.a", "dep", TypeSymlink),
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				entries[1].linkResolved = entries[0].rel
+				scan := minimalScan(entries)
+				if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(map[string]resolution.Node{"dep": minimalCoreNode("dep", "1")}, nil)); err != nil {
+					t.Fatal(err)
+				}
+				assertMinimalRetained(t, scan, entries[1].rel)
+				if err := validateRetainedLinks(scan); errorCode(err) != CodeDanglingLink {
+					t.Fatalf("error=%v code=%s, want %s", err, errorCode(err), CodeDanglingLink)
+				}
+			})
+		}
+	})
+
 	t.Run("protected directory alias retains target subtree", func(t *testing.T) {
 		target := minimalEntry("Cellar/dep/1/include", "dep", TypeDirectory)
 		child := minimalEntry("Cellar/dep/1/include/dep.h", "dep", TypeRegular)
@@ -570,9 +595,11 @@ func TestMinimalRuntimeProfilePreservesRuntimeBearingPathsBeforeEveryPruneClass(
 	retained := []string{
 		// Legal names are checked before every prune reason.
 		"Cellar/dep/1/include/LICENCE.md",
+		"Cellar/dep/1/include/GPL-2.0",
 		"Cellar/dep/1/share/man/man1/PATENTS.1",
 		"Cellar/pcre2/1/share/doc/pcre2/LICENCE.md",
 		"Cellar/dep/1/lib/cmake/dep/UNLICENSE",
+		"Cellar/dep/1/lib/cmake/dep/THIRD_PARTY_NOTICES",
 		"Cellar/python@3.14/3.14.6/lib/python3.14/test/UNLICENCE.txt",
 		"Cellar/dep/1/share/zsh/site-functions/LEGAL",
 		"Cellar/dep/1/lib/LEGAL.a",
@@ -628,6 +655,11 @@ func TestLooksLikeLegalTextRecognizesVersionedNamesWithoutPrefixFalsePositives(t
 		"LICENSE2",
 		"LICENCEv3.txt",
 		"PATENTS-2.0",
+		"EULA",
+		"THIRD_PARTY_NOTICES",
+		"third-party-licences.txt",
+		"GPL-2.0",
+		"Apache-2.0.txt",
 	} {
 		if !looksLikeLegalText(name) {
 			t.Errorf("%q was not recognized as legal text", name)

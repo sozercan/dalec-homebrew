@@ -702,7 +702,15 @@ func looksLikeLegalText(filename string) bool {
 		"copyright", "copyrights",
 		"patent", "patents",
 		"unlicense", "unlicenses", "unlicence", "unlicences",
-		"legal",
+		"legal", "eula", "eulas",
+		"author", "authors", "contributor", "contributors", "credits",
+		"disclaimer", "disclaimers", "trademark", "trademarks",
+		"third_party_notice", "third_party_notices", "third-party-notice", "third-party-notices", "thirdpartynotice", "thirdpartynotices",
+		"third_party_license", "third_party_licenses", "third-party-license", "third-party-licenses", "thirdpartylicense", "thirdpartylicenses",
+		"third_party_licence", "third_party_licences", "third-party-licence", "third-party-licences", "thirdpartylicence", "thirdpartylicences",
+		// Common SPDX license-family filenames may appear outside a LICENSES
+		// directory, for example GPL-2.0 or Apache-2.0.
+		"agpl", "apache", "artistic", "bsd", "bsl", "cc0", "cddl", "epl", "eupl", "gpl", "isc", "lgpl", "mit", "mpl", "ofl", "openssl", "unicode", "wtfpl", "zlib", "zpl",
 	} {
 		if base == name {
 			return true

@@ -174,6 +174,39 @@ func TestPlanMinimalInventoryProfileRetainsFormulaShareDocAliasTargets(t *testin
 	}
 }
 
+func TestPlanMinimalInventoryProfileDoesNotAuthorizeNestedKegAliases(t *testing.T) {
+	dep := inventoryVerifierNode("dep", "homebrew/core/dep", "homebrew/core/dep")
+	policy := inventoryVerifierPolicy([]resolution.Node{dep}, true)
+	record := inventoryVerifierRecord(resolution.PolicyVersionV2, []resolution.Node{dep})
+	for name, entries := range map[string][]InventoryEntry{
+		"nested include": {
+			inventoryVerifierEntry("Cellar/dep/1/include/api.h", TypeRegular, dep.Name, dep.FullName),
+			inventoryVerifierEntry("Cellar/dep/1/share/runtime/include/api.h", TypeSymlink, dep.Name, dep.FullName),
+		},
+		"nested lib": {
+			inventoryVerifierEntry("Cellar/dep/1/lib/data.a", TypeRegular, dep.Name, dep.FullName),
+			inventoryVerifierEntry("Cellar/dep/1/share/runtime/lib/data.a", TypeSymlink, dep.Name, dep.FullName),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			entries[1].LinkTarget = "../../../" + strings.TrimPrefix(entries[0].Path, "Cellar/dep/1/")
+			plan, err := planMinimalInventoryProfile(entries, policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reason := plan.forbidden[inventoryEntryAttribution(entries[0])]; reason == "" {
+				t.Fatal("direct target was not classified")
+			}
+			if reason, forbidden := plan.forbidden[inventoryEntryAttribution(entries[1])]; forbidden {
+				t.Fatalf("out-of-class alias was authorized as %q", reason)
+			}
+			if err := validateInventoryEntriesPolicy(entries, record, policy); errorCode(err) != CodeVerification {
+				t.Fatalf("error=%v code=%s, want %s", err, errorCode(err), CodeVerification)
+			}
+		})
+	}
+}
+
 func TestPlanMinimalInventoryProfileRejectsUnboundedAlias(t *testing.T) {
 	dep := inventoryVerifierNode("dep", "homebrew/core/dep", "homebrew/core/dep")
 	policy := inventoryVerifierPolicy([]resolution.Node{dep}, true)
