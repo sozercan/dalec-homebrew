@@ -147,6 +147,33 @@ func TestPlanMinimalInventoryProfileRetainsProtectedDirectoryClosure(t *testing.
 	}
 }
 
+func TestPlanMinimalInventoryProfileRetainsFormulaShareDocAliasTargets(t *testing.T) {
+	dep := inventoryVerifierNode("dep", "homebrew/core/dep", "homebrew/core/dep")
+	policy := inventoryVerifierPolicy([]resolution.Node{dep}, true)
+	headerTarget := inventoryVerifierEntry("Cellar/dep/1/include/api.h", TypeRegular, dep.Name, dep.FullName)
+	headerAlias := inventoryVerifierEntry("Cellar/dep/1/share/doc/dep/include/api.h", TypeSymlink, dep.Name, dep.FullName)
+	headerAlias.LinkTarget = "../../../../include/api.h"
+	archiveTarget := inventoryVerifierEntry("Cellar/dep/1/lib/libdep.a", TypeRegular, dep.Name, dep.FullName)
+	archiveAlias := inventoryVerifierEntry("Cellar/dep/1/share/doc/dep/lib/libdep.a", TypeSymlink, dep.Name, dep.FullName)
+	archiveAlias.LinkTarget = "../../../../lib/libdep.a"
+	entries := []InventoryEntry{headerTarget, headerAlias, archiveTarget, archiveAlias}
+
+	plan, err := planMinimalInventoryProfile(entries, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if reason, forbidden := plan.forbidden[inventoryEntryAttribution(entry)]; forbidden {
+			t.Fatalf("%s remained forbidden as %q", entry.Path, reason)
+		}
+	}
+
+	record := inventoryVerifierRecord(resolution.PolicyVersionV2, []resolution.Node{dep})
+	if err := validateInventoryEntriesPolicy(entries, record, policy); err != nil {
+		t.Fatalf("Formula share/doc alias closure rejected: %v", err)
+	}
+}
+
 func TestPlanMinimalInventoryProfileRejectsUnboundedAlias(t *testing.T) {
 	dep := inventoryVerifierNode("dep", "homebrew/core/dep", "homebrew/core/dep")
 	policy := inventoryVerifierPolicy([]resolution.Node{dep}, true)

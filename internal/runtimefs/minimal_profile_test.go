@@ -379,6 +379,25 @@ func TestMinimalRuntimeProfilePropagatesBoundedAliasesAndRevalidatesLinks(t *tes
 		}
 	})
 
+	t.Run("Formula share doc aliases retain development targets", func(t *testing.T) {
+		headerTarget := minimalEntry("Cellar/dep/1/include/api.h", "dep", TypeRegular)
+		headerAlias := minimalEntry("Cellar/dep/1/share/doc/dep/include/api.h", "dep", TypeSymlink)
+		headerAlias.linkResolved = headerTarget.rel
+		archiveTarget := minimalEntry("Cellar/dep/1/lib/libdep.a", "dep", TypeRegular)
+		archiveAlias := minimalEntry("Cellar/dep/1/share/doc/dep/lib/libdep.a", "dep", TypeSymlink)
+		archiveAlias.linkResolved = archiveTarget.rel
+		scan := minimalScan([]*sourceEntry{headerTarget, headerAlias, archiveTarget, archiveAlias})
+		if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(map[string]resolution.Node{"dep": minimalCoreNode("dep", "1")}, nil)); err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range []*sourceEntry{headerTarget, headerAlias, archiveTarget, archiveAlias} {
+			assertMinimalRetained(t, scan, entry.rel)
+		}
+		if err := validateRetainedLinks(scan); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	t.Run("protected directory alias retains target subtree", func(t *testing.T) {
 		target := minimalEntry("Cellar/dep/1/include", "dep", TypeDirectory)
 		child := minimalEntry("Cellar/dep/1/include/dep.h", "dep", TypeRegular)

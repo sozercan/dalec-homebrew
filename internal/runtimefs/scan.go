@@ -846,7 +846,15 @@ func pathContainsLegalText(rel string) bool {
 }
 
 func minimalRuntimeAlwaysRetainedPath(rel string) bool {
-	return pathContainsLegalText(rel) || minimalRuntimeProtectedDataPath(rel) || sharedObjectRuntimePath(rel)
+	return pathContainsLegalText(rel) || formulaShareDocRuntimePath(rel) || minimalRuntimeProtectedDataPath(rel) || sharedObjectRuntimePath(rel)
+}
+
+func formulaShareDocRuntimePath(rel string) bool {
+	if isWithin(rel, "share/doc") {
+		return true
+	}
+	parts := strings.Split(rel, "/")
+	return len(parts) >= 4 && parts[0] == "Cellar" && isWithin(strings.Join(parts[3:], "/"), "share/doc")
 }
 
 func minimalRuntimeProtectedDataPath(rel string) bool {
