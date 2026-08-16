@@ -1,8 +1,14 @@
 # Security policy
 
+Security, reproducibility, and fail-closed behavior are product requirements for
+`dalec-homebrew`, not best-effort extras. This page is the canonical description
+of what the build guarantees, where it stops guaranteeing, and how to report a
+problem. See [Reporting a vulnerability](#reporting-a-vulnerability) if you have
+found one.
+
 ## Security properties
 
-The V1 implementation is expected to preserve these properties:
+`dalec-homebrew` is expected to preserve these properties:
 
 1. Unsupported Dalec inputs, malformed Formula names, and invalid frontend-routing metadata fail before metadata or registry access.
 2. Formula identity and bottle checksums come from a verified Homebrew JWS payload and a pinned public-key set.
@@ -18,6 +24,29 @@ The V1 implementation is expected to preserve these properties:
 12. The Noble runtime base is cut from a fixed Ubuntu snapshot with a SHA-256-pinned Chisel binary and a checksummed, commit-pinned `chisel-releases` archive. Repository-local slice overrides are bound by source and component digests rather than separate per-file checksums. The build-only proxy accepts only Ubuntu archive hosts, while Chisel remains responsible for signed Release and package-digest verification; neither Chisel nor the proxy reaches the final image.
 13. Generated shared runtime data is accepted only at versioned paths with package and capability checks, bounded structure and size, authenticated runtime ownership, and explicit evidence attribution. Node's global `lib/node_modules/npm` runtime is accepted only as a bounded, exact copy of the verified private npm tree plus one exact prefix-bound `npmrc`, with command and manpage links bound back to that validated tree. Exact auxiliary scripts may waive an unavailable interpreter only while they are transitive and unexposed: core `libpsl`'s authenticated `bin/psl-make-dafsa` keg copy is inventoried while its global link is pruned; requesting `libpsl` or otherwise exposing the helper restores strict interpreter validation. Unrelated global `lib` or shared-data mutations continue to fail closed.
 14. Creating a `v*.*.*` release tag is a trusted release-operator action. Repository access must restrict tag creation to those operators, and tag rules should prevent update or deletion. The checked-in tag workflow rejects tag updates and deletions, dispatches only the privileged release workflow on `main`, and binds the initially pushed commit; a new build requires that commit to equal the trusted workflow commit before any registry or signing job runs.
+
+Builds that use third-party taps or release-authorized prebuilt archives
+preserve these additional properties:
+
+15. Prebuilt executable archives are accepted only for exact Formula IDs in the embedded tap policy. The policy binds the Formula source digest, version, platform URLs and checksums, complete archive inventory, payload mapping, archive limits, static ELF properties, Go module identity, and CGO setting; Dalec input cannot provide or override any of those values.
+16. Build-local ingestion never runs a prebuilt Formula's `install` or `post_install` method. It verifies the upstream archive, derives a canonical receiptless bottle containing only the selected executable and authenticated Formula source, and binds the upstream and derived identities separately. Native bottles take precedence.
+17. Derived bottles pass the same hostile-bottle verification, offline per-package installation, receipt normalization, prefix-delta containment, runtime allowlisting, pruning, and SBOM attribution as upstream bottles. The explicit prebuilt derivation evidence prevents the build-locally generated artifact from being represented as an upstream-published bottle.
+18. The frontend automatically applies its immutable runtime-minimization
+    policy after complete resolution, verification, and offline installation.
+    Dalec input and build arguments cannot disable or broaden the policy. Requested Formulae are the retention boundary; only the six exact
+    policy-enumerated classes of headers, man and Info trees, build metadata,
+    Python standard-library test paths, shell completions, and bounded `lib/`
+    static archives in transitive `homebrew/core` kegs are removed. Shared
+    libraries, plugins, `libexec`, configuration, locales, site-packages,
+    `ensurepip`, `venv`, `node_modules`, Formula `share/doc` content, legal or
+    license text, and static archives in protected runtime-data locations
+    remain. Only an exact release-bound Formula policy capability can
+    activate compiler or MPI development retention. For a capability-authorized
+    Formula, headers, build metadata, and static archives remain across its
+    verified dependency closure. Unsigned OCI executable-path annotations
+    cannot activate this retention. Unrelated Formulae remain eligible for
+    normal pruning. Unknown identities and paths fail closed, and evidence binds
+    the pruning-policy identity and exact decisions.
 
 Production builds require the upstream Dalec target to be
 exactly `homebrew`, the child route to be exactly `image`, target and invocation
@@ -35,7 +64,7 @@ left when the exact pinned upstream Dalec v0.21.5 dispatcher drops legacy list
 syntax. Target frontend metadata is accepted only as routing metadata for this
 exact chain; nested forwarding remains rejected.
 
-The repository-owned V2 gateway executes as an exact platform-child digest.
+The gateway executes as an exact platform-child digest.
 Its parent frontend index is supplied as a separate digest-pinned claim and is
 not treated as self-authenticating evidence. Release signing resolves the
 recorded index independently, requires the selected platform descriptor to
@@ -52,37 +81,30 @@ index-to-child chain externally, and include the upstream index in signed
 top-level provenance. Resolution records must not represent a claimed parent as
 child-authenticated evidence.
 
-V2 public-tap releases additionally preserve these properties:
+## Third-party tap properties
 
-15. Prebuilt executable archives are accepted only for exact Formula IDs in the embedded tap policy. The policy binds the Formula source digest, version, platform URLs and checksums, complete archive inventory, payload mapping, archive limits, static ELF properties, Go module identity, and CGO setting; Dalec input cannot provide or override any of those values.
-16. Build-local ingestion never runs a prebuilt Formula's `install` or `post_install` method. It verifies the upstream archive, derives a canonical receiptless bottle containing only the selected executable and authenticated Formula source, and binds the upstream and derived identities separately. Native bottles take precedence.
-17. Derived bottles pass the same hostile-bottle verification, offline per-package installation, receipt normalization, prefix-delta containment, runtime allowlisting, pruning, and SBOM attribution as upstream bottles. The explicit prebuilt derivation evidence prevents the build-locally generated artifact from being represented as an upstream-published bottle.
-18. A release-bound V2 frontend automatically applies its immutable runtime-
-    minimization policy after complete resolution, verification, and offline
-    installation. Dalec input and build arguments cannot disable or broaden the
-    policy. Requested Formulae are the retention boundary; only the six exact
-    policy-enumerated classes of headers, man and Info trees, build metadata,
-    Python standard-library test paths, shell completions, and bounded `lib/`
-    static archives in transitive `homebrew/core` kegs are removed. Shared
-    libraries, plugins, `libexec`, configuration, locales, site-packages,
-    `ensurepip`, `venv`, `node_modules`, Formula `share/doc` content, legal or
-    license text, and static archives in protected runtime-data locations
-    remain. Only an exact release-bound V2 Formula policy capability can
-    activate compiler or MPI development retention. For a capability-authorized
-    Formula, headers, build metadata, and static archives remain across its
-    verified dependency closure. Unsigned OCI executable-path annotations
-    cannot activate this retention. Unrelated Formulae remain eligible for
-    normal pruning.
-    Unknown identities and paths fail closed, evidence binds the pruning-policy
-    identity and exact decisions, and V1 retains its legacy assembly behavior.
+A release may accept `owner/tap/formula` only when its frontend binary contains the complete capability tuple: bottle-fetcher and catalog-extractor references, tap-policy digest, executable runtime-policy digest, and the exact supported catalog/fetch/provenance policy versions. Invocation build arguments cannot upgrade a core-only frontend.
+
+Those builds additionally enforce:
+
+1. Formula graph identity is always `owner/tap/formula`; Cellar rack names are separate and collisions fail closed.
+2. BuildKit fetches only the derived public default-GitHub repository. Formula evaluation runs in a release-pinned extractor exec with networking disabled, read-only source mounts, no secrets or SSH, and disposable writable state.
+3. Extraction evidence binds the extractor reference, repository, exact commit, tree/archive digests, and canonical catalog digest. Catalog documents remain bounded to 64 MiB each and 256 MiB aggregate with duplicate-member rejection.
+4. Build-local ingestion has no centralized monotonic rollback database. Records explicitly use `build-local-exact-commit-no-cross-build-rollback-v1`; retained releases must reuse exact catalog and bottle bytes rather than re-resolve mutable branches.
+5. Non-core GHCR bottles repeat the full descriptor and annotation validation. Other bottles pass through the release-bound HTTPS fetcher; private, authenticated, IP-literal, non-public, downgraded, oversized, or unapproved-redirect sources are rejected.
+6. Policy-authorized prebuilt archives are verified and transformed into deterministic receiptless bottles during the gateway build. Their bytes use `build-local-artifact-v1` transport and are passed directly to materialization; replay requires retained bytes matching the recorded size and digest.
+7. Preparation re-verifies every bottle before Homebrew executes. Bottle-embedded Formula source is staged under its exact synthetic Tap identity; current catalog source and embedded bottle source remain distinct evidence.
+8. One network-disabled exec installs each bottle. Protected tap trees and the exact Formula trust store cannot be replaced or modified by the runtime user.
+9. Core-only generated-runtime and post-install capabilities are keyed by full Formula ID. A non-core Formula that reuses a core rack name receives no core-specific exception.
+10. Older resolution records remain immutable, and materializers built for the older record schema reject current records. Verification tooling decodes both schemas explicitly.
 
 ## Upstream trust limitations
 
 Homebrew's Formula and migration JWS documents are fetched and authenticated separately; upstream does not sign a common snapshot identifier for the pair. The combined snapshot digest commits to the exact accepted payload pair, but does not prove atomic upstream publication.
 
-The documents do not always include an authenticated generation timestamp. When a signed `generated_date` is absent, freshness relies on the unsigned HTTP `Last-Modified` value. Both documents are freshness-checked independently, and the resolution `generated_at` and `source_date_epoch` use the earlier accepted timestamp. V2 records identify the aggregate timestamp as `signed-payload` only when both document timestamps are authenticated; if either document uses the HTTP fallback, the aggregate is marked `http-last-modified` even when the signed document currently supplies the earlier timestamp.
+The documents do not always include an authenticated generation timestamp. When a signed `generated_date` is absent, freshness relies on the unsigned HTTP `Last-Modified` value. Both documents are freshness-checked independently, and the resolution `generated_at` and `source_date_epoch` use the earlier accepted timestamp. Resolution records identify the aggregate timestamp as `signed-payload` only when both document timestamps are authenticated; if either document uses the HTTP fallback, the aggregate is marked `http-last-modified` even when the signed document currently supplies the earlier timestamp.
 
-V2 records created before the timestamp trust marker existed may omit
+Records created before the timestamp trust marker existed may omit
 `generated_at_source`; structural replay retains that compatibility. New
 resolvers always emit the marker, and release signing rejects an omission, so a
 new signed tuple cannot downgrade the timestamp trust evidence.
@@ -114,7 +136,7 @@ The Formula JWS authenticates the compressed bottle checksum, but it does not bi
    and runtime-scope hints, and never permits the unsigned
    `sh.brew.path_exec_files` OCI annotation to activate compiler or MPI
    development retention, and
-5. records the fixed V1 upstream-attestation waiver. A stronger upstream attestation policy is not currently configured and would require an explicit policy and component change.
+5. records the fixed `homebrew-jws-and-verified-oci-chain-v1` upstream-attestation waiver. A stronger upstream attestation policy is not currently configured and would require an explicit policy and component change.
 
 Current Homebrew bottle tarballs generally do not contain `INSTALL_RECEIPT.json`; Homebrew creates it while pouring the bottle. The archive verifier can require a pre-install receipt for fixtures or alternate producers, while production verifies the generated receipt after offline installation. For legacy receipt dependency entries, only an omitted `pkg_version` is derived from `version` and `revision`; explicit empty, null, non-string, or inconsistent dependency values fail. A top-level receipt `pkg_version` may be absent, but when present it must match the resolved node, and source version, version scheme, and closure membership are checked independently.
 
@@ -128,23 +150,6 @@ The frontend does not hold signing credentials and cannot itself guarantee regis
 
 Reports that demonstrate a practical violation of the properties above are in scope even when the root cause is an upstream metadata-format limitation.
 
-## Reporting
+## Reporting a vulnerability
 
 Please report vulnerabilities privately to the repository maintainers. Include a minimal Dalec spec or resolution record, the affected platform and component digests, and a reproduction where possible. Do not include credentials or private registry tokens.
-
-## V2 non-core tap properties
-
-A release may accept `owner/tap/formula` only when its frontend binary contains the complete V2 capability tuple: bottle-fetcher and catalog-extractor references, tap-policy digest, executable runtime-policy digest, and the exact supported catalog/fetch/provenance policy versions. Invocation build arguments cannot upgrade a core-only frontend.
-
-V2 additionally enforces:
-
-1. Formula graph identity is always `owner/tap/formula`; Cellar rack names are separate and collisions fail closed.
-2. BuildKit fetches only the derived public default-GitHub repository. Formula evaluation runs in a release-pinned extractor exec with networking disabled, read-only source mounts, no secrets or SSH, and disposable writable state.
-3. Extraction evidence binds the extractor reference, repository, exact commit, tree/archive digests, and canonical catalog digest. Catalog documents remain bounded to 64 MiB each and 256 MiB aggregate with duplicate-member rejection.
-4. Build-local ingestion has no centralized monotonic rollback database. Records explicitly use `build-local-exact-commit-no-cross-build-rollback-v1`; retained releases must reuse exact catalog and bottle bytes rather than re-resolve mutable branches.
-5. Non-core GHCR bottles repeat the full descriptor and annotation validation. Other bottles pass through the release-bound HTTPS fetcher; private, authenticated, IP-literal, non-public, downgraded, oversized, or unapproved-redirect sources are rejected.
-6. Policy-authorized prebuilt archives are verified and transformed into deterministic receiptless bottles during the gateway build. Their bytes use `build-local-artifact-v1` transport and are passed directly to materialization; replay requires retained bytes matching the recorded size and digest.
-7. Preparation re-verifies every bottle before Homebrew executes. Bottle-embedded Formula source is staged under its exact synthetic Tap identity; current catalog source and embedded bottle source remain distinct evidence.
-8. One network-disabled exec installs each bottle. Protected tap trees and the exact Formula trust store cannot be replaced or modified by the runtime user.
-9. Core-only generated-runtime and post-install capabilities are keyed by full Formula ID. A non-core Formula that reuses a core rack name receives no core-specific exception.
-10. V1 records remain immutable and V1-only materializers continue to reject V2. Verification tooling decodes both schemas explicitly.

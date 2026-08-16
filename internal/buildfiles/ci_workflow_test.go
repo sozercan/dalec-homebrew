@@ -170,7 +170,9 @@ func TestNonCoreE2ESpecContainsQualifiedAndCoreRoots(t *testing.T) {
 func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
 	root := repositoryRoot(t)
 	const (
-		indexAssignment      = "DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>"
+		indexResolution      = "docker buildx imagetools inspect"
+		indexAssignment      = "DALEC_HOMEBREW_INDEX=$DALEC_HOMEBREW_REPO@$("
+		childAssignment      = "DALEC_HOMEBREW_CHILD=$DALEC_HOMEBREW_REPO@$("
 		indexBuildArg        = `--build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX"`
 		metadataBuildArg     = `--build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST"`
 		metadataBuildContext = `--build-context "dalec-homebrew-metadata=$DALEC_HOMEBREW_METADATA_BUNDLE"`
@@ -178,6 +180,8 @@ func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
 		metadataReference    = "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=sha256:<metadata-bundle-manifest-digest>"
 		metadataContext      = "--build-context dalec-homebrew-metadata=/path/to/verified/metadata-bundle"
 		childReference       = "ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>"
+		mutableIndexBinding  = "DALEC_HOMEBREW_FRONTEND_INDEX_REF=ghcr.io/sozercan/dalec-homebrew:"
+		mutableChildBinding  = "image: ghcr.io/sozercan/dalec-homebrew:"
 	)
 
 	for _, relative := range []string{"README.md", filepath.Join("docs", "usage.md")} {
@@ -201,6 +205,20 @@ func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
 			}
 		}
 
+		// A published release is named by version tag, but every documented
+		// build must still bind the exact index and platform child digests
+		// resolved from that tag.
+		for _, want := range []string{indexResolution, indexAssignment, childAssignment} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s must document resolving the release version tag to digests, missing %q", relative, want)
+			}
+		}
+		for _, unwanted := range []string{mutableIndexBinding, mutableChildBinding} {
+			if strings.Contains(text, unwanted) {
+				t.Errorf("%s must not document a mutable frontend reference %q", relative, unwanted)
+			}
+		}
+
 		found := 0
 		for _, tail := range strings.Split(text, "```console")[1:] {
 			block, _, ok := strings.Cut(tail, "```")
@@ -210,7 +228,6 @@ func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
 			found++
 			for _, want := range []string{
 				"--target homebrew/image",
-				indexAssignment,
 				indexBuildArg,
 				metadataBuildArg,
 				metadataBuildContext,
@@ -220,8 +237,8 @@ func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
 				}
 			}
 		}
-		if found != 2 {
-			t.Errorf("%s has %d docker buildx build commands, want 2", relative, found)
+		if found == 0 {
+			t.Errorf("%s has no documented docker buildx build command", relative)
 		}
 	}
 

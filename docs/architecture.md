@@ -1,6 +1,25 @@
 # Architecture
 
-`dalec-homebrew` separates networked resolution from offline execution. A build first turns a Dalec dependency declaration into a canonical, digest-bound resolution record, then materializes that record without network access and copies an allowlisted runtime into an independent Ubuntu Chisel base.
+This page explains how a build works internally. It is written for
+contributors, reviewers, and anyone auditing an image. To *build* images, read
+the [usage reference](usage.md) instead.
+
+`dalec-homebrew` separates networked resolution from offline execution. A build
+first turns a Dalec dependency declaration into a canonical, digest-bound
+resolution record, then materializes that record without network access and
+copies an allowlisted runtime into an independent Ubuntu Chisel base.
+
+In order, a build:
+
+1. validates routing metadata and the Dalec spec before touching the network;
+2. authenticates Homebrew metadata and resolves the complete dependency
+   closure into an immutable record of exact digests;
+3. verifies every bottle as a hostile archive;
+4. installs the closure offline, with no network, secrets, or shared caches;
+5. copies an allowlisted runtime onto a clean, snapshot-pinned Ubuntu base and
+   writes the evidence files; and
+6. runs your declared tests on the finished filesystem with networking
+   disabled.
 
 ## Frontend routing
 
@@ -77,7 +96,7 @@ See [`../SECURITY.md`](../SECURITY.md) for the properties enforced at each bound
 
 ## Package layout
 
-- `internal/spec`: runtime-dependency shape and name preflight plus typed V1
+- `internal/spec`: runtime-dependency shape and name preflight plus typed
   Dalec validation.
 - `internal/config`: gateway build-option parsing, immutable component bindings,
   and release-bound metadata policy.
@@ -91,7 +110,7 @@ See [`../SECURITY.md`](../SECURITY.md) for the properties enforced at each bound
 - `internal/materializer`: verified Formula staging, deterministic offline installs, prefix snapshots, containment, generated-receipt, and closure checks.
 - `internal/llbutil`: deterministic LLB state construction and read-only
   resolution, bottle, and evidence transport.
-- `internal/policy`: V1 runtime allowlist, writable-state rules, and pruning-policy binding.
+- `internal/policy`: runtime allowlist, writable-state rules, and pruning-policy binding.
 - `internal/runtime`: final image environment, PATH, working-directory, and non-root identity construction.
 - `internal/runtimebase`: build-only Ubuntu snapshot transport and Chisel manifest and package evidence conversion.
 - `internal/runtimefs`: allowlist assembly, ownership and mode normalization, inventory, pruning evidence, runtime manifest, and SPDX output.
@@ -121,7 +140,7 @@ A resolution record binds:
 - the resolved dependency closure
 - a separately computed deterministic topological installation order
 - frontend, runtime-base, materializer, bottle-fetcher, and catalog-extractor
-  component identities plus the complete V2 policy tuple
+  component identities plus the complete policy tuple
 - runtime, attestation-waiver, and pruning-policy inputs
 
 Requested-root order and installation order are distinct. Canonical root order
@@ -148,7 +167,7 @@ digest retain the live-fetch path.
 Within one frontend invocation the verified snapshot is shared immutably across
 platform callbacks. The release workflow supplies the same captured bundle to
 every platform and spec invocation, so those jobs do not independently refetch
-metadata. V2 records mark the aggregate timestamp as fully signed only when
+metadata. Records mark the aggregate timestamp as fully signed only when
 both document timestamps are authenticated; release signing still reconciles
 every observation strictly and records each envelope digest in the signed
 metadata snapshot.
@@ -212,15 +231,14 @@ Runtime ELF verification treats non-exposed inventory files with object-data ext
 
 The installed prefix is scanned into an inventory. Only allowlist-selected prefix entries are copied into the materialized overlay; the materializer then adds the explicit resolution, inventory, prune, manifest, SPDX, base, and installation evidence files under `/usr/share/dalec-homebrew`. Ownership and modes are normalized before static runtime checks and Dalec tests run.
 
-Runtime minimization is an automatic V2 release-policy step, not dependency
+Runtime minimization is an automatic release-policy step, not dependency
 resolution or a caller-selected mode. After the complete closure has been
-resolved, every bottle verified, and every Formula installed offline, V2 omits
-exact policy-classified paths only from transitive `homebrew/core` kegs.
+resolved, every bottle verified, and every Formula installed offline, assembly
+omits exact policy-classified paths only from transitive `homebrew/core` kegs.
 Requested Formulae remain outside the added pruning pass. The six bounded
 classes are headers, man and Info trees, exact build-metadata locations,
 policy-authorized Python standard-library test subtrees, shell completions, and
-static archives in bounded `lib/` locations. V1 retains its legacy assembly
-behavior.
+static archives in bounded `lib/` locations.
 
 The classifier is fail-closed by canonical Formula identity and relative path.
 It never generalizes from a basename such as `test`, and it preserves shared
@@ -228,8 +246,8 @@ libraries, plugins, `libexec`, configuration, locales, site-packages,
 `ensurepip`, `venv`, `node_modules`, Formula `share/doc` content, legal or
 license text, and static archives inside protected runtime-data locations.
 
-Before classifying paths, the V2 policy derives a development-payload retention
-set from exact release-bound V2 Formula policy capabilities and the verified
+Before classifying paths, the policy derives a development-payload retention
+set from exact release-bound Formula policy capabilities and the verified
 dependency graph. A capability-authorized compiler or MPI Formula retains
 headers, build metadata, and static archives for its node and verified
 dependency closure.
@@ -240,15 +258,15 @@ eligible for all six classes.
 Retained links and runtime validation must still succeed on the final state.
 The pruning-policy identity and exact decisions are committed into resolution,
 inventory, prune, and runtime-manifest evidence; changing the policy requires a
-new V2 release tuple. Invocation input cannot disable or broaden it.
+new release tuple. Invocation input cannot disable or broaden it.
 
 Each declared Dalec test runs on an independent branch derived from the final pruned state. The frontend injects an ephemeral test runner and plan under `/__dalec_homebrew`; those files are not exported. Commands inherit the final image user, environment, and working directory, after which the supported test-level directory, test environment, and step environment overrides apply. BuildKit disables networking for each branch. Development frontends may set `DALEC_SKIP_TESTS`; release-bound frontends reject that bypass.
 
 The image contents and evidence files are listed in the [usage reference](usage.md).
 
-## V2 public-tap flow
+## Public tap flow
 
-V2 keeps the V1 core path intact and adds a release-bound path only when a root uses `owner/tap/formula`:
+The core path is unchanged; a release-bound ingestion path is added only when a root uses `owner/tap/formula`:
 
 ```text
 all-platform raw/typed preflight
@@ -257,10 +275,10 @@ all-platform raw/typed preflight
   -> build-local exact-commit tap extraction and canonical catalog validation
   -> independent cross-tap normalization, cycle/order, platform, and rack-collision checks
   -> independent GHCR descriptor resolution or one bounded HTTPS fetch exec per selected artifact
-  -> canonical resolution V2
+  -> canonical resolution record
   -> prepare (all bottles or policy-derived bottles and fetch evidence verified; synthetic taps and trust store sealed)
   -> one network-disabled install exec per install-order node
-  -> finalize onto the clean runtime base with V2 inventory, prune, manifest, and SPDX evidence
+  -> finalize onto the clean runtime base with inventory, prune, manifest, and SPDX evidence
 ```
 
 Core-only builds bypass tap extraction. For non-core roots, the frontend constructs one invocation-wide fixed-point ingestion plan. BuildKit fetches each reached default-GitHub tap once, binds its exact commit/tree/archive identity, and evaluates Formula metadata through the digest-pinned extractor with networking disabled, read-only source mounts, and disposable cache and temporary mounts. The frontend strictly decodes each bounded catalog and independently recomputes dependency normalization, closure, cycles, ordering, and rack collisions.
@@ -271,8 +289,8 @@ HTTPS bottles never use `llb.HTTP`. A minimal CA-plus-static-binary fetcher enfo
 
 A Formula without a native bottle remains unsupported unless its exact Formula ID appears in the release-bound prebuilt-archive section of the tap policy. In that case build-local ingestion verifies the complete bounded tar+gzip inventory plus the selected static ELF and Go build properties, then creates a deterministic receiptless **derived bottle** containing only the policy-selected executable and exact authenticated Formula source. The derived bytes remain an invocation-local content-addressed BuildKit input (`build-local-artifact-v1`) and are reverified by the offline materializer. Formula `install` and `post_install` methods are not run.
 
-During ingestion, GHCR source annotations are used to recover the exact historical bottle-source commit and Formula path. The source file is fetched at that immutable revision and compared byte-for-byte with the embedded Formula after the deterministic Homebrew bottle block (which is intentionally omitted from bottle Formula copies) is removed. Generic HTTPS bottles do not expose an equivalent authenticated source revision, so V2 leaves the historical repository/commit/path fields empty and requires the explicit `https-bottle-embedded-formula-digest-only-v1` bottle-source waiver. The current build-local exact-commit tap source and the separately verified embedded-Formula digest remain distinct evidence.
+During ingestion, GHCR source annotations are used to recover the exact historical bottle-source commit and Formula path. The source file is fetched at that immutable revision and compared byte-for-byte with the embedded Formula after the deterministic Homebrew bottle block (which is intentionally omitted from bottle Formula copies) is removed. Generic HTTPS bottles do not expose an equivalent authenticated source revision, so ingestion leaves the historical repository/commit/path fields empty and requires the explicit `https-bottle-embedded-formula-digest-only-v1` bottle-source waiver. The current build-local exact-commit tap source and the separately verified embedded-Formula digest remain distinct evidence.
 
-GHCR artifacts may advertise a Sigstore bundle through an OCI 1.1 referrer or the digest-bound `dev.sigstore.bundle.url` and `dev.sigstore.bundle.digest` annotations; generic HTTPS bottles use the deterministic `<bottle-path>.sigstore.json` sidecar convention. When present, ingestion fetches the bounded bundle, verifies its SHA-256, in-toto subject, transparency evidence, GitHub Actions issuer, and repository-scoped identity against the Sigstore trusted root embedded in the V2 tap policy. If no supported discovery route exposes evidence, the artifact records the explicit build-local catalog/checksum provenance waiver; partial, ambiguous, or invalid advertised evidence fails closed.
+GHCR artifacts may advertise a Sigstore bundle through an OCI 1.1 referrer or the digest-bound `dev.sigstore.bundle.url` and `dev.sigstore.bundle.digest` annotations; generic HTTPS bottles use the deterministic `<bottle-path>.sigstore.json` sidecar convention. When present, ingestion fetches the bounded bundle, verifies its SHA-256, in-toto subject, transparency evidence, GitHub Actions issuer, and repository-scoped identity against the Sigstore trusted root embedded in the tap policy. If no supported discovery route exposes evidence, the artifact records the explicit build-local catalog/checksum provenance waiver; partial, ambiguous, or invalid advertised evidence fails closed.
 
-V2 materialization seeds the protected Homebrew prefix once, stages bottle-embedded Formula source under exact synthetic tap paths, and writes a read-only `trust.json` containing only selected non-core Formula IDs. Each install starts from a fresh materializer rootfs with networking disabled; only the cumulative prefix and explicit delta evidence persist. Formula-specific runtime exceptions are granted only to exact `homebrew/core/...` identities.
+Materialization seeds the protected Homebrew prefix once, stages bottle-embedded Formula source under exact synthetic tap paths, and writes a read-only `trust.json` containing only selected non-core Formula IDs. Each install starts from a fresh materializer rootfs with networking disabled; only the cumulative prefix and explicit delta evidence persist. Formula-specific runtime exceptions are granted only to exact `homebrew/core/...` identities.

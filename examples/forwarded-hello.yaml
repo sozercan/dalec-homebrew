@@ -1,8 +1,14 @@
-# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
-# Also pass the matching parent index from trusted release evidence:
-# --build-arg DALEC_HOMEBREW_FRONTEND_INDEX_REF=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>
-# --build-arg DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=sha256:<metadata-bundle-manifest-digest>
-# --build-context dalec-homebrew-metadata=/path/to/verified/metadata-bundle
+# syntax=ghcr.io/project-dalec/dalec/frontend:latest
+#
+# The smallest spec that builds an image. Replace <dalec-homebrew-child-digest>
+# below with the release image digest for your builder's architecture, and pass
+# the matching release inputs on the command line:
+#
+#   --build-arg DALEC_HOMEBREW_FRONTEND_INDEX_REF=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>
+#   --build-arg DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=sha256:<metadata-bundle-manifest-digest>
+#   --build-context dalec-homebrew-metadata=/path/to/verified/metadata-bundle
+#
+# The README quickstart shows how to obtain those values from a release.
 name: homebrew-forwarded-hello
 version: 0.1.0
 revision: 1
