@@ -1,4 +1,6 @@
-# Release and rollback
+# Release and rollback guide
+
+This guide is for maintainers and downstream release operators. Image users normally need only the [README quickstart](../README.md#quickstart) and [release-asset verification steps](usage.md#verify-release-assets). Terms used here are defined in the [glossary](../CONTEXT.md).
 
 A release is an immutable tuple of repository-owned frontend, runtime-base,
 bottle-fetcher, catalog-extractor, and materializer components together with
@@ -6,20 +8,32 @@ the external upstream Dalec dispatcher, Homebrew, verification-key, module,
 builder, snapshot, Chisel, and policy inputs. Promotion adds references to
 already tested owned-component digests; it never rebuilds or re-resolves them.
 
+## Release lifecycle at a glance
+
+```text
+pin and review every input
+  -> build platform component children
+  -> test exact child digests
+  -> assemble component indexes
+  -> generate and sign evidence
+  -> add version tags to the already-tested digests
+```
+
+**Promotion never rebuilds.** Rollback selects a previously signed tuple and its retained package bytes; it never reconstructs an old release from current metadata.
+
 ## Component tuple
 
-A V2 release frontend must bind digest-pinned runtime-base, materializer,
+A release frontend must bind digest-pinned runtime-base, materializer,
 bottle-fetcher, and catalog-extractor images plus the exact non-core policy
 tuple. The frontend itself must also be invoked by digest.
 
-Automatic runtime minimization is part of that immutable V2 policy tuple. The
+Automatic runtime minimization is part of that immutable policy tuple. The
 release-bound policy defines six exact Formula/path classes eligible for
-pruning plus exact release-bound V2 Formula policy capabilities that activate
+pruning plus exact release-bound Formula policy capabilities that activate
 compiler or MPI development-payload retention across the verified dependency
 closure; invocation input cannot disable, select, supply, or broaden those
 rules. Unsigned OCI executable-path annotations cannot activate retention.
-Formula `share/doc` content remains retained. V1 components retain their legacy
-assembly behavior. A policy change requires a newly built, tested, and signed
+Formula `share/doc` content remains retained. A policy change requires a newly built, tested, and signed
 component tuple.
 
 Prune-manifest schema v4 and its reason vocabulary remain compatible with the
@@ -48,8 +62,7 @@ DALEC_HOMEBREW_SUPPORTED_PROVENANCE_POLICY_VERSIONS
 These options are not general overrides. Runtime-base, materializer, helper,
 policy, and Homebrew commit values may fill a binding only when the relevant
 value was not compiled into the frontend; otherwise a supplied value must match
-the compiled value. Invocation options cannot upgrade a core-only frontend into
-a non-core-capable one. Ruby falls back to `4.0.6` even when no value was
+the compiled value. Invocation options cannot add capabilities that were not compiled into the frontend. Ruby falls back to `4.0.6` even when no value was
 compiled, and the key-set digest must match the embedded keys. To test different
 Ruby or key-set pins, rebuild the frontend with the Dockerfile arguments
 `HOMEBREW_RUBY_VERSION` and `HOMEBREW_KEYS_DIGEST`; a different key set also
@@ -61,19 +74,19 @@ digest-pinned gateway `source` option and must match it when explicitly
 supplied. `DALEC_HOMEBREW_FRONTEND_INDEX_REF` supplies the separately pinned
 parent index claim. Mutable tags and cross-repository index/child pairs are
 rejected. Release signing independently proves that the claimed index contains
-the executing platform child before accepting the evidence. Each V2 resolution
+the executing platform child before accepting the evidence. Each resolution
 record binds both identities, the selected runtime-base and materializer
 children, and the immutable bottle-fetcher and catalog-extractor indexes
 compiled into the frontend.
 
 See [`../release/components-v2.example.json`](../release/components-v2.example.json)
-for the current canonical manifest shape. The checked-in file contains
-placeholders and is illustrative; the retained
-[`../release/components.example.json`](../release/components.example.json) is
-the V1 shape. Release automation generates the manifest with
+for the current canonical manifest shape. The filename retains its schema
+suffix for compatibility; users do not select between release modes. The
+checked-in values are placeholders and illustrative. Release automation generates the manifest with
 `cmd/release-manifest`. Validate a populated manifest with:
 
 ```console
+set -euo pipefail
 go run ./cmd/release-verify path/to/components.json
 ```
 
@@ -214,7 +227,7 @@ The example runtimes are integration fixtures and are not promoted.
    on native `amd64` and `arm64` workers against that exact bundle, and run the
    release-owned non-core fixture through the published helper tuple while
    producing runtime evidence, component-child SPDX SBOMs, and vulnerability
-   reports. The core matrix must exercise automatic V2 minimization, including
+   reports. The core matrix must exercise automatic runtime minimization, including
    requested-Formula preservation, all six active safe pruning classes,
    retained Formula `share/doc` and runtime-sensitive paths, rejection of
    inactive share/doc prune records, and a size report for the minimized
@@ -270,6 +283,7 @@ because OCI tags cannot represent it without an additional mapping.
 Push a release tag on the current `main` commit to start the pipeline:
 
 ```console
+set -euo pipefail
 git tag -a v1.2.3 -m v1.2.3
 git push origin v1.2.3
 ```
@@ -295,6 +309,7 @@ accept the bundle, because recovery never rebuilds the tuple. For an explicit
 retry or draft recovery, dispatch the trusted workflow on `main`:
 
 ```console
+set -euo pipefail
 gh workflow run release.yml --ref main -f tag=v1.2.3
 ```
 
@@ -351,8 +366,8 @@ verifies its exact asset inventory, and validates each vulnerability report's
 size, schema, and digest-bound subject without rejecting reported findings. Each
 component version tag must be absent or already resolve to the tested index
 digest; the workflow creates only missing tags, verifies them, rechecks the
-draft, and then publishes it. It never rebuilds during promotion or publishes a
-`latest` tag.
+draft, and then publishes it. It never rebuilds during promotion or publishes a mutable
+`dalec-homebrew:latest` tag.
 
 Every integration receives the same release-captured Formula and migration JWS
 envelopes. Their bundle digest is compiled into both frontend children and must
@@ -398,21 +413,62 @@ that tuple; it does not publish the example runtime images.
 
 ## Rollback
 
-The repository workflow has no rollback trigger or rollback job. Rollback is an
-operator or downstream release-system action that selects an earlier signed
-component, index, and resolution tuple together with its mirrored blobs. It
-must not reconstruct an old release from current Homebrew metadata.
+The repository workflow has no automatic rollback trigger because rollback must
+reuse already verified content; starting a new build would resolve newer inputs
+and would not reproduce the old release.
 
-## V2 component tuple
+A release operator should:
 
-V2 manifests use `dalec-homebrew-components/v2` and add:
+1. **Select the exact old version.** Retrieve its GitHub release assets and the
+   downstream product release record. Record the release tag and final OCI
+   index digest before changing any mutable deployment reference.
+2. **Authenticate the release bundle.** Verify `SHA256SUMS.bundle`, then every
+   required asset, with the identity and issuer in
+   [Verify release assets](usage.md#verify-release-assets). Also verify
+   `components.json.bundle` with the same certificate policy.
+   For the component manifest itself:
+
+   ```console
+   cosign verify-blob \
+     --bundle components.json.bundle \
+     --certificate-identity-regexp '^https://github\.com/sozercan/dalec-homebrew/\.github/workflows/release\.yml@refs/heads/main$' \
+     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+     components.json
+   ```
+
+3. **Validate identities.** Run `cmd/release-verify` on `components.json` and
+   confirm its digest matches `components.digest`. Verify the component image
+   signatures, SLSA and SPDX attestations, index-to-child relationships, and
+   expected platform set exactly as the release workflow does.
+4. **Check retention before switching.** Confirm that every component child and
+   index, final runtime manifest, OCI referrer, selected bottle layer, public-tap
+   catalog/source archive, policy-derived artifact, resolution record, metadata
+   envelope, and evidence archive needed by the old release is still available
+   by digest. Do not proceed from tags alone.
+5. **Reuse the old product output.** Restore the previously tested final runtime
+   index or platform-manifest digests. Do not feed the old version into a new
+   solve: its metadata may correctly be outside the freshness window, and a
+   public tap's default branch may have moved.
+6. **Validate after the switch.** Resolve the promoted reference back to the
+   intended digest, check both platform children, rerun deployment-level smoke
+   tests without altering the image, and preserve an audit record of the old
+   and new references.
+
+This repository publishes and signs the reusable component tuple and evidence;
+it does not publish the example runtime images. A downstream product release
+system is therefore responsible for retaining and restoring its own final image
+digests and exact resolution inputs.
+
+## Component-manifest schema compatibility
+
+The current manifest wire format is `dalec-homebrew-components/v2`. The numeric suffix versions the JSON schema; it is not a selectable product tier. The current format includes:
 
 - multi-platform `bottle_fetcher` and `catalog_extractor` components;
 - `tap_policy_digest` and `executable_runtime_policy_digest`;
 - exact supported catalog, fetch, provenance, receiptless HTTPS source-waiver, build-local artifact, and prebuilt-derived-bottle policy-version sets.
 
-The illustrative V1 manifest remains [`../release/components.example.json`](../release/components.example.json). The service-free V2 shape is [`../release/components-v2.example.json`](../release/components-v2.example.json).
+[`../release/components-v2.example.json`](../release/components-v2.example.json) shows the current service-free shape. [`../release/components.example.json`](../release/components.example.json) is retained only as a historical schema fixture.
 
-Build V2 components in this order: runtime-base children/index, bottle-fetcher children/index, catalog-extractor children/index, materializer children/index, then the frontend. The materializer and frontend compile the exact fetcher/extractor references plus policy digests and supported-version sets. `cmd/v2-bindings --catalog-extractor-ref` emits the canonical service-free policy bindings. No RSA catalog key, key rotation, catalog-service deployment, persistent writer, or public HTTPS origin is required.
+Build current components in this order: runtime-base children/index, bottle-fetcher children/index, catalog-extractor children/index, materializer children/index, then the frontend. The materializer and frontend compile the exact fetcher/extractor references plus policy digests and supported-version sets. `cmd/v2-bindings --catalog-extractor-ref` emits the canonical service-free policy bindings. No RSA catalog key, key rotation, catalog-service deployment, persistent writer, or public HTTPS origin is required.
 
-Build-local tap ingestion records the exact Git commit, tree/archive digests, canonical catalog digest, extractor reference, and explicit `build-local-exact-commit-no-cross-build-rollback-v1` evidence. It does not provide centralized cross-build rollback floors: a later build can observe a force-pushed default branch. Promotion and rollback therefore retain catalog documents, source archives, derived or upstream bottle bytes, V2 resolutions, and final image digests; they never reconstruct an old release from a mutable tap.
+Build-local tap ingestion records the exact Git commit, tree/archive digests, canonical catalog digest, extractor reference, and explicit `build-local-exact-commit-no-cross-build-rollback-v1` evidence. It does not provide centralized cross-build rollback floors: a later build can observe a force-pushed default branch. Promotion and rollback therefore retain catalog documents, source archives, derived or upstream bottle bytes, resolutions, and final image digests; they never reconstruct an old release from a mutable tap.

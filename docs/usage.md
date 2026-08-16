@@ -1,52 +1,220 @@
-# Usage reference
+# Usage guide
 
-`dalec-homebrew` accepts a deliberately small Dalec contract and produces a Linux runtime image from verified Homebrew bottles or exact release-policy-authorized prebuilt executable archives.
+This guide explains how to build and customize runtime images with
+`dalec-homebrew`. If this is your first build, complete the
+[README quickstart](../README.md#quickstart) first. Definitions for **Dalec
+spec**, **frontend**, **Formula**, **bottle**, and other project terms are in the
+[glossary](../CONTEXT.md).
 
 ## Requirements
 
-- A Linux `amd64` or `arm64` target
-- Docker Buildx or `buildctl` backed by BuildKit 0.31.2 or newer
-- An upstream Dalec frontend reference pinned by digest
-- A `dalec-homebrew` parent index and exact platform child reference, both
-  pinned by digest and taken from the same trusted release evidence
-- The authenticated Homebrew metadata bundle and manifest digest from that
-  same release
-- Network access from the BuildKit daemon to both frontend images, the child
-  frontend's bound components, `ghcr.io`, public default-GitHub taps, and
-  selected public bottle or prebuilt-archive hosts. Release-bound builds read
-  Formula metadata only from the supplied authenticated bundle; access to
-  `formulae.brew.sh` is required only by an unbound development frontend using
-  the live-fetch path.
+- A target of `linux/amd64` or `linux/arm64`
+- Docker Buildx backed by BuildKit 0.31.2 or newer, or an equivalent `buildctl`
+  setup
+- Bash, `curl`, `jq`, `install`, `grep`, `awk`, `tr`, `wc`, and either
+  `sha256sum` or `shasum` to prepare release inputs
+- [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/)
+  3.1.2 or a compatible newer release to authenticate release assets
+- Network access from the BuildKit daemon to the frontend and component images,
+  `ghcr.io`, selected public GitHub taps, and the package hosts selected by the
+  release policy
 
-The repository's [`../release/dalec-frontend.json`](../release/dalec-frontend.json)
-binding records the release-approved upstream Dalec index, exact Linux platform
-children, module identity, and fixed `homebrew/image` route. The
-`dalec-homebrew` frontend, runtime base, materializer, and—when V2 non-core
-support is compiled—bottle fetcher, catalog extractor, tap policy, and executable
-runtime policy remain one separate release component tuple. Mutable image tags
-are not accepted as trusted inputs.
+Docker Desktop includes Docker Buildx. Confirm the client and builder are
+available with:
 
-## Build an image
+```console
+set -euo pipefail
+docker info >/dev/null
+docker buildx version
+docker buildx inspect --bootstrap
+```
 
-Before using a released child frontend, verify the release's signed
-`SHA256SUMS`, reconstruct its fixed three-file metadata context, and verify the
+The frontend images run inside BuildKit. You do not install Dalec, Homebrew, or
+`dalec-homebrew` as local commands.
+
+## Understand the versions
+
+A build mentions several different versions. They have different purposes:
+
+| Value | Meaning |
+| --- | --- |
+| `DALEC_HOMEBREW_VERSION` | The published `dalec-homebrew` release whose components, policy, and Homebrew metadata are used together |
+| `DALEC_FRONTEND_VERSION` | The newest compatible upstream Dalec version recorded by the selected `dalec-homebrew` release; its image is still used by exact digest |
+| Top-level spec `version` | Optional descriptive Dalec metadata, recorded in input evidence; it does not set an image tag or choose a Formula version |
+| A Formula name such as `python@3.14` | An exact versioned name currently published by Homebrew |
+
+An empty dependency value such as `hello: {}` selects the stable Formula in
+the release's authenticated metadata snapshot. Historical releases and version
+ranges are not supported. In the examples, the output gets tag `1.0.0` only
+because `--tag hello-homebrew:1.0.0` is passed explicitly.
+
+## Prepare release inputs
+
+Released frontends require the exact component tuple and authenticated Homebrew
+metadata bundle from the same `dalec-homebrew` release. The
+[quickstart download commands](../README.md#2-download-and-verify-the-current-release-inputs)
+automatically discover the newest release, require fresh metadata, verify its
+required files, and create this local layout:
+
+```text
+.dalec-homebrew/
+├── release/
+│   ├── components.json
+│   ├── inputs.json
+│   ├── metadata-bundle.digest
+│   ├── metadata-bundle-manifest.json
+│   ├── metadata-formula.jws.json
+│   ├── metadata-migrations.jws.json
+│   ├── SHA256SUMS
+│   └── SHA256SUMS.bundle
+└── metadata/
+    ├── manifest.json
+    ├── formula.jws.json
+    └── formula_tap_migrations.jws.json
+```
+
+`components.json` supplies the exact frontend index and per-platform child
+references. Do not guess these digests, mix files from different releases, or
+substitute a mutable `dalec-homebrew` tag.
+
+### Verify release assets
+
+The README already performs the checks below. They are repeated here as a
+standalone reference: authenticate the release checksum set with Cosign, verify
+every downloaded input against it, and reject stale metadata before building.
+
+Choose a version explicitly, or leave it unset to discover the newest
+published release, then download the complete input set:
+
+```console
+set -euo pipefail
+mkdir -p .dalec-homebrew/release .dalec-homebrew/metadata
+if [ -z "${DALEC_HOMEBREW_VERSION:-}" ]; then
+  DALEC_HOMEBREW_VERSION="$(
+    curl -fsSL https://api.github.com/repos/sozercan/dalec-homebrew/releases/latest \
+      | jq -er .tag_name
+  )"
+fi
+DALEC_HOMEBREW_RELEASE_URL="https://github.com/sozercan/dalec-homebrew/releases/download/$DALEC_HOMEBREW_VERSION"
+
+for file in \
+  components.json \
+  inputs.json \
+  metadata-bundle.digest \
+  metadata-bundle-manifest.json \
+  metadata-formula.jws.json \
+  metadata-migrations.jws.json \
+  SHA256SUMS \
+  SHA256SUMS.bundle
+do
+  curl -fL "$DALEC_HOMEBREW_RELEASE_URL/$file" \
+    -o ".dalec-homebrew/release/$file"
+done
+```
+
+Verify the keyless signature. The certificate identity restricts acceptance to
+the release workflow on this repository's `main` branch:
+
+```console
+set -euo pipefail
+cosign verify-blob \
+  --bundle .dalec-homebrew/release/SHA256SUMS.bundle \
+  --certificate-identity-regexp '^https://github\.com/sozercan/dalec-homebrew/\.github/workflows/release\.yml@refs/heads/main$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  .dalec-homebrew/release/SHA256SUMS
+```
+
+Then verify the inputs used by the build. The line-count check prevents a
+misspelled filename from silently dropping out of the filtered checksum list:
+
+```console
+set -euo pipefail
+grep -E '  \./(components\.json|inputs\.json|metadata-bundle\.digest|metadata-bundle-manifest\.json|metadata-formula\.jws\.json|metadata-migrations\.jws\.json)$' \
+  .dalec-homebrew/release/SHA256SUMS \
+  > .dalec-homebrew/release/REQUIRED_SHA256SUMS
+test "$(wc -l < .dalec-homebrew/release/REQUIRED_SHA256SUMS | tr -d ' ')" -eq 6
+
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd .dalec-homebrew/release && sha256sum --check REQUIRED_SHA256SUMS)
+else
+  (cd .dalec-homebrew/release && shasum -a 256 --check REQUIRED_SHA256SUMS)
+fi
+
+jq -e '
+  [.formula.generated_at, .migrations.generated_at]
+  | map(fromdateiso8601)
+  | min >= (now - 7 * 24 * 60 * 60)
+' .dalec-homebrew/release/metadata-bundle-manifest.json >/dev/null || {
+  echo "The release metadata is older than seven days; use a fresh release." >&2
+  exit 1
+}
+```
+
+The seven-day limit is enforced again by the released frontend. If no fresh
+release is available, there is temporarily no supported published build path;
+do not raise or bypass the limit.
+
+Finally, reconstruct the fixed three-file metadata context and check the
 manifest digest recorded by the release:
 
 ```console
-RELEASE_ASSETS=/path/to/verified/release-assets
-DALEC_HOMEBREW_METADATA_BUNDLE=$(mktemp -d)
-install -m 0444 "$RELEASE_ASSETS/metadata-bundle-manifest.json" "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json"
-install -m 0444 "$RELEASE_ASSETS/metadata-formula.jws.json" "$DALEC_HOMEBREW_METADATA_BUNDLE/formula.jws.json"
-install -m 0444 "$RELEASE_ASSETS/metadata-migrations.jws.json" "$DALEC_HOMEBREW_METADATA_BUNDLE/formula_tap_migrations.jws.json"
-DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$(tr -d '\n' < "$RELEASE_ASSETS/metadata-bundle.digest")
-test "$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" = "sha256:$(sha256sum "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json" | awk '{print $1}')"
+set -euo pipefail
+DALEC_HOMEBREW_METADATA_BUNDLE="$PWD/.dalec-homebrew/metadata"
+install -m 0444 .dalec-homebrew/release/metadata-bundle-manifest.json "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json"
+install -m 0444 .dalec-homebrew/release/metadata-formula.jws.json "$DALEC_HOMEBREW_METADATA_BUNDLE/formula.jws.json"
+install -m 0444 .dalec-homebrew/release/metadata-migrations.jws.json "$DALEC_HOMEBREW_METADATA_BUNDLE/formula_tap_migrations.jws.json"
+DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST="$(tr -d '\r\n' < .dalec-homebrew/release/metadata-bundle.digest)"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  MANIFEST_SHA256="$(sha256sum "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json" | awk '{print $1}')"
+else
+  MANIFEST_SHA256="$(shasum -a 256 "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json" | awk '{print $1}')"
+fi
+test "$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" = "sha256:$MANIFEST_SHA256"
 ```
 
-The supported production spec uses upstream Dalec as its syntax frontend and
-selects `dalec-homebrew` through the `homebrew` target:
+The frontend independently verifies the Homebrew JWS documents during the
+build. The checks above additionally authenticate which release files you chose
+to supply.
 
-```yaml
-# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
+## Build an image
+
+Choose a platform and read its exact child reference from the verified
+component manifest:
+
+```console
+set -euo pipefail
+DALEC_HOMEBREW_PLATFORM=linux/amd64
+DALEC_HOMEBREW_ARCH="${DALEC_HOMEBREW_PLATFORM#linux/}"
+DALEC_HOMEBREW_INDEX="$(jq -er '.frontend.index' .dalec-homebrew/release/components.json)"
+DALEC_HOMEBREW_CHILD="$(
+  jq -er --arg arch "$DALEC_HOMEBREW_ARCH" '
+    .frontend.platforms[]
+    | select(.platform.os == "linux" and .platform.architecture == $arch)
+    | .ref
+  ' .dalec-homebrew/release/components.json
+)"
+```
+
+Create `spec.yaml`. Read the release-approved upstream Dalec version and exact
+image digest from the verified inputs, then use a shell heredoc to insert the
+immutable references without copying them by hand:
+
+```console
+set -euo pipefail
+DALEC_SYNTAX="$(jq -er '.dalec_frontend.index' .dalec-homebrew/release/inputs.json)"
+DALEC_FRONTEND_VERSION="$(jq -er '.dalec_frontend.module.version' .dalec-homebrew/release/inputs.json)"
+printf 'Using upstream Dalec %s\n' "$DALEC_FRONTEND_VERSION"
+
+cat > spec.yaml <<EOF
+# syntax=$DALEC_SYNTAX
+
+name: hello-homebrew
+version: 1.0.0
+revision: 1
+description: GNU Hello in a minimal runtime image
+website: https://www.gnu.org/software/hello/
+license: GPL-3.0-or-later
 
 dependencies:
   runtime:
@@ -58,157 +226,199 @@ image:
 targets:
   homebrew:
     frontend:
-      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>
+      image: $DALEC_HOMEBREW_CHILD
+EOF
 ```
 
-Replace the syntax and child placeholders with immutable references supplied by
-trusted release evidence. Pass the matching parent index through the build
-argument that upstream Dalec forwards to the child, then invoke the
-`homebrew/image` target:
+Build and load the image into Docker:
 
 ```console
-DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>
-
+set -euo pipefail
 docker buildx build \
   --build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX" \
   --build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" \
   --build-context "dalec-homebrew-metadata=$DALEC_HOMEBREW_METADATA_BUNDLE" \
   --target homebrew/image \
-  --platform linux/amd64 \
-  --file examples/forwarded-hello.yaml \
-  --tag hello-runtime:local \
+  --platform "$DALEC_HOMEBREW_PLATFORM" \
+  --file spec.yaml \
+  --tag hello-homebrew:1.0.0 \
   --load \
   .
 ```
 
-The complete example is available at
-[`../examples/forwarded-hello.yaml`](../examples/forwarded-hello.yaml). Use
-`linux/arm64` for an Arm target. BuildKit-normalized default-variant spellings
-such as `linux/amd64/v1` and `linux/arm64/v8` are equivalent; non-default
-variants and other operating systems or architectures are unsupported.
+Use `linux/arm64` for an Arm target. The release-reference lookup above expects
+exactly `linux/amd64` or `linux/arm64`; other operating systems, architectures,
+and explicit variant spellings are unsupported by this workflow.
 
-`homebrew` is the selected upstream Dalec spec target. Upstream forwards the
-`/image` suffix to the child as target `image`, the only route advertised by
-the `dalec-homebrew` child frontend. Advertising that child route does not make
-direct invocation supported: an `image` solve without the forwarded `homebrew`
-target context is rejected. `targets.homebrew.frontend.image` must exactly match
-the digest-pinned gateway source used for the child solve, and target and
-invocation `cmdline` values must be omitted or empty. Bare `--target homebrew`,
-unknown child routes, nested routes, and mutable or mismatched child-frontend
-references fail closed before Homebrew metadata access.
+The quickstart discovers the newest project release automatically, while the
+spec uses `.dalec_frontend.index` from verified `inputs.json`. Do not substitute
+the mutable upstream `:latest` tag: it may not be compatible with, or covered by
+the evidence for, the selected release tuple.
+
+### Use `buildctl` instead of Docker Buildx
+
+If you operate BuildKit directly, use the upstream Dalec image as a gateway and
+map the metadata directory as the required named context:
+
+```console
+set -euo pipefail
+buildctl --addr "$BUILDKIT_HOST" build \
+  --frontend gateway.v0 \
+  --opt "source=$DALEC_SYNTAX" \
+  --opt filename=spec.yaml \
+  --opt target=homebrew/image \
+  --opt "platform=$DALEC_HOMEBREW_PLATFORM" \
+  --opt "build-arg:DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX" \
+  --opt "build-arg:DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" \
+  --opt context:dalec-homebrew-metadata=local:dalec-homebrew-metadata \
+  --local context=. \
+  --local dockerfile=. \
+  --local "dalec-homebrew-metadata=$DALEC_HOMEBREW_METADATA_BUNDLE" \
+  --output type=oci,dest=hello-homebrew.tar
+```
+
+`buildctl` has no generic equivalent of Docker's `--load`. The command above
+writes an OCI archive; use an image output with `name=...` and `push=true` to
+publish directly to a registry. The BuildKit daemon—not the `buildctl` client—
+needs registry and package-host access.
+
+### Why the target is `homebrew/image`
+
+There are two BuildKit frontends in the supported route:
+
+```text
+spec.yaml
+  -> upstream Dalec reads and validates the spec
+  -> Dalec selects the homebrew target
+  -> dalec-homebrew builds the child image route
+```
+
+The complete target is therefore `homebrew/image`. Directly using
+`dalec-homebrew` as the syntax frontend, selecting bare `homebrew`, changing the
+child route, or adding frontend command-line values is rejected. These checks
+run before Homebrew metadata or registries are accessed.
 
 ## Declare runtime dependencies
 
-`dependencies.runtime` must use map form. This form also supports the V1
-per-Formula options:
+`dependencies.runtime` is a non-empty YAML mapping:
 
 ```yaml
 dependencies:
   runtime:
-    hello: {}                 # homebrew/core/hello
-    homebrew/core/jq: {}       # identical canonical core form
-    acme/tools/widget: {}      # V2: github.com/acme/homebrew-tools
+    hello: {}                  # homebrew/core/hello
+    homebrew/core/jq: {}       # the same explicit core form
+    acme/tools/widget: {}      # illustrative public-tap identity
     ripgrep:
       arch: [amd64, arm64]
 ```
 
+`acme/tools/widget` is a shape example, not a promise that this Formula exists.
+Use an identity published by the tap you intend to build.
+
 Dependency rules:
 
-- Each global or selected-target `dependencies` scope must either be omitted or
-  contain a non-empty `runtime` map. To inherit global dependencies, omit
-  `targets.homebrew.dependencies`; explicit empty dependency scopes are invalid.
+- Omit a global or selected-target `dependencies` section when it is not used.
+  If present, it must contain a non-empty `runtime` map. To inherit global
+  dependencies in the `homebrew` target, omit the target's `dependencies`
+  section entirely.
+- An omitted or empty `version` list selects the stable Formula in the
+  authenticated release snapshot. Any non-empty version constraint is
+  rejected.
+- Exact versioned Formula names published by Homebrew, such as `python@3.14`,
+  are supported. They are names, not requests for arbitrary historical
+  versions.
+- A bare name canonicalizes to `homebrew/core/<name>`. Declaring both bare and
+  explicit forms of the same Formula is a duplicate and fails.
+- A public-tap name has exactly `owner/tap/formula`. It maps only to that tap's
+  default public GitHub repository. URLs, credentials, arbitrary remotes,
+  uppercase or non-ASCII components, casks, and malformed names are rejected
+  before network access.
+- Authenticated aliases, old names, and migrations may resolve to a current
+  canonical Formula. Dependency lookup never searches unrelated taps.
+- A Formula without a supported bottle fails unless its exact Formula ID is
+  authorized by the release's prebuilt-executable policy. Users cannot add an
+  archive URL or recipe through the spec.
+- Formula short names start with a lowercase letter or digit and may contain
+  lowercase letters, digits, `+`, `_`, `.`, `@`, or `-`.
+- `arch` may contain `amd64`, `arm64`, or both. Duplicate or unsupported values
+  are rejected. Every selected platform must retain at least one root.
+- A non-empty selected-target runtime map replaces the global runtime map as a
+  group; maps are not merged Formula by Formula.
+- Declaration order has no precedence meaning. Roots are canonicalized and
+  sorted for evidence and the generated `PATH`; installation uses a separate
+  deterministic dependency-first order. Requested Formulae exposing the same
+  command name fail instead of silently shadowing each other.
+- When producing both architectures, a requested root must resolve to the same
+  package version on each applicable platform.
 
-- An omitted or empty `version` list selects the current stable Formula in the authenticated metadata. Any non-empty version constraint is rejected; historical versions and version ranges are not supported.
-- Explicit canonical versioned Formula names such as `python@3.14` are supported. Version-looking requests must be exact canonical names; they do not select arbitrary historical releases.
-- A bare name canonicalizes to `homebrew/core/<name>`; explicit `homebrew/core/<name>` is identical, and duplicate canonical roots such as both forms of `hello` are rejected.
-- A qualified V2 name has exactly `owner/tap/formula`. URL-like input, arbitrary remotes, casks, credentials, uppercase or non-ASCII components, colons, backslashes, control characters, and malformed or overlong components are rejected before metadata access.
-- Qualified roots are rejected before network access unless the frontend binary has the complete release-bound V2 capability tuple.
-- Authenticated `homebrew/core` aliases, old names, and in-core migrations may resolve to the current canonical Formula. V2 additionally supports signed same-tap aliases and renames plus fully qualified cross-tap migrations; dependency lookup never searches unrelated taps.
-- A Formula without a supported bottle fails unless its exact Formula ID is authorized by the embedded prebuilt-archive policy. Initial prebuilt support is root-only, invokes neither the Formula `install` method nor source-build fallback, and accepts only the policy-fixed archive inventory, executable mapping, platform, and static-binary properties.
-- Formula short names must start with a lowercase letter or digit and contain only lowercase letters, digits, `+`, `_`, `.`, `@`, or `-`. Malformed `@` syntax is rejected before metadata access.
-- `arch` may contain `amd64`, `arm64`, or both. Duplicate or unsupported entries are rejected. A root omitted by `arch` is not part of that platform's closure.
-- A non-empty selected-target `dependencies.runtime` map replaces the global runtime map as a group; it is not merged per Formula. If the target omits its entire `dependencies` scope, the global map is inherited. Both scopes are validated fail-closed.
-- Every selected platform must have at least one applicable runtime root.
-- `dependencies.runtime` has no declaration-order semantics. For each platform, applicable roots are sorted lexicographically by canonical requested Formula ID. This canonical order is recorded in resolution evidence and drives the default generated `PATH`; installation uses a separate deterministic topological order so dependencies precede dependents. Requested Formulae that expose the same executable basename fail instead of silently shadowing one another.
-- A multi-platform build fails if the same canonical requested root resolves to different package versions on different platforms. Architecture-filtered roots that appear on only one platform are independent.
+## Build for both architectures
 
-## Automatic V2 runtime minimization
+The spec contains one exact platform-child frontend reference, so build each
+platform with its matching child reference. Push the two resulting manifests
+and assemble an OCI index from those tested digests. Do not use one platform's
+child reference for the other platform, and do not re-resolve packages during
+index assembly.
 
-A release-bound V2 frontend resolves, verifies, and installs the complete
-dependency closure before automatically applying conservative minimization
-during final runtime assembly. There is no Dalec extension or build argument
-that disables, selects, or broadens this behavior. V1 retains its legacy
-runtime assembly behavior.
+This is an operator workflow rather than a one-command `--platform` shortcut.
+The repository's release workflow follows the same pattern: per-platform build
+and test first, controlled index assembly second. See
+[Release requirements](release.md#release-requirements) for the complete
+promotion contract.
 
-Requested Formulae are excluded from the added minimization; the existing
-baseline removal of package-manager state, receipts, and Formula source still
-applies. Only transitive `homebrew/core` Formulae are eligible, and only these
-six release-policy-enumerated path classes may be removed:
+## Automatic runtime minimization
 
-- headers rooted at `include/`;
-- manual and Info trees rooted at `share/man/` and `share/info/`;
-- build metadata at exact pkg-config, CMake, and aclocal locations;
-- an exact Formula- and path-specific Python standard-library test subtree
-  authorized by the V2 policy. A directory merely named `test` elsewhere does
-  not qualify;
-- shell completions under `share/bash-completion/completions/`,
-  `share/fish/vendor_completions.d/`, and `share/zsh/site-functions/`; and
-- static `.a` archives below `lib/`, except in protected runtime-data
-  locations such as site-packages, `ensurepip`, `venv`, plugins, and
-  `node_modules`.
+This section describes the policy in the current source tree and the next
+release built from it. The policy is immutable within each published version,
+so an older release retains its own documented behavior instead of silently
+adopting new rules.
 
-The minimizer does not prune shared libraries, plugins, `libexec`,
-configuration, locales, Python site-packages, `ensurepip`, `venv`, any
-Formula `share/doc/` content, or static archives in protected runtime-data
-locations. Legal and license text is also retained.
+The policy in the current source tree resolves, verifies, and installs the
+complete runtime closure before applying conservative minimization. No spec field or
+build argument disables, selects, or broadens it.
 
-The release policy has one additional development-payload retention rule. Only
-an exact release-bound V2 Formula policy capability can activate compiler or
-MPI development retention. For a capability-authorized Formula, headers, build
-metadata, and static archives remain across its verified dependency closure.
-Unsigned OCI executable-path annotations cannot activate this rule. This does
-not disable the other pruning classes, and unrelated Formulae remain eligible
-for all six.
+Requested Formulae are the retention boundary: their package payload is not
+subject to this added minimization. Only transitive `homebrew/core` Formulae are
+eligible, and only these policy-enumerated classes may be removed:
 
-The added classes do not apply to non-core Formulae. If an exact path
-classification is missing or a retained path or link would become invalid,
-assembly fails or retains the content; it does not infer that the content is
-safe to remove. Resolution, inventory, prune, and runtime-manifest evidence
-bind the release pruning policy and exact decisions.
+- headers under `include/`;
+- manual and Info trees under `share/man/` and `share/info/`;
+- exact pkg-config, CMake, and aclocal build-metadata locations;
+- exact Formula- and path-specific Python standard-library test subtrees;
+- shell completions in the known Bash, Fish, and Zsh locations; and
+- static `.a` archives below bounded `lib/` locations, excluding protected
+  runtime-data trees.
 
-Target-specific dependencies, image settings, and tests belong to the fixed
-`homebrew` target alongside its child-routing metadata:
+The minimizer keeps shared libraries, plugins, `libexec`, configuration,
+locales, Python site-packages, `ensurepip`, `venv`, `node_modules`, Formula
+`share/doc` content, legal and license text, and static archives in protected
+runtime-data locations.
 
-```yaml
-targets:
-  homebrew:
-    frontend:
-      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>
-    dependencies:
-      runtime:
-        hello: {}
-```
-
-Select it through upstream Dalec's full `homebrew/image` target:
-
-```console
-DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>
-
-docker buildx build \
-  --build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX" \
-  --build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" \
-  --build-context "dalec-homebrew-metadata=$DALEC_HOMEBREW_METADATA_BUNDLE" \
-  --target homebrew/image \
-  --platform linux/amd64 \
-  --file spec.yaml \
-  --tag hello-runtime:production \
-  --load \
-  .
-```
+An exact release-policy capability may preserve compiler or MPI development
+payload across its verified dependency closure. Unsigned OCI annotations cannot
+activate that retention. If a path cannot be classified safely, or pruning
+would break a retained link, the build fails or keeps the content rather than
+guessing.
 
 ## Configure the image
 
-The supported global and selected-target Dalec image fields are:
+A complete image configuration looks like this:
+
+```yaml
+image:
+  entrypoint: /home/linuxbrew/.linuxbrew/bin/curl
+  cmd: --version
+  env:
+    - NO_COLOR=1
+  labels:
+    org.opencontainers.image.title: curl runtime
+  volumes:
+    /data: {}
+  working_dir: /home/linuxbrew
+  stop_signal: SIGTERM
+  user: linuxbrew
+```
+
+The supported global and selected-target image fields are:
 
 - `entrypoint`
 - `cmd`
@@ -219,24 +429,37 @@ The supported global and selected-target Dalec image fields are:
 - `stop_signal`
 - `user`
 
-Selected-target image settings overlay the global image configuration: non-empty scalar fields override, `env` entries are appended and resolved by variable name, and `labels` and `volumes` are merged by key.
+Selected-target settings overlay global settings. Non-empty scalar fields
+override; `env` entries are appended and resolved by variable name; labels and
+volumes are merged by key.
 
-`entrypoint` and `cmd` are strings split with shell-style quoting into OCI argument arrays; they are not implicitly wrapped in a shell. `env` entries use `NAME=value` form. The frontend generates a deterministic Homebrew-aware `PATH`; an explicit image `PATH` overrides it and must not be empty.
+`entrypoint` and `cmd` are strings split with shell-style quoting into OCI
+argument arrays. They are not implicitly wrapped in a shell. Environment values
+use `NAME=value` form. The frontend generates a deterministic Homebrew-aware
+`PATH`; an explicit `PATH` overrides it and must not be empty.
 
-The default runtime user is `linuxbrew` (`1000:1000`) and the default working directory is `/home/linuxbrew`. The accepted named identities are `linuxbrew` and `linuxbrew:linuxbrew`. The frontend rejects `root`, UID or GID zero, malformed identities, and other named users. An explicit numeric non-root identity must include both UID and GID, for example `1234:1235`.
+The default runtime user is `linuxbrew` (`1000:1000`) and the default working
+directory is `/home/linuxbrew`. Accepted named values are `linuxbrew` and
+`linuxbrew:linuxbrew`. `root`, UID or GID zero, malformed identities, and other
+named users are rejected. A numeric non-root identity must include UID and GID,
+for example `1234:1235`.
 
-Volume paths must be absolute and clean. A volume may not equal, contain, or be contained by any protected runtime path:
+Volume paths must be absolute and clean. A volume cannot overlap these protected
+runtime paths:
 
 - `/home/linuxbrew/.linuxbrew`
 - `/usr/share/dalec-homebrew`
 - `/etc/passwd`
 - `/etc/group`
 
-Runtime code and configuration are normalized to root ownership and non-writable modes. For every Formula in the verified closure, the policy creates one Homebrew-prefix writable state subtree for the final runtime identity: `/home/linuxbrew/.linuxbrew/var/<canonical-formula>`. Broader writable Homebrew-prefix paths are not supported.
+Runtime code and configuration are root-owned and non-writable. Each Formula in
+the verified closure receives one writable state directory for the runtime
+identity: `/home/linuxbrew/.linuxbrew/var/<canonical-formula>`.
 
 ## Add runtime tests
 
-Global tests and selected-target tests are appended and run during the image build. Each Dalec test supports:
+Tests run while the image is built. This example checks command output and the
+final filesystem:
 
 ```yaml
 tests:
@@ -266,57 +489,147 @@ tests:
         not_exist: true
 ```
 
-Supported test fields are `name`, `dir`, `env`, `steps`, and `files`. Each step supports `command`, `env`, `stdin`, `stdout`, and `stderr`. Output and file-content checks support `equals`, `contains`, `matches`, `starts_with`, `ends_with`, and `empty`; every configured assertion is evaluated. File checks additionally support `permissions`, `is_dir`, `not_exist`, `no_follow`, and `link_target`. Use `empty: true` to assert empty output. `not_exist` cannot be combined with positive file assertions.
+Supported test fields are `name`, `dir`, `env`, `steps`, and `files`. Each step
+supports `command`, `env`, `stdin`, `stdout`, and `stderr`. Output and file
+content checks support `equals`, `contains`, `matches`, `starts_with`,
+`ends_with`, and `empty`; all configured assertions run. File checks also
+support `permissions`, `is_dir`, `not_exist`, `no_follow`, and `link_target`.
+`not_exist` cannot be combined with a positive assertion.
 
-Tests have these execution semantics:
+Execution rules:
 
-- Each test starts from its own isolated copy of the final pruned filesystem. Steps within one test run sequentially and share their mutations; test mutations never enter the exported image or another test.
-- Commands run as `/bin/sh -c`, must exit zero, and stop that test on the first failure. File checks run after all steps.
-- Commands use the final image user and image environment. Test-level environment entries override image values, and step-level entries override test values. `dir` overrides the final image working directory for commands.
-- Networking is disabled. Test mounts and source fetching are rejected rather than ignored.
-- Each step has a 10-minute timeout, command output is bounded to 16 MiB per stream, and file-content assertions are bounded to 16 MiB per file. The frontend requests a 2 GiB memory limit and two-CPU quota for each test execution.
+- Every test starts from an isolated copy of the final, minimized filesystem.
+  Steps in one test share mutations, but those mutations never enter the
+  exported image or another test.
+- Commands run through `/bin/sh -c`, use the final non-root user, environment,
+  and working directory, and must exit zero.
+- Test-level environment values override image values; step-level values
+  override test values. `dir` overrides the image working directory.
+- Networking, source fetching, and test mounts are disabled.
+- Each step has a 10-minute timeout. Command output and file-content assertions
+  are bounded to 16 MiB per stream or file. The frontend requests a 2 GiB
+  memory limit and two-CPU quota for each test execution.
 
-See the files under [`../examples/`](../examples/) for command output, filesystem, plugin, locale, generated-data, and stateful workload checks.
+See [`../examples/`](../examples/) for command-output, filesystem, plugin,
+locale, generated-data, and stateful workload examples. `live-*.yaml` files are
+base fixtures for `scripts/live-test.sh`; the helper injects release routing,
+so those files are not standalone copy-and-paste builds. `hello.yaml` and
+`forwarded-hello.yaml` are templates whose digest placeholders must be filled
+from verified release data.
 
-## Supported Dalec contract
+## Supported Dalec fields
 
-Package metadata fields such as `name`, `description`, `website`, `version`, `revision`, and `license` may be supplied, but they are optional and do not drive dependency resolution for this runtime-only frontend.
+Package metadata such as `name`, `description`, `website`, `version`,
+`revision`, and `license` may be supplied. This runtime-only frontend accepts it
+and commits it to the effective-input digest, but it does not project those
+fields into OCI image configuration or Homebrew dependency resolution.
 
-V1 behavior is limited to core-only global and selected-target `dependencies.runtime`, the image fields listed above, tests without mounts, and legacy runtime assembly. V2 retains the Dalec input contract, adds public default GitHub taps addressed only as `owner/tap/formula`, and automatically applies the release-bound runtime minimization described above; runtime input still cannot provide repository URLs, keys, endpoint configuration, or pruning rules. Unknown non-extension Dalec fields are rejected by the strict decoder. The following known Dalec features are also rejected:
+The supported contract is limited to runtime dependencies, the image fields
+listed above, the test subset above, public default GitHub taps, and automatic
+runtime minimization. Unknown non-extension fields are rejected. These known
+Dalec features are also unsupported:
 
-- build, recommended, test, or sysext dependencies
-- extra package repositories
-- sources and patches
-- build steps, build environment, build mounts, caches, or build network configuration
-- package artifacts or package configuration
-- `provides`, `replaces`, or `conflicts`
-- frontend forwarding outside the exact digest-pinned `homebrew/image` route, including non-empty `cmdline`, nested forwarding, and unknown child routes
-- image base overrides or post-install image steps
-- casks, private or authenticated taps, arbitrary Git remotes, general source builds, user-defined archive recipes, historical versions, version ranges, and bottles whose embedded Formula requires unstaged tap-local Ruby helper files
-- test mounts or networked tests
+- build, recommended, test, or sysext dependencies;
+- extra package repositories;
+- sources, patches, build steps, build mounts, caches, or build-network
+  configuration;
+- package artifacts or package configuration;
+- `provides`, `replaces`, or `conflicts`;
+- frontend forwarding outside the exact `homebrew/image` route;
+- custom image bases or post-install image steps;
+- casks, private taps, arbitrary Git remotes, general source builds,
+  user-defined archive recipes, historical versions, or version ranges; and
+- test mounts or networked tests.
 
-Unsupported or malformed Dalec document fields and invalid target or child-routing metadata are rejected before Homebrew metadata or bottle registry access. The child authenticates the `dalec-homebrew` gateway source, not the identity of the upstream dispatcher; trusted releases bind the parent externally through the checked-in pin and signed provenance.
+Malformed or unsupported input fails before Homebrew metadata or package
+registry access.
 
 ## Runtime contents and evidence
 
-The output contains the selected Formulae, their verified runtime closure, a conservative Ubuntu Noble runtime base, and these machine-readable evidence files under `/usr/share/dalec-homebrew`:
+The output contains the selected Formulae, their verified runtime closure, and
+a conservative Ubuntu Noble runtime base. Machine-readable evidence is stored
+under `/usr/share/dalec-homebrew`:
 
 | File | Purpose |
 | --- | --- |
 | `manifest.json` | Final runtime manifest and resolution binding |
-| `resolution.json` | Authenticated metadata, exact bottle or prebuilt/derived artifact identities, dependency closure, and component identities |
-| `runtime-inventory.json` | Selected runtime paths, ownership, modes, digests, and package attribution |
-| `prune-manifest.json` | Versioned record of the runtime pruning decision |
+| `resolution.json` | Authenticated metadata, exact package identities, dependency closure, and component identities |
+| `runtime-inventory.json` | Runtime paths, ownership, modes, digests, and package attribution |
+| `prune-manifest.json` | The runtime minimization decision |
 | `sbom.spdx.json` | SPDX 2.3 software bill of materials |
-| `materialization.json` / `materialization-v2.json` | Offline installation and per-artifact V2 preparation/install evidence, including prebuilt derivation when selected |
-| `runtime-base-packages.tsv` | Chisel package versions, architectures, selected regular payload bytes, and verified source `.deb` SHA-256 values |
-| `runtime-base-artifacts.tsv` | Deliberate non-package files included in the runtime base |
-| `runtime-base-chisel.manifest.wall` | Chisel's authoritative path and slice manifest |
+| `materialization-v2.json` | Offline installation and per-artifact verification evidence; the suffix is an internal schema generation |
+| `runtime-base-packages.tsv` | Chisel package versions, architectures, selected bytes, and source package digests |
+| `runtime-base-artifacts.tsv` | Deliberate non-package files in the runtime base |
+| `runtime-base-chisel.manifest.wall` | Chisel's path and slice manifest |
 
-These nine files are embedded in each platform image; they are not signed OCI attestations. The release workflow signs the reusable component tuple, publishes component SBOM, provenance, and vulnerability evidence, and preserves each integration image's resolution, inventory, prune, materialization, base, and embedded SBOM files in checksum-authenticated runtime-evidence archives.
+Some evidence filenames and `schema_version` values contain numeric suffixes
+for machine-format compatibility. They are not user-selectable product modes;
+the current frontend writes the coherent set it expects.
 
-The base retains common runtime facilities such as CA trust, Bash and Dash, core command-line utilities, NSS and DNS support, timezone data, glibc conversion data, and common C and C++ libraries.
+These files are embedded evidence, not signed OCI attestations. The release
+workflow separately publishes signed component provenance, SBOMs, vulnerability
+reports, and checksum-authenticated runtime-evidence archives.
 
-The final image does **not** contain `apt`, `dpkg`, Chisel, `brew`, the Homebrew repository or download cache, installer logs, receipts, embedded Formula source, or materializer and test tooling.
+Copy evidence out without assuming the minimal image contains `jq`:
 
-For the verification and assembly flow, see [`architecture.md`](architecture.md). For release trust and digest binding, see [`release.md`](release.md) and the repository [`SECURITY.md`](../SECURITY.md).
+```console
+set -euo pipefail
+cid="$(docker create hello-homebrew:1.0.0)"
+docker cp "$cid:/usr/share/dalec-homebrew/manifest.json" ./manifest.json
+docker cp "$cid:/usr/share/dalec-homebrew/sbom.spdx.json" ./sbom.spdx.json
+docker rm "$cid"
+```
+
+The base includes CA trust, Bash and Dash, common command-line utilities, NSS
+and DNS support, timezone data, glibc conversion data, and common C/C++ runtime
+libraries. It does **not** include `apt`, `dpkg`, Chisel, `brew`, Homebrew's
+repository or cache, receipts, Formula source, materializer tools, or test
+runners.
+
+## Troubleshooting
+
+### The frontend reports a metadata bundle error
+
+Use all metadata files from the same release, preserve the exact three context
+filenames, pass the recorded manifest digest, and use a release with a fresh
+snapshot. If none exists, wait for a new release rather than bypassing the
+limit. Release-bound frontends do not accept an omitted,
+partial, substituted, or stale bundle.
+
+### The child frontend or index does not match
+
+Read both references from one verified `components.json`. Select the child for
+the requested architecture and pass the manifest's frontend index through
+`DALEC_HOMEBREW_FRONTEND_INDEX_REF`. A tag, the index used as a child, a child
+from another platform, or a mixed release tuple fails closed.
+
+### The build says the target or source is invalid
+
+Use upstream Dalec as the syntax frontend, keep the exact
+`targets.homebrew.frontend.image` mapping, and build `--target homebrew/image`.
+Do not invoke the child directly or add frontend `cmdline` values.
+
+### A package or version is unavailable
+
+Check the current Formula name on
+[formulae.brew.sh](https://formulae.brew.sh/). Use `owner/tap/formula` for a
+public GitHub tap. Only stable Formulae in the authenticated snapshot, exact versioned Formula
+names present in that snapshot, supported bottles, and policy-authorized prebuilt executables work.
+There is no source-build or historical-version fallback.
+
+### A runtime test fails on networking
+
+This is expected if the test contacts an external service. Tests run on the
+final filesystem with networking disabled. Replace the check with an offline
+command or filesystem assertion.
+
+### A command is missing from `PATH`
+
+Confirm the requested Formula actually publishes that executable. If multiple
+requested Formulae expose the same basename, the build fails rather than
+choosing precedence. An explicit image `PATH` replaces the generated one, so it
+must include every directory you need.
+
+For the trust boundaries behind these errors, read the
+[security model](../SECURITY.md). For the implementation flow, read the
+[architecture guide](architecture.md).

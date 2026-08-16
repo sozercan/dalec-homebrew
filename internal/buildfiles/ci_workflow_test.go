@@ -1,6 +1,7 @@
 package buildfiles
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -167,10 +168,47 @@ func TestNonCoreE2ESpecContainsQualifiedAndCoreRoots(t *testing.T) {
 	}
 }
 
-func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
+func TestExamplesUseReleaseApprovedDalecFrontend(t *testing.T) {
+	root := repositoryRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "release", "dalec-frontend.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pin struct {
+		Index  string `json:"index"`
+		Module struct {
+			Version string `json:"version"`
+		} `json:"module"`
+	}
+	if err := json.Unmarshal(data, &pin); err != nil {
+		t.Fatal(err)
+	}
+	if pin.Index == "" || pin.Module.Version == "" {
+		t.Fatal("release Dalec frontend pin is incomplete")
+	}
+
+	matches, err := filepath.Glob(filepath.Join(root, "examples", "*.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) == 0 {
+		t.Fatal("no YAML examples found")
+	}
+	want := "# syntax=" + pin.Index + "\n"
+	for _, path := range matches {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(string(contents), want) {
+			t.Errorf("%s must use release-approved upstream Dalec %s (%s)", filepath.Base(path), pin.Module.Version, pin.Index)
+		}
+	}
+}
+
+func TestPublicBuildDocsAuthenticateReleaseInputs(t *testing.T) {
 	root := repositoryRoot(t)
 	const (
-		indexAssignment      = "DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>"
 		indexBuildArg        = `--build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX"`
 		metadataBuildArg     = `--build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST"`
 		metadataBuildContext = `--build-context "dalec-homebrew-metadata=$DALEC_HOMEBREW_METADATA_BUNDLE"`
@@ -187,17 +225,49 @@ func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
 		}
 		text := string(data)
 		for _, want := range []string{
+			"components.json",
+			"inputs.json",
 			"metadata-bundle-manifest.json",
 			"metadata-formula.jws.json",
 			"metadata-migrations.jws.json",
 			"metadata-bundle.digest",
+			"SHA256SUMS.bundle",
+			"cosign verify-blob",
+			`--certificate-identity-regexp '^https://github\.com/sozercan/dalec-homebrew/\.github/workflows/release\.yml@refs/heads/main$'`,
+			"min >= (now - 7 * 24 * 60 * 60)",
 			`DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json`,
 			`DALEC_HOMEBREW_METADATA_BUNDLE/formula.jws.json`,
 			`DALEC_HOMEBREW_METADATA_BUNDLE/formula_tap_migrations.jws.json`,
-			`test "$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" = "sha256:$(sha256sum "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json" | awk '{print $1}')"`,
+			`test "$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" = "sha256:$MANIFEST_SHA256"`,
+			`jq -er '.frontend.index'`,
+			`.frontend.platforms[]`,
+			`DALEC_SYNTAX="$(jq -er '.dalec_frontend.index'`,
+			`DALEC_FRONTEND_VERSION="$(jq -er '.dalec_frontend.module.version'`,
+			`# syntax=$DALEC_SYNTAX`,
 		} {
 			if !strings.Contains(text, want) {
-				t.Errorf("%s metadata bundle preparation is missing %q", relative, want)
+				t.Errorf("%s authenticated release preparation is missing %q", relative, want)
+			}
+		}
+		for _, forbidden := range []string{
+			"ghcr.io/sozercan/dalec-homebrew:latest",
+			"DALEC_SYNTAX=ghcr.io/project-dalec/dalec/frontend:latest",
+		} {
+			if strings.Contains(text, forbidden) {
+				t.Errorf("%s must not use mutable frontend assignment %q", relative, forbidden)
+			}
+		}
+
+		for _, tail := range strings.Split(text, "```console")[1:] {
+			block, _, ok := strings.Cut(tail, "```")
+			if !ok {
+				continue
+			}
+			for _, command := range []string{"curl -fL", "cosign verify-blob", "sha256sum --check", "docker buildx build"} {
+				position := strings.Index(block, command)
+				if position >= 0 && !strings.Contains(block[:position], "set -euo pipefail") {
+					t.Errorf("%s command %q can continue after an authentication or input failure:\n%s", relative, command, block)
+				}
 			}
 		}
 
@@ -210,18 +280,17 @@ func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
 			found++
 			for _, want := range []string{
 				"--target homebrew/image",
-				indexAssignment,
 				indexBuildArg,
 				metadataBuildArg,
 				metadataBuildContext,
 			} {
 				if !strings.Contains(block, want) {
-					t.Errorf("%s production command is missing %q:\n%s", relative, want, block)
+					t.Errorf("%s build command is missing %q:\n%s", relative, want, block)
 				}
 			}
 		}
-		if found != 2 {
-			t.Errorf("%s has %d docker buildx build commands, want 2", relative, found)
+		if found != 1 {
+			t.Errorf("%s has %d docker buildx build commands, want 1", relative, found)
 		}
 	}
 
