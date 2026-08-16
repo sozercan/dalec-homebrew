@@ -2,6 +2,7 @@ package runtimefs
 
 import (
 	"maps"
+	"strings"
 	"testing"
 
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
@@ -623,6 +624,7 @@ func TestMinimalRuntimeProfilePropagatesBoundedAliasesAndRevalidatesLinks(t *tes
 func TestMinimalRuntimeProfilePreservesRuntimeBearingPathsBeforeEveryPruneClass(t *testing.T) {
 	nodes := map[string]resolution.Node{
 		"dep":         minimalCoreNode("dep", "1"),
+		"perl":        minimalCoreNode("perl", "1"),
 		"pcre2":       minimalCoreNode("pcre2", "1"),
 		"python@3.14": minimalCoreNode("python@3.14", "3.14.6"),
 	}
@@ -631,6 +633,8 @@ func TestMinimalRuntimeProfilePreservesRuntimeBearingPathsBeforeEveryPruneClass(
 		"Cellar/dep/1/include/LICENCE.md",
 		"Cellar/dep/1/include/GPL-2.0",
 		"Cellar/dep/1/share/man/man1/PATENTS.1",
+		"Cellar/perl/1/share/man/man1/perlgpl.1",
+		"Cellar/perl/1/share/man/man1/perlartistic.1",
 		"Cellar/pcre2/1/share/doc/pcre2/LICENCE.md",
 		"Cellar/dep/1/lib/cmake/dep/UNLICENSE",
 		"Cellar/dep/1/lib/cmake/dep/THIRD_PARTY_NOTICES",
@@ -660,6 +664,8 @@ func TestMinimalRuntimeProfilePreservesRuntimeBearingPathsBeforeEveryPruneClass(
 	for _, rel := range retained {
 		pkg := "dep"
 		switch {
+		case strings.HasPrefix(rel, "Cellar/perl/"):
+			pkg = "perl"
 		case rel == "Cellar/pcre2/1/share/doc/pcre2/LICENCE.md":
 			pkg = "pcre2"
 		case rel == "Cellar/python@3.14/3.14.6/lib/python3.14/test/UNLICENCE.txt",
@@ -694,6 +700,8 @@ func TestLooksLikeLegalTextRecognizesVersionedNamesWithoutPrefixFalsePositives(t
 		"third-party-licences.txt",
 		"GPL-2.0",
 		"Apache-2.0.txt",
+		"perlgpl.1",
+		"perlartistic.1",
 	} {
 		if !looksLikeLegalText(name) {
 			t.Errorf("%q was not recognized as legal text", name)

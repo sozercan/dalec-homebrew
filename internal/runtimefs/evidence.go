@@ -708,6 +708,9 @@ func looksLikeLegalText(filename string) bool {
 		"third_party_notice", "third_party_notices", "third-party-notice", "third-party-notices", "thirdpartynotice", "thirdpartynotices",
 		"third_party_license", "third_party_licenses", "third-party-license", "third-party-licenses", "thirdpartylicense", "thirdpartylicenses",
 		"third_party_licence", "third_party_licences", "third-party-licence", "third-party-licences", "thirdpartylicence", "thirdpartylicences",
+		// Perl installs its GPL and Artistic license texts as perlgpl(1) and
+		// perlartistic(1), outside a conventional license directory.
+		"perlgpl", "perlartistic",
 		// Common SPDX license-family filenames may appear outside a LICENSES
 		// directory, for example GPL-2.0 or Apache-2.0.
 		"agpl", "apache", "artistic", "bsd", "bsl", "cc0", "cddl", "epl", "eupl", "gpl", "isc", "lgpl", "mit", "mpl", "ofl", "openssl", "unicode", "wtfpl", "zlib", "zpl",
