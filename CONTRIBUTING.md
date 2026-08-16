@@ -171,7 +171,7 @@ Use `DALEC_HOMEBREW_LIVE_SPEC` to run the same helper with a focused example:
 - [`examples/live-graphviz.yaml`](examples/live-graphviz.yaml) — plugins and generated shared runtime indexes
 
 Runtime-minimization changes require focused V2 coverage. Verify that requested
-Formulae remain the retention boundary, that every removed path belongs to an
+Formulae remain the retention boundary, that every removed path belongs to
 exactly one of the six documented classes, and that retained shared libraries,
 plugins, `libexec`, configuration, locales, Python site-packages, `ensurepip`,
 `venv`, Formula `share/doc` content, and static archives in protected

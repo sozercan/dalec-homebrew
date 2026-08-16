@@ -116,6 +116,36 @@ func TestToolchainDevelopmentClosureUsesExactReleasePolicy(t *testing.T) {
 	}
 }
 
+func TestNormalizePythonStdlibTestRootsCachesExactReleasePolicy(t *testing.T) {
+	allowlist := normalizedAllowlist{
+		PruningProfile: policyv2.RuntimeProfileMinimalV1,
+		PruningRules:   policyv2.MinimalV1RuntimePruneRules(),
+	}
+	nodes := map[string]resolution.Node{
+		"python@3.13": minimalCoreNode("python@3.13", "3.13.12"),
+		"python@3.14": minimalCoreNode("python@3.14", "3.14.6"),
+		"python@3.15": minimalCoreNode("python@3.15", "3.15.0"),
+		"spoof": {
+			Name:            "python@3.14",
+			FullName:        "acme/tools/python@3.14",
+			PolicyFormulaID: "acme/tools/python@3.14",
+			PkgVersion:      "3.14.6",
+		},
+	}
+
+	got, err := normalizePythonStdlibTestRoots(nodes, allowlist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"python@3.13": "lib/python3.13/test",
+		"python@3.14": "lib/python3.14/test",
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("cached Python stdlib test roots = %#v, want %#v", got, want)
+	}
+}
+
 func TestPruneMinimalRuntimeProfileClasses(t *testing.T) {
 	nodes := map[string]resolution.Node{
 		"clean":       minimalCoreNode("clean", "1"),
@@ -825,6 +855,11 @@ func minimalPolicy(nodes map[string]resolution.Node, requested map[string]struct
 			PruningRules:   rules,
 		},
 	}
+	pythonTests, err := normalizePythonStdlibTestRoots(nodes, policy.allowlist)
+	if err != nil {
+		panic(err)
+	}
+	policy.pythonTests = pythonTests
 	policy.toolchainDev = toolchainDevelopmentClosure(nodes, policy.allowlist)
 	return policy
 }

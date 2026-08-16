@@ -821,7 +821,7 @@ func minimalRuntimePathClass(rel, packageName string, policy *normalizedPolicy) 
 			return PruneRuntimeBuild, sub
 		}
 	}
-	if pythonStdlibTestPath(node, sub) {
+	if pythonStdlibTestPath(pkg, sub, policy) {
 		return PruneRuntimeTests, sub
 	}
 	if shellCompletionRuntimePath(sub) {
@@ -916,25 +916,23 @@ func minimalRuntimeAliasRetainsTarget(rel, _ string, policy *normalizedPolicy) b
 	return requested
 }
 
-func pythonStdlibTestPath(node resolution.Node, sub string) bool {
-	testRoot, ok := pythonStdlibTestRoot(node)
+func pythonStdlibTestPath(packageName, sub string, policy *normalizedPolicy) bool {
+	if policy == nil {
+		return false
+	}
+	testRoot, ok := policy.pythonTests[packageName]
 	return ok && isWithin(sub, testRoot)
 }
 
-func pythonStdlibTestRoot(node resolution.Node) (string, bool) {
-	var minor string
-	switch node.PolicyFormulaID {
+func pythonStdlibTestRootForFormulaID(formulaID string) (string, bool) {
+	switch formulaID {
 	case "homebrew/core/python@3.13":
-		minor = "3.13"
+		return "lib/python3.13/test", true
 	case "homebrew/core/python@3.14":
-		minor = "3.14"
+		return "lib/python3.14/test", true
 	default:
 		return "", false
 	}
-	if !policyv2.HasEmbeddedRule(node.PolicyFormulaID, policyv2.RuntimePrunePythonTestsV1) {
-		return "", false
-	}
-	return "lib/python" + minor + "/test", true
 }
 
 func minimalRuntimeAliasContentMatches(alias, target *sourceEntry) bool {
@@ -976,11 +974,7 @@ func pythonStdlibTestAliasRuntimePath(rel, packageName string, policy *normalize
 	if policy == nil {
 		return false
 	}
-	node, ok := policy.nodes[packageName]
-	if !ok {
-		return false
-	}
-	testRoot, ok := pythonStdlibTestRoot(node)
+	testRoot, ok := policy.pythonTests[packageName]
 	return ok && isWithin(rel, testRoot)
 }
 

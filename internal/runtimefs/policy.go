@@ -42,6 +42,7 @@ type normalizedPolicy struct {
 	digest        string
 	nodes         map[string]resolution.Node
 	requested     map[string]struct{}
+	pythonTests   map[string]string
 	toolchainDev  map[string]struct{}
 	writable      map[string]struct{}
 }
@@ -104,6 +105,10 @@ func normalizeOptionsUnchecked(record *resolution.Record, opts Options) (*normal
 	if err != nil {
 		return nil, err
 	}
+	pythonTests, err := normalizePythonStdlibTestRoots(nodes, allowlist)
+	if err != nil {
+		return nil, err
+	}
 
 	writable := make(map[string]struct{})
 	for _, raw := range record.Runtime.WritablePaths {
@@ -144,9 +149,30 @@ func normalizeOptionsUnchecked(record *resolution.Record, opts Options) (*normal
 		digest:        policyDigest,
 		nodes:         nodes,
 		requested:     requested,
+		pythonTests:   pythonTests,
 		toolchainDev:  toolchainDevelopmentClosure(nodes, allowlist),
 		writable:      writable,
 	}, nil
+}
+
+func normalizePythonStdlibTestRoots(nodes map[string]resolution.Node, allowlist normalizedAllowlist) (map[string]string, error) {
+	roots := make(map[string]string)
+	if allowlist.PruningProfile != policyv2.RuntimeProfileMinimalV1 || !slices.Contains(allowlist.PruningRules, policyv2.RuntimePrunePythonTestsV1) {
+		return roots, nil
+	}
+
+	embeddedPolicy, err := policyv2.Load()
+	if err != nil {
+		return nil, runtimeError(CodeInvalidOptions, "", "load embedded V2 policy: %v", err)
+	}
+	for name, node := range nodes {
+		root, ok := pythonStdlibTestRootForFormulaID(node.PolicyFormulaID)
+		if !ok || !embeddedPolicy.HasRule(node.PolicyFormulaID, policyv2.RuntimePrunePythonTestsV1) {
+			continue
+		}
+		roots[name] = root
+	}
+	return roots, nil
 }
 
 func toolchainDevelopmentClosure(nodes map[string]resolution.Node, allowlist normalizedAllowlist) map[string]struct{} {

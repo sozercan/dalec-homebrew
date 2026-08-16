@@ -312,6 +312,11 @@ func inventoryVerifierPolicy(nodes []resolution.Node, minimal bool, requested ..
 		nodes:         byName,
 		requested:     requestedSet,
 	}
+	pythonTests, err := normalizePythonStdlibTestRoots(byName, allowlist)
+	if err != nil {
+		panic(err)
+	}
+	policy.pythonTests = pythonTests
 	policy.toolchainDev = toolchainDevelopmentClosure(byName, allowlist)
 	return policy
 }
