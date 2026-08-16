@@ -839,8 +839,15 @@ func exactCoreRuntimeProfileNode(node resolution.Node) bool {
 }
 
 func pathContainsLegalText(rel string) bool {
-	for _, component := range strings.Split(rel, "/") {
-		if looksLikeLegalText(component) {
+	components := strings.Split(rel, "/")
+	for index, component := range components {
+		if index == len(components)-1 {
+			if looksLikeLegalText(component) {
+				return true
+			}
+			continue
+		}
+		if looksLikeLegalContainer(component) {
 			return true
 		}
 	}

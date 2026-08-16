@@ -660,7 +660,15 @@ func TestMinimalRuntimeProfilePreservesRuntimeBearingPathsBeforeEveryPruneClass(
 		"Cellar/dep/1/share/zsh/site-functions/venv/_dep",
 		"Cellar/dep/1/lib/libexec/runtime.a",
 	}
-	entries := make([]*sourceEntry, 0, len(retained)+1)
+	pruned := []struct {
+		rel    string
+		reason PruneReason
+	}{
+		{"Cellar/dep/1/include/openssl/ssl.h", PruneRuntimeHeaders},
+		{"Cellar/dep/1/lib/pkgconfig/openssl.pc", PruneRuntimeBuild},
+		{"Cellar/dep/1/lib/cmake/zlib/zlib-config.cmake", PruneRuntimeBuild},
+	}
+	entries := make([]*sourceEntry, 0, len(retained)+len(pruned)+1)
 	for _, rel := range retained {
 		pkg := "dep"
 		switch {
@@ -675,6 +683,9 @@ func TestMinimalRuntimeProfilePreservesRuntimeBearingPathsBeforeEveryPruneClass(
 		}
 		entries = append(entries, minimalEntry(rel, pkg, TypeRegular))
 	}
+	for _, item := range pruned {
+		entries = append(entries, minimalEntry(item.rel, "dep", TypeRegular))
+	}
 	noticeRef := "Cellar/dep/1/share/doc/dep/NOTICEREF_notes.md"
 	entries = append(entries, minimalEntry(noticeRef, "dep", TypeRegular))
 
@@ -684,6 +695,9 @@ func TestMinimalRuntimeProfilePreservesRuntimeBearingPathsBeforeEveryPruneClass(
 	}
 	for _, rel := range retained {
 		assertMinimalRetained(t, scan, rel)
+	}
+	for _, item := range pruned {
+		assertMinimalPruned(t, scan, item.rel, item.reason)
 	}
 	assertMinimalRetained(t, scan, noticeRef)
 }
@@ -712,6 +726,9 @@ func TestLooksLikeLegalTextRecognizesVersionedNamesWithoutPrefixFalsePositives(t
 		"LICENSEHEADER",
 		"COPYING3REF",
 		"PATENTED.txt",
+		"zlib.h",
+		"openssl.pc",
+		"zlib-config.cmake",
 	} {
 		if looksLikeLegalText(name) {
 			t.Errorf("%q was recognized as legal text", name)

@@ -695,6 +695,26 @@ func shortHash(value string) string {
 
 func looksLikeLegalText(filename string) bool {
 	base := strings.ToLower(path.Base(filename))
+	if looksLikeLegalContainer(base) {
+		return true
+	}
+	for _, family := range []string{
+		// Perl installs its GPL and Artistic license texts as perlgpl(1) and
+		// perlartistic(1), outside a conventional license directory.
+		"perlgpl", "perlartistic",
+		// Common SPDX license-family filenames may appear outside a LICENSES
+		// directory, for example GPL-2.0 or Apache-2.0.
+		"agpl", "apache", "artistic", "bsd", "bsl", "cc0", "cddl", "epl", "eupl", "gpl", "isc", "lgpl", "mit", "mpl", "ofl", "openssl", "unicode", "wtfpl", "zlib", "zpl",
+	} {
+		if suffix := strings.TrimPrefix(base, family); suffix != base && legalFamilyTextSuffix(suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeLegalContainer(component string) bool {
+	base := strings.ToLower(path.Base(component))
 	for _, name := range []string{
 		"license", "licenses", "licence", "licences",
 		"copying",
@@ -708,12 +728,6 @@ func looksLikeLegalText(filename string) bool {
 		"third_party_notice", "third_party_notices", "third-party-notice", "third-party-notices", "thirdpartynotice", "thirdpartynotices",
 		"third_party_license", "third_party_licenses", "third-party-license", "third-party-licenses", "thirdpartylicense", "thirdpartylicenses",
 		"third_party_licence", "third_party_licences", "third-party-licence", "third-party-licences", "thirdpartylicence", "thirdpartylicences",
-		// Perl installs its GPL and Artistic license texts as perlgpl(1) and
-		// perlartistic(1), outside a conventional license directory.
-		"perlgpl", "perlartistic",
-		// Common SPDX license-family filenames may appear outside a LICENSES
-		// directory, for example GPL-2.0 or Apache-2.0.
-		"agpl", "apache", "artistic", "bsd", "bsl", "cc0", "cddl", "epl", "eupl", "gpl", "isc", "lgpl", "mit", "mpl", "ofl", "openssl", "unicode", "wtfpl", "zlib", "zpl",
 	} {
 		if base == name {
 			return true
@@ -724,6 +738,49 @@ func looksLikeLegalText(filename string) bool {
 		}
 	}
 	return false
+}
+
+func legalFamilyTextSuffix(suffix string) bool {
+	if suffix == "" {
+		return true
+	}
+	for _, extension := range []string{".txt", ".md", ".markdown", ".rst", ".adoc", ".html", ".htm", ".1", ".3", ".5", ".7"} {
+		if strings.HasSuffix(suffix, extension) {
+			suffix = strings.TrimSuffix(suffix, extension)
+			if suffix == "" {
+				return true
+			}
+			break
+		}
+	}
+	if suffix[0] == '-' || suffix[0] == '_' {
+		suffix = suffix[1:]
+	}
+	for _, prefix := range []string{"license-", "licence-"} {
+		if strings.HasPrefix(suffix, prefix) {
+			suffix = strings.TrimPrefix(suffix, prefix)
+		}
+	}
+	if suffix == "license" || suffix == "licence" {
+		return true
+	}
+	if len(suffix) > 1 && suffix[0] == 'v' {
+		suffix = suffix[1:]
+	}
+	i := 0
+	for i < len(suffix) && ((suffix[i] >= '0' && suffix[i] <= '9') || suffix[i] == '.') {
+		i++
+	}
+	if i == 0 || suffix[0] == '.' || suffix[i-1] == '.' || strings.Contains(suffix[:i], "..") {
+		return false
+	}
+	switch suffix[i:] {
+	case "", "+", "-only", "-or-later", "-clause", "-clause-clear", "-simplified", "-new", "-old",
+		"-with-autoconf-exception", "-with-classpath-exception", "-with-gcc-exception", "-with-llvm-exception":
+		return true
+	default:
+		return false
+	}
 }
 
 func legalTextSuffix(suffix string) bool {
