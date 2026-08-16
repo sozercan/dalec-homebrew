@@ -154,10 +154,12 @@ func scanAndPlan(ctx context.Context, sourceRoot string, record *resolution.Reco
 	if err := attributeEntries(scan, policy); err != nil {
 		return nil, err
 	}
+	// Remove exact optional aliases before deriving minimal-profile link
+	// closures. A link absent from the final image must not retain its target.
+	pruneOptionalDependencyTooling(scan, policy)
 	if err := pruneMinimalRuntimeProfile(scan, policy); err != nil {
 		return nil, err
 	}
-	pruneOptionalDependencyTooling(scan, policy)
 	if err := validateRetainedLinks(scan); err != nil {
 		return nil, err
 	}
@@ -1102,14 +1104,20 @@ func retainMinimalRuntimeAliasTargets(scan *sourceScan, policy *normalizedPolicy
 		if descendants == nil {
 			paths := make([]string, 0, len(scan.entries))
 			for _, candidate := range scan.entries {
+				if !candidate.retain {
+					continue
+				}
 				paths = append(paths, candidate.rel)
 			}
 			descendants = newDescendantPathIndex(paths)
 		}
 		descendants.consumeDescendants(final, func(rel string) {
 			descendant := scan.byPath[rel]
+			if descendant == nil || !descendant.retain {
+				return
+			}
 			delete(candidates, rel)
-			if descendant != nil && descendant.typeName == TypeSymlink {
+			if descendant.typeName == TypeSymlink {
 				queue = append(queue, descendant)
 			}
 		})
@@ -1141,6 +1149,9 @@ func minimalRuntimeLinkRequirements(entries map[string]*sourceEntry, rel string)
 		entry, ok := entries[candidate]
 		if !ok {
 			continue
+		}
+		if !entry.retain {
+			return "", nil, runtimeError(CodeDanglingLink, rel, "required path %q is pruned", candidate)
 		}
 		required = append(required, candidate)
 		if entry.typeName != TypeSymlink {

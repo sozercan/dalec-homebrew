@@ -445,6 +445,36 @@ func TestMinimalRuntimeProfilePropagatesBoundedAliasesAndRevalidatesLinks(t *tes
 		}
 	})
 
+	t.Run("pruned descendant alias cannot retain target", func(t *testing.T) {
+		nodes := map[string]resolution.Node{
+			"app":     minimalCoreNode("app", "1"),
+			"dep":     minimalCoreNode("dep", "1"),
+			"llvm@21": minimalCoreNode("llvm@21", "1"),
+		}
+		policy := minimalPolicy(nodes, nil)
+		target := minimalEntry("Cellar/dep/1/include/api.h", "dep", TypeRegular)
+		bin := minimalEntry("bin", "", TypeDirectory)
+		optional := minimalEntry("bin/scan-build-py", "llvm@21", TypeSymlink)
+		optional.linkResolved = target.rel
+		protected := minimalEntry("Cellar/app/1/libexec/runtime-bin", "app", TypeSymlink)
+		protected.linkResolved = bin.rel
+		scan := minimalScan([]*sourceEntry{target, bin, optional, protected})
+
+		pruneOptionalDependencyTooling(scan, policy)
+		if optional.retain || optional.pruneReason != PruneOptionalTooling {
+			t.Fatalf("optional alias was not pruned: %#v", optional)
+		}
+		if err := pruneMinimalRuntimeProfile(scan, policy); err != nil {
+			t.Fatal(err)
+		}
+		assertMinimalPruned(t, scan, target.rel, PruneRuntimeHeaders)
+		assertMinimalRetained(t, scan, bin.rel)
+		assertMinimalRetained(t, scan, protected.rel)
+		if err := validateRetainedLinks(scan); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	t.Run("requested keg alias retains transitive target", func(t *testing.T) {
 		target := minimalEntry("Cellar/dep/1/include/dep.h", "dep", TypeRegular)
 		alias := minimalEntry("Cellar/requested/1/share/runtime-header", "requested", TypeSymlink)
