@@ -274,15 +274,19 @@ func TestMinimalRuntimeProfilePropagatesBoundedAliasesAndRevalidatesLinks(t *tes
 	})
 
 	t.Run("wrong-minor Python test alias fails closed", func(t *testing.T) {
-		target := minimalEntry("Cellar/python@3.14/3.14.6/lib/python3.14/test/NormalizationTest-3.2.0.txt", "python@3.14", TypeRegular)
-		alias := minimalEntry("lib/python3.15/test/NormalizationTest-3.2.0.txt", "python@3.14", TypeSymlink)
-		alias.linkResolved = target.rel
-		scan := minimalScan([]*sourceEntry{target, alias})
-		if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(map[string]resolution.Node{"python@3.14": minimalCoreNode("python@3.14", "3.14.6")}, nil)); err != nil {
-			t.Fatal(err)
-		}
-		if err := validateRetainedLinks(scan); errorCode(err) != CodeDanglingLink {
-			t.Fatalf("error=%v code=%s", err, errorCode(err))
+		for _, minor := range []string{"3.13", "3.15"} {
+			t.Run(minor, func(t *testing.T) {
+				target := minimalEntry("Cellar/python@3.14/3.14.6/lib/python3.14/test/NormalizationTest-3.2.0.txt", "python@3.14", TypeRegular)
+				alias := minimalEntry("lib/python"+minor+"/test/NormalizationTest-3.2.0.txt", "python@3.14", TypeSymlink)
+				alias.linkResolved = target.rel
+				scan := minimalScan([]*sourceEntry{target, alias})
+				if err := pruneMinimalRuntimeProfile(scan, minimalPolicy(map[string]resolution.Node{"python@3.14": minimalCoreNode("python@3.14", "3.14.6")}, nil)); err != nil {
+					t.Fatal(err)
+				}
+				if err := validateRetainedLinks(scan); errorCode(err) != CodeDanglingLink {
+					t.Fatalf("error=%v code=%s", err, errorCode(err))
+				}
+			})
 		}
 	})
 

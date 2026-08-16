@@ -713,12 +713,16 @@ func planMinimalInventoryProfile(entries []InventoryEntry, policy *normalizedPol
 		if !ok {
 			continue
 		}
+		// A final retained inventory cannot prove byte identity to an omitted
+		// source. Do not infer an alias from its path alone because generated
+		// globals may be legitimate; target-absent replay requires authenticated
+		// source/prune evidence at a broader verification boundary.
 		target, ok := byPath[path.Join("Cellar", node.Name, node.PkgVersion, entry.Path)]
 		if !ok || target.Package != entry.Package {
 			continue
 		}
 		reason, candidate := plan.forbidden[inventoryEntryAttribution(target)]
-		if !candidate || !minimalRuntimeAliasPath(entry.Path, reason) {
+		if !candidate || !minimalRuntimeAliasPath(entry.Path, reason, target.Package, policy) {
 			continue
 		}
 		matches, err := inventoryAliasContentMatches(entry, target)
@@ -744,7 +748,7 @@ func planMinimalInventoryProfile(entries []InventoryEntry, policy *normalizedPol
 		}
 		target := byPath[trace.final]
 		reason, candidate := plan.forbidden[inventoryEntryAttribution(target)]
-		if candidate && entry.Package != "" && entry.Package == target.Package && minimalRuntimeAliasPath(entry.Path, reason) {
+		if candidate && entry.Package != "" && entry.Package == target.Package && minimalRuntimeAliasPath(entry.Path, reason, target.Package, policy) {
 			plan.forbidden[key] = reason
 		}
 	}

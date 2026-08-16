@@ -174,6 +174,31 @@ func TestPlanMinimalInventoryProfileRetainsFormulaShareDocAliasTargets(t *testin
 	}
 }
 
+func TestPlanMinimalInventoryProfileRejectsCrossMinorPythonAlias(t *testing.T) {
+	python := inventoryVerifierNode("python@3.14", "homebrew/core/python@3.14", "homebrew/core/python@3.14")
+	policy := inventoryVerifierPolicy([]resolution.Node{python}, true)
+	target := inventoryVerifierEntry("Cellar/python@3.14/1/lib/python3.14/test/test_os.py", TypeRegular, python.Name, python.FullName)
+	alias := inventoryVerifierEntry("lib/python3.13/test/test_os.py", TypeSymlink, python.Name, python.FullName)
+	alias.LinkTarget = "../../../Cellar/python@3.14/1/lib/python3.14/test/test_os.py"
+	entries := []InventoryEntry{target, alias}
+
+	plan, err := planMinimalInventoryProfile(entries, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason := plan.forbidden[inventoryEntryAttribution(target)]; reason != PruneRuntimeTests {
+		t.Fatalf("target reason=%q, want %q", reason, PruneRuntimeTests)
+	}
+	if reason, forbidden := plan.forbidden[inventoryEntryAttribution(alias)]; forbidden {
+		t.Fatalf("cross-minor alias was authorized as %q", reason)
+	}
+
+	record := inventoryVerifierRecord(resolution.PolicyVersionV2, []resolution.Node{python})
+	if err := validateInventoryEntriesPolicy(entries, record, policy); errorCode(err) != CodeVerification {
+		t.Fatalf("error=%v code=%s, want %s", err, errorCode(err), CodeVerification)
+	}
+}
+
 func TestPlanMinimalInventoryProfileDoesNotAuthorizeNestedKegAliases(t *testing.T) {
 	dep := inventoryVerifierNode("dep", "homebrew/core/dep", "homebrew/core/dep")
 	policy := inventoryVerifierPolicy([]resolution.Node{dep}, true)

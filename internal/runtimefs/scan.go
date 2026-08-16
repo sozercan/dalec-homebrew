@@ -723,7 +723,7 @@ func pruneMinimalRuntimeProfile(scan *sourceScan, policy *normalizedPolicy) erro
 		if reason == "" || !minimalRuntimeAliasContentMatches(entry, target) {
 			continue
 		}
-		if reason == "" || !minimalRuntimeAliasPath(entry.rel, reason) || target == nil || entry.packageName == "" || entry.packageName != target.packageName {
+		if reason == "" || target == nil || entry.packageName == "" || entry.packageName != target.packageName || !minimalRuntimeAliasPath(entry.rel, reason, target.packageName, policy) {
 			continue
 		}
 		candidates[entry.rel] = reason
@@ -745,7 +745,7 @@ func pruneMinimalRuntimeProfile(scan *sourceScan, policy *normalizedPolicy) erro
 		}
 		target := scan.byPath[final]
 		reason := candidates[final]
-		if reason == "" || !minimalRuntimeAliasPath(entry.rel, reason) || target == nil || entry.packageName == "" || entry.packageName != target.packageName {
+		if reason == "" || target == nil || entry.packageName == "" || entry.packageName != target.packageName || !minimalRuntimeAliasPath(entry.rel, reason, target.packageName, policy) {
 			continue
 		}
 		candidates[entry.rel] = reason
@@ -910,6 +910,11 @@ func minimalRuntimeAliasRetainsTarget(rel, _ string, policy *normalizedPolicy) b
 }
 
 func pythonStdlibTestPath(node resolution.Node, sub string) bool {
+	testRoot, ok := pythonStdlibTestRoot(node)
+	return ok && isWithin(sub, testRoot)
+}
+
+func pythonStdlibTestRoot(node resolution.Node) (string, bool) {
 	var minor string
 	switch node.PolicyFormulaID {
 	case "homebrew/core/python@3.13":
@@ -917,13 +922,12 @@ func pythonStdlibTestPath(node resolution.Node, sub string) bool {
 	case "homebrew/core/python@3.14":
 		minor = "3.14"
 	default:
-		return false
+		return "", false
 	}
 	if !policyv2.HasEmbeddedRule(node.PolicyFormulaID, policyv2.RuntimePrunePythonTestsV1) {
-		return false
+		return "", false
 	}
-	testRoot := "lib/python" + minor + "/test"
-	return isWithin(sub, testRoot)
+	return "lib/python" + minor + "/test", true
 }
 
 func minimalRuntimeAliasContentMatches(alias, target *sourceEntry) bool {
@@ -936,7 +940,7 @@ func minimalRuntimeAliasContentMatches(alias, target *sourceEntry) bool {
 	return alias.sha256 != "" && alias.sha256 == target.sha256 && alias.size == target.size && alias.mode.Perm()&0o111 == target.mode.Perm()&0o111
 }
 
-func minimalRuntimeAliasPath(rel string, reason PruneReason) bool {
+func minimalRuntimeAliasPath(rel string, reason PruneReason, packageName string, policy *normalizedPolicy) bool {
 	if minimalRuntimeAlwaysRetainedPath(rel) {
 		return false
 	}
@@ -952,7 +956,7 @@ func minimalRuntimeAliasPath(rel string, reason PruneReason) bool {
 			}
 		}
 	case PruneRuntimeTests:
-		return pythonStdlibTestAliasRuntimePath(rel)
+		return pythonStdlibTestAliasRuntimePath(rel, packageName, policy)
 	case PruneRuntimeShell:
 		return shellCompletionRuntimePath(rel)
 	case PruneRuntimeStatic:
@@ -961,8 +965,16 @@ func minimalRuntimeAliasPath(rel string, reason PruneReason) bool {
 	return false
 }
 
-func pythonStdlibTestAliasRuntimePath(rel string) bool {
-	return isWithin(rel, "lib/python3.13/test") || isWithin(rel, "lib/python3.14/test")
+func pythonStdlibTestAliasRuntimePath(rel, packageName string, policy *normalizedPolicy) bool {
+	if policy == nil {
+		return false
+	}
+	node, ok := policy.nodes[packageName]
+	if !ok {
+		return false
+	}
+	testRoot, ok := pythonStdlibTestRoot(node)
+	return ok && isWithin(rel, testRoot)
 }
 
 func headerAliasRuntimePath(rel string) bool {
