@@ -820,6 +820,11 @@ func ValidateV2(r *RecordV2) error {
 	if err := validateRuntimeIdentity(r.Runtime); err != nil {
 		errs = append(errs, err)
 	}
+	switch r.Runtime.Profile {
+	case "", RuntimeProfileMinimalV1:
+	default:
+		errs = append(errs, fmt.Errorf("unsupported V2 runtime profile %q", r.Runtime.Profile))
+	}
 	if r.PruningPolicyDigest != "" {
 		if err := validateDigest(r.PruningPolicyDigest); err != nil {
 			errs = append(errs, fmt.Errorf("pruning policy: %w", err))
@@ -1748,6 +1753,7 @@ func cloneRecordV2(record RecordV2) RecordV2 {
 	data, _ := json.Marshal(record)
 	var clone RecordV2
 	_ = json.Unmarshal(data, &clone)
+	clone.Runtime.Profile = record.Runtime.Profile
 	return clone
 }
 

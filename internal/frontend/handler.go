@@ -73,8 +73,9 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		return nil, fmt.Errorf("read Dalec spec for preflight: %w", err)
 	}
 	rawSpec := strings.TrimSpace(string(source.Data))
-	nonCoreCapability := speccontract.Capabilities{NonCoreTaps: cfg.SupportsNonCoreTaps()}
-	if err := speccontract.PreflightFormulaNames([]byte(rawSpec), targetKey, nonCoreCapability); err != nil {
+	v2Capable := cfg.SupportsNonCoreTaps()
+	capabilities := speccontract.Capabilities{NonCoreTaps: v2Capable}
+	if err := speccontract.PreflightFormulaNames([]byte(rawSpec), targetKey, capabilities); err != nil {
 		return nil, err
 	}
 	targets := append([]ocispec.Platform(nil), dc.TargetPlatforms...)
@@ -97,11 +98,11 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 		selection, err := speccontract.ValidateForwarded(dalecSpec, targetKey, p.Architecture, speccontract.Forwarding{
 			Source:  opts["source"],
 			CmdLine: opts["cmdline"],
-		}, nonCoreCapability)
+		}, capabilities)
 		if err != nil {
 			return nil, err
 		}
-		effective, err := marshalEffectiveSpec(dalecSpec)
+		effective, err := marshalEffectiveSpec(dalecSpec, v2Capable)
 		if err != nil {
 			return nil, err
 		}
@@ -231,13 +232,21 @@ func Handle(ctx context.Context, client gwclient.Client) (*gwclient.Result, erro
 	return rb.Finalize()
 }
 
-func marshalEffectiveSpec(spec *dalec.Spec) ([]byte, error) {
+func marshalEffectiveSpec(spec *dalec.Spec, bindMinimalV2 bool) ([]byte, error) {
+	schemaVersion := "dalec-homebrew-effective-input/v1"
+	runtimeProfile := ""
+	if bindMinimalV2 {
+		schemaVersion = "dalec-homebrew-effective-input/v2"
+		runtimeProfile = resolution.RuntimeProfileMinimalV1
+	}
 	effective, err := json.Marshal(struct {
-		SchemaVersion string      `json:"schema_version"`
-		DalecSpec     *dalec.Spec `json:"dalec_spec"`
+		SchemaVersion  string      `json:"schema_version"`
+		DalecSpec      *dalec.Spec `json:"dalec_spec"`
+		RuntimeProfile string      `json:"runtime_profile,omitempty"`
 	}{
-		SchemaVersion: "dalec-homebrew-effective-input/v1",
-		DalecSpec:     spec,
+		SchemaVersion:  schemaVersion,
+		DalecSpec:      spec,
+		RuntimeProfile: runtimeProfile,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal effective Dalec spec: %w", err)

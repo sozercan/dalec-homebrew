@@ -33,6 +33,18 @@
     "waiver": "tap-catalog-buildkit-and-verified-checksum-v1"
   },
   "writable_path_template": "/home/linuxbrew/.linuxbrew/var/<rack-name>",
+  "runtime_profile": {
+    "name": "minimal-v1",
+    "rules": [
+      "transitive-core-build-metadata-v1",
+      "transitive-core-headers-v1",
+      "transitive-core-man-info-v1",
+      "transitive-core-python-stdlib-tests-v1",
+      "transitive-core-shell-completions-v1",
+      "transitive-core-static-archives-v1",
+      "transitive-core-toolchain-development-retention-v1"
+    ]
+  },
   "package_capabilities": {
     "homebrew/core/certifi": {
       "rules": [
@@ -45,6 +57,11 @@
       ],
       "rules": [
         "shared-etc-fonts"
+      ]
+    },
+    "homebrew/core/gcc": {
+      "rules": [
+        "toolchain-development-retention-root-v1"
       ]
     },
     "homebrew/core/gdk-pixbuf": {
@@ -98,31 +115,41 @@
     "homebrew/core/python@3.13": {
       "rules": [
         "python-venv-template",
-        "runtime-aux-python"
+        "runtime-aux-python",
+        "transitive-core-python-stdlib-tests-v1"
       ]
     },
     "homebrew/core/python@3.14": {
       "rules": [
         "python-venv-template",
-        "runtime-aux-python"
+        "runtime-aux-python",
+        "transitive-core-python-stdlib-tests-v1"
       ]
     },
     "homebrew/core/llvm": {
       "rules": [
         "optional-llvm-tooling",
-        "runtime-aux-llvm"
+        "runtime-aux-llvm",
+        "toolchain-development-retention-root-v1"
       ]
     },
     "homebrew/core/llvm@20": {
       "rules": [
         "optional-llvm-tooling",
-        "runtime-aux-llvm"
+        "runtime-aux-llvm",
+        "toolchain-development-retention-root-v1"
       ]
     },
     "homebrew/core/llvm@21": {
       "rules": [
         "optional-llvm-tooling",
-        "runtime-aux-llvm"
+        "runtime-aux-llvm",
+        "toolchain-development-retention-root-v1"
+      ]
+    },
+    "homebrew/core/open-mpi": {
+      "rules": [
+        "toolchain-development-retention-root-v1"
       ]
     },
     "homebrew/core/libpsl": {

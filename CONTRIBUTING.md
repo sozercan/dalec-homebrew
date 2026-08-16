@@ -164,11 +164,25 @@ Use `DALEC_HOMEBREW_LIVE_SPEC` to run the same helper with a focused example:
 - [`examples/live-toolchain.yaml`](examples/live-toolchain.yaml) — Azure CLI, OpenTofu, Go, Node/npm, jq, ripgrep, kubectl, and Helm in one closure
 - [`examples/live-curl.yaml`](examples/live-curl.yaml) — curl with its transitive libpsl helper retained only in the keg
 - [`examples/live-python-curl.yaml`](examples/live-python-curl.yaml) — Python plus curl without relying on an unversioned Python interpreter
-- [`examples/live-hf-curl.yaml`](examples/live-hf-curl.yaml) — Hugging Face CLI plus curl, including certifi's exact shared CA links
+- [`examples/live-hf-curl.yaml`](examples/live-hf-curl.yaml) — Hugging Face CLI plus curl, including automatic V2 transitive pruning, requested-Formula retention, and certifi's exact shared CA links
 - [`examples/live-python.yaml`](examples/live-python.yaml) — extensions, TLS and CA data, SQLite, compression, and time zones
 - [`examples/live-glibc.yaml`](examples/live-glibc.yaml) — the brewed loader, locale archive, and conversion modules
 - [`examples/live-redis.yaml`](examples/live-redis.yaml) — a stateful non-root lifecycle
 - [`examples/live-graphviz.yaml`](examples/live-graphviz.yaml) — plugins and generated shared runtime indexes
+
+Runtime-minimization changes require focused V2 coverage. Verify that requested
+Formulae remain the retention boundary, that every removed path belongs to
+exactly one of the six documented classes, and that retained shared libraries,
+plugins, `libexec`, configuration, locales, Python site-packages, `ensurepip`,
+`venv`, Formula `share/doc` content, and static archives in protected
+runtime-data locations remain usable. Legal and license text must also remain.
+Add focused coverage for compiler and MPI development retention activated by an
+exact release-bound V2 Formula policy capability. Prove that headers, build
+metadata, and static archives remain across that node's verified dependency
+closure while unrelated nodes still prune, and that unsigned OCI
+executable-path annotations cannot activate retention. Review the generated
+inventory and prune evidence as well as the image-size report; a smaller image
+is not sufficient if runtime behavior or release-policy binding changes.
 
 ## Run the non-core production-path E2E
 

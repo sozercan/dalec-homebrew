@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
+	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
 type chownCall struct {
@@ -773,6 +774,36 @@ func TestOwnerRulesDoNotOverrideSymlinkTargetPackage(t *testing.T) {
 	}
 	if link.packageName != "jq" {
 		t.Fatalf("symlink attributed to %q", link.packageName)
+	}
+}
+
+func TestCellarSymlinkIsAttributedToOwningKeg(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		profile     string
+		linkPackage string
+	}{
+		{name: "V2 minimal", profile: policyv2.RuntimeProfileMinimalV1, linkPackage: "app"},
+		{name: "V1 legacy", linkPackage: "dep"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := &sourceEntry{rel: "Cellar/dep/1/include/dep.h", typeName: TypeRegular, retain: true, sha256: "x"}
+			link := &sourceEntry{rel: "Cellar/app/1/libexec/include/dep.h", typeName: TypeSymlink, retain: true, linkResolved: target.rel}
+			scan := &sourceScan{entries: []*sourceEntry{target, link}, byPath: map[string]*sourceEntry{target.rel: target, link.rel: link}}
+			policy := &normalizedPolicy{
+				nodes: map[string]resolution.Node{
+					"app": {Name: "app", PkgVersion: "1"},
+					"dep": {Name: "dep", PkgVersion: "1"},
+				},
+				allowlist: normalizedAllowlist{PruningProfile: tc.profile},
+			}
+			if err := attributeEntries(scan, policy); err != nil {
+				t.Fatal(err)
+			}
+			if target.packageName != "dep" || link.packageName != tc.linkPackage {
+				t.Fatalf("target=%q link=%q", target.packageName, link.packageName)
+			}
+		})
 	}
 }
 

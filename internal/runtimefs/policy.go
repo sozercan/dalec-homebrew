@@ -11,6 +11,7 @@ import (
 	digest "github.com/opencontainers/go-digest"
 
 	"github.com/sozercan/dalec-homebrew/internal/resolution"
+	policyv2 "github.com/sozercan/dalec-homebrew/policy/v2"
 )
 
 type normalizedRule struct {
@@ -21,15 +22,17 @@ type normalizedRule struct {
 }
 
 type normalizedAllowlist struct {
-	Cellar bool             `json:"cellar"`
-	Opt    bool             `json:"opt"`
-	Bin    bool             `json:"bin,omitempty"`
-	Sbin   bool             `json:"sbin,omitempty"`
-	Lib    bool             `json:"lib,omitempty"`
-	Share  bool             `json:"share,omitempty"`
-	Etc    []normalizedRule `json:"etc,omitempty"`
-	Var    []normalizedRule `json:"var,omitempty"`
-	Owners []normalizedRule `json:"owners,omitempty"`
+	Cellar         bool             `json:"cellar"`
+	Opt            bool             `json:"opt"`
+	Bin            bool             `json:"bin,omitempty"`
+	Sbin           bool             `json:"sbin,omitempty"`
+	Lib            bool             `json:"lib,omitempty"`
+	Share          bool             `json:"share,omitempty"`
+	PruningProfile string           `json:"pruning_profile,omitempty"`
+	PruningRules   []string         `json:"pruning_rules,omitempty"`
+	Etc            []normalizedRule `json:"etc,omitempty"`
+	Var            []normalizedRule `json:"var,omitempty"`
+	Owners         []normalizedRule `json:"owners,omitempty"`
 }
 
 type normalizedPolicy struct {
@@ -39,6 +42,8 @@ type normalizedPolicy struct {
 	digest        string
 	nodes         map[string]resolution.Node
 	requested     map[string]struct{}
+	pythonTests   map[string]string
+	toolchainDev  map[string]struct{}
 	writable      map[string]struct{}
 }
 
@@ -84,6 +89,10 @@ func normalizeOptionsUnchecked(record *resolution.Record, opts Options) (*normal
 		Lib:    opts.Allowlist.Lib,
 		Share:  opts.Allowlist.Share,
 	}
+	allowlist.PruningProfile, allowlist.PruningRules, err = normalizePruningProfile(opts.Allowlist.PruningProfile, opts.Allowlist.PruningRules)
+	if err != nil {
+		return nil, err
+	}
 	allowlist.Etc, err = normalizeRules(opts.Allowlist.Etc, "etc", installPrefix, nodes, false)
 	if err != nil {
 		return nil, err
@@ -93,6 +102,10 @@ func normalizeOptionsUnchecked(record *resolution.Record, opts Options) (*normal
 		return nil, err
 	}
 	allowlist.Owners, err = normalizeOwnerRules(opts.Allowlist.Owners, installPrefix, nodes, allowlist)
+	if err != nil {
+		return nil, err
+	}
+	pythonTests, err := normalizePythonStdlibTestRoots(nodes, allowlist)
 	if err != nil {
 		return nil, err
 	}
@@ -136,8 +149,73 @@ func normalizeOptionsUnchecked(record *resolution.Record, opts Options) (*normal
 		digest:        policyDigest,
 		nodes:         nodes,
 		requested:     requested,
+		pythonTests:   pythonTests,
+		toolchainDev:  toolchainDevelopmentClosure(nodes, allowlist),
 		writable:      writable,
 	}, nil
+}
+
+func normalizePythonStdlibTestRoots(nodes map[string]resolution.Node, allowlist normalizedAllowlist) (map[string]string, error) {
+	roots := make(map[string]string)
+	if allowlist.PruningProfile != policyv2.RuntimeProfileMinimalV1 || !slices.Contains(allowlist.PruningRules, policyv2.RuntimePrunePythonTestsV1) {
+		return roots, nil
+	}
+
+	embeddedPolicy, err := policyv2.Load()
+	if err != nil {
+		return nil, runtimeError(CodeInvalidOptions, "", "load embedded V2 policy: %v", err)
+	}
+	for name, node := range nodes {
+		root, ok := pythonStdlibTestRootForFormulaID(node.PolicyFormulaID)
+		if !ok || !embeddedPolicy.HasRule(node.PolicyFormulaID, policyv2.RuntimePrunePythonTestsV1) {
+			continue
+		}
+		roots[name] = root
+	}
+	return roots, nil
+}
+
+func toolchainDevelopmentClosure(nodes map[string]resolution.Node, allowlist normalizedAllowlist) map[string]struct{} {
+	retained := make(map[string]struct{})
+	if allowlist.PruningProfile != policyv2.RuntimeProfileMinimalV1 || !slices.Contains(allowlist.PruningRules, policyv2.RuntimeRetainToolchainDevV1) {
+		return retained
+	}
+
+	queue := make([]string, 0)
+	for name, node := range nodes {
+		if toolchainDevelopmentRoot(node) {
+			queue = append(queue, name)
+		}
+	}
+	slices.Sort(queue)
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		if _, ok := retained[name]; ok {
+			continue
+		}
+		node, ok := nodes[name]
+		if !ok {
+			continue
+		}
+		retained[name] = struct{}{}
+		dependencies := make([]string, 0, len(node.Dependencies))
+		for _, dependency := range node.Dependencies {
+			if _, ok := nodes[dependency.Name]; ok {
+				dependencies = append(dependencies, dependency.Name)
+			}
+		}
+		slices.Sort(dependencies)
+		queue = append(queue, dependencies...)
+	}
+	return retained
+}
+
+func toolchainDevelopmentRoot(node resolution.Node) bool {
+	// PolicyFormulaID is populated only by the independently verified V2
+	// projection. Exact release-bound Formula policy is the sole authority for
+	// this retention root; OCI executable annotations are only runtime hints.
+	return node.PolicyFormulaID != "" && policyv2.HasEmbeddedRule(node.PolicyFormulaID, policyv2.RuntimeToolchainDevelopmentRootV1)
 }
 
 // PolicyDigest returns the digest that can be placed in
@@ -163,6 +241,10 @@ func PolicyDigest(allowlist Allowlist, installPrefix string, nodes []resolution.
 		return "", fmt.Errorf("Cellar and opt must be explicitly allowlisted")
 	}
 	n := normalizedAllowlist{Cellar: allowlist.Cellar, Opt: allowlist.Opt, Bin: allowlist.Bin, Sbin: allowlist.Sbin, Lib: allowlist.Lib, Share: allowlist.Share}
+	n.PruningProfile, n.PruningRules, err = normalizePruningProfile(allowlist.PruningProfile, allowlist.PruningRules)
+	if err != nil {
+		return "", err
+	}
 	n.Etc, err = normalizeRules(allowlist.Etc, "etc", prefix, byName, false)
 	if err != nil {
 		return "", err
@@ -190,6 +272,29 @@ func normalizeInstallPrefix(value string) (string, error) {
 		return "", fmt.Errorf("unsafe install prefix %q", value)
 	}
 	return strings.TrimSuffix(clean, "/"), nil
+}
+
+func normalizePruningProfile(name string, rules []string) (string, []string, error) {
+	if name == "" {
+		if len(rules) != 0 {
+			return "", nil, runtimeError(CodeInvalidOptions, "", "pruning rules require a pruning profile")
+		}
+		return "", nil, nil
+	}
+	if name != policyv2.RuntimeProfileMinimalV1 {
+		return "", nil, runtimeError(CodeInvalidOptions, "", "unsupported pruning profile %q", name)
+	}
+	normalized := slices.Clone(rules)
+	slices.Sort(normalized)
+	for i := 1; i < len(normalized); i++ {
+		if normalized[i-1] == normalized[i] {
+			return "", nil, runtimeError(CodeInvalidOptions, "", "duplicate pruning rule %q", normalized[i])
+		}
+	}
+	if !slices.Equal(normalized, policyv2.MinimalV1RuntimePruneRules()) {
+		return "", nil, runtimeError(CodeInvalidOptions, "", "pruning rules do not match profile %q", name)
+	}
+	return name, normalized, nil
 }
 
 func normalizeRules(input []PathRule, root, installPrefix string, nodes map[string]resolution.Node, allowWritable bool) ([]normalizedRule, error) {
@@ -321,12 +426,16 @@ func validateRuleOverlaps(rules []normalizedRule) error {
 }
 
 func digestNormalizedPolicy(installPrefix string, allowlist normalizedAllowlist) (string, error) {
+	schemaVersion := "dalec-homebrew-pruning-policy/v1"
+	if allowlist.PruningProfile != "" {
+		schemaVersion = "dalec-homebrew-pruning-policy/v2"
+	}
 	value := struct {
 		SchemaVersion string              `json:"schema_version"`
 		InstallPrefix string              `json:"install_prefix"`
 		Allowlist     normalizedAllowlist `json:"allowlist"`
 	}{
-		SchemaVersion: "dalec-homebrew-pruning-policy/v1",
+		SchemaVersion: schemaVersion,
 		InstallPrefix: installPrefix,
 		Allowlist:     allowlist,
 	}

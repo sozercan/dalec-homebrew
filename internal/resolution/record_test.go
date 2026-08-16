@@ -1,6 +1,7 @@
 package resolution
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -128,6 +129,26 @@ func TestRuntimeIdentityMustMatchConfiguredUser(t *testing.T) {
 	r.Runtime = RuntimePolicy{User: "2000:3000", UID: 2000, GID: 3000}
 	if err := Validate(r); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestV1RejectsRuntimeProfile(t *testing.T) {
+	r := validRecord()
+	r.Runtime.Profile = RuntimeProfileMinimalV1
+	if err := Validate(r); err == nil {
+		t.Fatal("V1 record accepted a runtime profile")
+	}
+	if _, err := Canonical(r); err == nil {
+		t.Fatal("V1 canonical encoder accepted an in-memory runtime profile")
+	}
+
+	canonical, err := Canonical(validRecord())
+	if err != nil {
+		t.Fatal(err)
+	}
+	withProfile := strings.Replace(string(canonical), `"runtime":{`, `"runtime":{"profile":"minimal-v1",`, 1)
+	if _, err := Decode([]byte(withProfile)); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("Decode() error = %v, want runtime profile wire-field rejection", err)
 	}
 }
 

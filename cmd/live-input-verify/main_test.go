@@ -321,6 +321,11 @@ func TestBaseSpecValidation(t *testing.T) {
 			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime:\n    hello: {}\n\"x-dalec-homebrew\": {}\n",
 			want: "top-level x-dalec-homebrew is unsupported",
 		},
+		{
+			name: "runtime profile",
+			data: "# syntax=example/frontend@sha256:" + strings.Repeat("a", 64) + "\ndependencies:\n  runtime:\n    hello: {}\nx-dalec-homebrew:\n  runtime_profile: minimal-v1\n",
+			want: "top-level x-dalec-homebrew is unsupported",
+		},
 	}
 
 	for _, test := range tests {

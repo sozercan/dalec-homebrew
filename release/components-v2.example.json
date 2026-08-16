@@ -84,7 +84,7 @@
   "dalec_module": "v0.21.5-0.20260728234020-5fa2c46d716b",
   "buildkit_module": "v0.31.2",
   "tap_policy_digest": "sha256:9f5b47c9d241dc16464dd81c350fc6c7755fa35c992bc821e6c3927573a3f217",
-  "executable_runtime_policy_digest": "sha256:0dc59f0c1423083b4a2f49ea8356b2832a208dac121c4c080322b48d851f08a1",
+  "executable_runtime_policy_digest": "sha256:d84e068f9ba7329a1399d598e26ef219ecba60ba3a3fc2f0244e46d234faf37a",
   "supported_catalog_policy_versions": [
     "tap-catalog-v1"
   ],

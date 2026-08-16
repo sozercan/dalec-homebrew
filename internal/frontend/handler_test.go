@@ -1,6 +1,7 @@
 package frontend
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -40,7 +41,7 @@ func TestMarshalEffectiveSpecPreservesFrontendMetadata(t *testing.T) {
 		"homebrew": {Frontend: &dalec.Frontend{Image: frontendRef}},
 	}}
 
-	effective, err := marshalEffectiveSpec(spec)
+	effective, err := marshalEffectiveSpec(spec, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,6 +55,16 @@ func TestMarshalEffectiveSpecPreservesFrontendMetadata(t *testing.T) {
 	if decoded.SchemaVersion != "dalec-homebrew-effective-input/v1" {
 		t.Fatalf("effective envelope=%+v", decoded)
 	}
+	legacy, err := json.Marshal(struct {
+		SchemaVersion string      `json:"schema_version"`
+		DalecSpec     *dalec.Spec `json:"dalec_spec"`
+	}{SchemaVersion: "dalec-homebrew-effective-input/v1", DalecSpec: spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(effective, legacy) {
+		t.Fatalf("empty-profile effective input changed V1 bytes:\n got: %s\nwant: %s", effective, legacy)
+	}
 	if got := decoded.DalecSpec.Targets["homebrew"].Frontend; got == nil || got.Image != frontendRef {
 		t.Fatalf("frontend metadata=%+v, want image %q", got, frontendRef)
 	}
@@ -61,7 +72,7 @@ func TestMarshalEffectiveSpecPreservesFrontendMetadata(t *testing.T) {
 	target := spec.Targets["homebrew"]
 	target.Frontend = nil
 	spec.Targets["homebrew"] = target
-	withoutFrontend, err := marshalEffectiveSpec(spec)
+	withoutFrontend, err := marshalEffectiveSpec(spec, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,19 +82,47 @@ func TestMarshalEffectiveSpecPreservesFrontendMetadata(t *testing.T) {
 	firstOrder, err := marshalEffectiveSpec(&dalec.Spec{Dependencies: &dalec.PackageDependencies{Runtime: dalec.PackageDependencyList{
 		"zlib":  {},
 		"hello": {},
-	}}})
+	}}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	secondOrder, err := marshalEffectiveSpec(&dalec.Spec{Dependencies: &dalec.PackageDependencies{Runtime: dalec.PackageDependencyList{
 		"hello": {},
 		"zlib":  {},
-	}}})
+	}}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sha256Hex(firstOrder) != sha256Hex(secondOrder) {
 		t.Fatal("effective spec digest depends on Go map insertion order")
+	}
+}
+
+func TestMarshalEffectiveSpecBindsMinimalRuntimePolicy(t *testing.T) {
+	spec := &dalec.Spec{Dependencies: &dalec.PackageDependencies{Runtime: dalec.PackageDependencyList{"hello": {}}}}
+	legacy, err := marshalEffectiveSpec(spec, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	minimal, err := marshalEffectiveSpec(spec, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha256Hex(legacy) == sha256Hex(minimal) {
+		t.Fatal("effective spec digest did not bind the minimal runtime policy")
+	}
+	var decoded struct {
+		SchemaVersion  string `json:"schema_version"`
+		RuntimeProfile string `json:"runtime_profile"`
+	}
+	if err := json.Unmarshal(minimal, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.RuntimeProfile != resolution.RuntimeProfileMinimalV1 {
+		t.Fatalf("runtime profile = %q, want %q", decoded.RuntimeProfile, resolution.RuntimeProfileMinimalV1)
+	}
+	if decoded.SchemaVersion != "dalec-homebrew-effective-input/v2" {
+		t.Fatalf("schema version = %q, want V2 effective-input wrapper", decoded.SchemaVersion)
 	}
 }
 

@@ -151,7 +151,7 @@ func TestV2MaterializerPhasesVerifySerializedRuntimePolicy(t *testing.T) {
 			mutate: func(record *resolution.RecordV2) {
 				record.PruningPolicyDigest = "sha256:" + strings.Repeat("f", 64)
 			},
-			want: "does not match policy",
+			want: "does not match minimal runtime policy",
 		},
 	}
 

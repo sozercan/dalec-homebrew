@@ -16,18 +16,27 @@ import (
 )
 
 const (
-	SchemaVersion             = "dalec-homebrew-policy/v2"
-	ResolverPolicyVersion     = "homebrew-runtime-v2"
-	FetchPolicyVersion        = "homebrew-bottle-fetch-v1"
-	ProvenancePolicyVersion   = "homebrew-bottle-provenance-v1"
-	NonCoreProvenanceWaiver   = "tap-catalog-buildkit-and-verified-checksum-v1"
-	DefaultMaxNonCoreTaps     = 16
-	DefaultMaxClosureNodes    = 256
-	DefaultMaxCatalogBytes    = int64(64 << 20)
-	DefaultMaxMetadataBytes   = int64(256 << 20)
-	DefaultMaxBottleBytes     = int64(1 << 30)
-	DefaultMaxRedirects       = 5
-	DefaultFetchTimeoutSecond = 15 * 60
+	SchemaVersion                     = "dalec-homebrew-policy/v2"
+	ResolverPolicyVersion             = "homebrew-runtime-v2"
+	RuntimeProfileMinimalV1           = "minimal-v1"
+	RuntimePruneHeadersV1             = "transitive-core-headers-v1"
+	RuntimePruneManInfoV1             = "transitive-core-man-info-v1"
+	RuntimePruneBuildMetaV1           = "transitive-core-build-metadata-v1"
+	RuntimePrunePythonTestsV1         = "transitive-core-python-stdlib-tests-v1"
+	RuntimePruneShellCompletionsV1    = "transitive-core-shell-completions-v1"
+	RuntimePruneStaticArchivesV1      = "transitive-core-static-archives-v1"
+	RuntimeRetainToolchainDevV1       = "transitive-core-toolchain-development-retention-v1"
+	RuntimeToolchainDevelopmentRootV1 = "toolchain-development-retention-root-v1"
+	FetchPolicyVersion                = "homebrew-bottle-fetch-v1"
+	ProvenancePolicyVersion           = "homebrew-bottle-provenance-v1"
+	NonCoreProvenanceWaiver           = "tap-catalog-buildkit-and-verified-checksum-v1"
+	DefaultMaxNonCoreTaps             = 16
+	DefaultMaxClosureNodes            = 256
+	DefaultMaxCatalogBytes            = int64(64 << 20)
+	DefaultMaxMetadataBytes           = int64(256 << 20)
+	DefaultMaxBottleBytes             = int64(1 << 30)
+	DefaultMaxRedirects               = 5
+	DefaultFetchTimeoutSecond         = 15 * 60
 )
 
 //go:embed policy.json
@@ -42,7 +51,13 @@ type Policy struct {
 	FetchPolicy           FetchPolicy             `json:"fetch_policy"`
 	ProvenancePolicy      ProvenancePolicy        `json:"provenance_policy"`
 	WritablePathTemplate  string                  `json:"writable_path_template"`
+	RuntimeProfile        RuntimeProfile          `json:"runtime_profile"`
 	PackageCapabilities   map[string]Capabilities `json:"package_capabilities"`
+}
+
+type RuntimeProfile struct {
+	Name  string   `json:"name"`
+	Rules []string `json:"rules"`
 }
 
 type Platform struct {
@@ -139,6 +154,12 @@ func Validate(p *Policy) error {
 	if p.WritablePathTemplate != "/home/linuxbrew/.linuxbrew/var/<rack-name>" {
 		errs = append(errs, errors.New("invalid writable path template"))
 	}
+	if p.RuntimeProfile.Name != RuntimeProfileMinimalV1 {
+		errs = append(errs, fmt.Errorf("V2 runtime profile must be %q", RuntimeProfileMinimalV1))
+	}
+	if !slices.Equal(p.RuntimeProfile.Rules, MinimalV1RuntimePruneRules()) {
+		errs = append(errs, fmt.Errorf("runtime profile %q rules do not match the executable policy", RuntimeProfileMinimalV1))
+	}
 	for id, caps := range p.PackageCapabilities {
 		if !validFormulaID(id) {
 			errs = append(errs, fmt.Errorf("invalid package capability Formula ID %q", id))
@@ -195,6 +216,31 @@ func (p *Policy) ForFormula(id string) (Capabilities, bool) {
 	return caps, true
 }
 
+// MinimalRuntimeProfile returns a defensive copy of the sole release-bound V2
+// runtime profile.
+func (p *Policy) MinimalRuntimeProfile() RuntimeProfile {
+	if p == nil {
+		return RuntimeProfile{}
+	}
+	profile := p.RuntimeProfile
+	profile.Rules = slices.Clone(p.RuntimeProfile.Rules)
+	return profile
+}
+
+// MinimalV1RuntimePruneRules returns the exact ordered rule set implemented by
+// the minimal-v1 runtime profile.
+func MinimalV1RuntimePruneRules() []string {
+	return []string{
+		RuntimePruneBuildMetaV1,
+		RuntimePruneHeadersV1,
+		RuntimePruneManInfoV1,
+		RuntimePrunePythonTestsV1,
+		RuntimePruneShellCompletionsV1,
+		RuntimePruneStaticArchivesV1,
+		RuntimeRetainToolchainDevV1,
+	}
+}
+
 func (p *Policy) HasRule(id, rule string) bool {
 	caps, ok := p.ForFormula(id)
 	return ok && slices.Contains(caps.Rules, rule)
@@ -206,6 +252,7 @@ func (p *Policy) HasGeneratedGlobalPath(id, generatedPath string) bool {
 }
 
 func canonicalize(p *Policy) {
+	slices.Sort(p.RuntimeProfile.Rules)
 	for id, caps := range p.PackageCapabilities {
 		slices.Sort(caps.SharedEtc)
 		slices.Sort(caps.GeneratedGlobalPaths)

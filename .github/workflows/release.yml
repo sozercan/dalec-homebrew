@@ -790,6 +790,7 @@ jobs:
             specs+=("${amd64_only_specs[@]}")
           fi
           mkdir -p runtime-evidence
+          minimized_runtime_image=
           for spec in "${specs[@]}"; do
             final_image="dalec-homebrew-live:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${PLATFORM_SLUG}-${spec}"
             DALEC_HOMEBREW_LIVE_BUILDER="$builder" \
@@ -807,6 +808,9 @@ jobs:
             DALEC_HOMEBREW_LIVE_OUTPUT=load \
             DALEC_HOMEBREW_LIVE_PROGRESS=plain \
               ./scripts/live-test.sh
+            if [[ "$spec" == live-hf-curl ]]; then
+              minimized_runtime_image=$final_image
+            fi
 
             evidence_root="runtime-evidence/${spec}"
             mkdir -p "$evidence_root"
@@ -825,11 +829,107 @@ jobs:
               | gzip -n > "runtime-evidence-${PLATFORM_SLUG}-${spec}.tar.gz"
           done
 
+          [[ -n "$minimized_runtime_image" ]]
+          prune_manifest=runtime-evidence/live-hf-curl/prune-manifest.json
+          test -s "$prune_manifest"
+          jq -e '
+            def minimized_reason:
+              . == "transitive_runtime_headers" or
+              . == "transitive_runtime_man_info" or
+              . == "transitive_runtime_build_metadata" or
+              . == "transitive_runtime_python_tests" or
+              . == "transitive_runtime_shell_completions" or
+              . == "transitive_runtime_static_archives";
+            def minimized_entries:
+              [.entries[] | select(.reason | minimized_reason)];
+            def minimized_subtrees:
+              [(.subtrees // [])[] | select(.reason | minimized_reason)];
+            (minimized_entries) as $entries
+            | (minimized_subtrees) as $subtrees
+            |
+            .schema_version == "dalec-homebrew-prune-manifest/v4" and
+            ((.subtrees // []) | length) > 0 and
+            (.subtrees // [] | all(.commitment_schema == "dalec-homebrew-prune-subtree-commitment/v2")) and
+            ($subtrees | all(.entry_count > 0 and .regular_bytes >= 0)) and
+            ([.entries[], (.subtrees // [])[]] | all(.reason != "transitive_runtime_share_doc")) and
+            (($entries + $subtrees) | map(.reason) | sort | unique) == [
+              "transitive_runtime_build_metadata",
+              "transitive_runtime_headers",
+              "transitive_runtime_man_info",
+              "transitive_runtime_python_tests",
+              "transitive_runtime_shell_completions",
+              "transitive_runtime_static_archives"
+            ] and
+            (([$entries[] | select(.type == "file") | (.size // 0)] | add // 0) +
+             ([$subtrees[].regular_bytes] | add // 0)) > 0
+          ' "$prune_manifest" >/dev/null
+
+          raw_size_report=$(mktemp "$RUNNER_TEMP/runtime-minimization-size.XXXXXX")
+          ./scripts/image-size-report.sh \
+            --platform "$PLATFORM" \
+            "$minimized_runtime_image" > "$raw_size_report"
+          jq -e --arg platform "$PLATFORM" '
+            .schema_version == "dalec-homebrew-image-size-report/v1" and
+            .platform.requested == $platform and
+            .platform.effective == $platform and
+            .docker.available == true and
+            (.docker.inspect_size_bytes | type == "number" and . > 0) and
+            .rootfs.available == true and
+            (.rootfs.size_bytes | type == "number" and . > 0) and
+            (.rootfs.evidence.files | index("/usr/share/dalec-homebrew/prune-manifest.json")) != null
+          ' "$raw_size_report" >/dev/null
+
+          prune_manifest_digest="sha256:$(sha256sum "$prune_manifest" | awk '{print $1}')"
+          jq -n \
+            --arg schema_version dalec-homebrew-runtime-minimization-evidence/v1 \
+            --arg platform "$PLATFORM" \
+            --arg spec live-hf-curl \
+            --arg prune_manifest_digest "$prune_manifest_digest" \
+            --slurpfile size "$raw_size_report" \
+            --slurpfile prune "$prune_manifest" \
+            --slurpfile resolution runtime-evidence/live-hf-curl/resolution.json '
+            def minimized_reason:
+              . == "transitive_runtime_headers" or
+              . == "transitive_runtime_man_info" or
+              . == "transitive_runtime_build_metadata" or
+              . == "transitive_runtime_python_tests" or
+              . == "transitive_runtime_shell_completions" or
+              . == "transitive_runtime_static_archives";
+            def minimized_entries:
+              [.entries[] | select(.reason | minimized_reason)];
+            def minimized_subtrees:
+              [(.subtrees // [])[] | select(.reason | minimized_reason)];
+            ($prune[0] | minimized_entries) as $entries
+            | ($prune[0] | minimized_subtrees) as $subtrees
+            | ($resolution[0].requested | map(.id) | sort) as $requested
+            | {
+                schema_version: $schema_version,
+                platform: $platform,
+                spec: $spec,
+                size_report: $size[0],
+                pruning: {
+                  manifest_sha256: $prune_manifest_digest,
+                  resolution_digest: $prune[0].resolution_digest,
+                  pruning_policy_digest: $prune[0].pruning_policy_digest,
+                  requested_formulae: $requested,
+                  explicit_entry_count: ($entries | length),
+                  subtree_count: ($subtrees | length),
+                  represented_path_count: (($entries | length) + ([$subtrees[].entry_count] | add // 0)),
+                  regular_bytes: (([$entries[] | select(.type == "file") | (.size // 0)] | add // 0) +
+                                  ([$subtrees[].regular_bytes] | add // 0)),
+                  reasons: (($entries + $subtrees) | map(.reason) | sort | unique)
+                }
+              }
+          ' > "runtime-minimization-${PLATFORM_SLUG}.json"
+          rm -f "$raw_size_report"
+
       - name: Upload runtime evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runtime-evidence-${{ matrix.slug }}
-          path: runtime-evidence-${{ matrix.slug }}-*.tar.gz
+          path: |
+            runtime-evidence-${{ matrix.slug }}-*.tar.gz
+            runtime-minimization-${{ matrix.slug }}.json
           if-no-files-found: error
           retention-days: 7
           overwrite: true
@@ -1155,7 +1255,7 @@ jobs:
           archive_path = Path(sys.argv[1])
           output_path = Path(sys.argv[2])
           member_name = sys.argv[3] if len(sys.argv) == 4 else "resolution.json"
-          if member_name not in {"resolution.json", "materialization-v2.json"}:
+          if member_name not in {"resolution.json", "materialization-v2.json", "prune-manifest.json"}:
               raise SystemExit(f"unsupported runtime evidence member {member_name!r}")
           expected_path = "./" + member_name
           if sys.platform == "linux":
@@ -1426,6 +1526,78 @@ jobs:
                 "$resolution_binding_filter" "$resolution" >/dev/null; then
                 echo "runtime evidence binding mismatch for $spec on $platform: expected the complete V2 platform tuple" >&2
                 exit 1
+              fi
+              if [[ "$spec" == live-hf-curl ]]; then
+                prune_manifest="$RUNNER_TEMP/${spec}-${platform_slug}-prune-manifest.json"
+                extract_evidence_json "$archive" "$prune_manifest" prune-manifest.json
+                prune_manifest_digest="sha256:$(sha256sum "$prune_manifest" | awk '{print $1}')"
+                minimization_report="$runtime_evidence_dir/runtime-minimization-${platform_slug}.json"
+                if [[ ! -s "$minimization_report" ]]; then
+                  echo "missing or empty runtime minimization evidence: $minimization_report" >&2
+                  exit 1
+                fi
+                if ! jq -e \
+                  --arg platform "$platform" \
+                  --arg prune_manifest_digest "$prune_manifest_digest" \
+                  --slurpfile resolution "$resolution" \
+                  --slurpfile prune "$prune_manifest" '
+                  def minimized_reason:
+                    . == "transitive_runtime_headers" or
+                    . == "transitive_runtime_man_info" or
+                    . == "transitive_runtime_build_metadata" or
+                    . == "transitive_runtime_python_tests" or
+                    . == "transitive_runtime_shell_completions" or
+                    . == "transitive_runtime_static_archives";
+                  def minimized_entries:
+                    [.entries[] | select(.reason | minimized_reason)];
+                  def minimized_subtrees:
+                    [(.subtrees // [])[] | select(.reason | minimized_reason)];
+                  ($prune[0] | minimized_entries) as $entries
+                  | ($prune[0] | minimized_subtrees) as $subtrees
+                  | ($resolution[0].requested | map(.id) | sort) as $requested
+                  | .schema_version == "dalec-homebrew-runtime-minimization-evidence/v1" and
+                    .platform == $platform and
+                    .spec == "live-hf-curl" and
+                    .size_report.schema_version == "dalec-homebrew-image-size-report/v1" and
+                    .size_report.platform.requested == $platform and
+                    .size_report.platform.effective == $platform and
+                    .size_report.docker.available == true and
+                    (.size_report.docker.inspect_size_bytes | type == "number" and . > 0) and
+                    .size_report.rootfs.available == true and
+                    (.size_report.rootfs.size_bytes | type == "number" and . > 0) and
+                    (.size_report.rootfs.evidence.files | index("/usr/share/dalec-homebrew/prune-manifest.json")) != null and
+                    $prune[0].schema_version == "dalec-homebrew-prune-manifest/v4" and
+                    (($prune[0].subtrees // []) | length) > 0 and
+                    ($prune[0].subtrees // [] | all(.commitment_schema == "dalec-homebrew-prune-subtree-commitment/v2")) and
+                    ($subtrees | all(.entry_count > 0 and .regular_bytes >= 0)) and
+                    ([$prune[0].entries[], ($prune[0].subtrees // [])[]] | all(.reason != "transitive_runtime_share_doc")) and
+                    .pruning.manifest_sha256 == $prune_manifest_digest and
+                    .pruning.resolution_digest == $prune[0].resolution_digest and
+                    .pruning.pruning_policy_digest == $prune[0].pruning_policy_digest and
+                    .pruning.pruning_policy_digest == $resolution[0].pruning_policy_digest and
+                    $requested == ["homebrew/core/curl", "homebrew/core/hf"] and
+                    .pruning.requested_formulae == $requested and
+                    ([($entries + $subtrees)[] | select(.formula_id as $id | $requested | index($id))] | length) == 0 and
+                    .pruning.explicit_entry_count == ($entries | length) and
+                    .pruning.subtree_count == ($subtrees | length) and
+                    .pruning.represented_path_count == (($entries | length) + ([$subtrees[].entry_count] | add // 0)) and
+                    .pruning.represented_path_count > 0 and
+                    .pruning.regular_bytes == (([$entries[] | select(.type == "file") | (.size // 0)] | add // 0) +
+                                              ([$subtrees[].regular_bytes] | add // 0)) and
+                    .pruning.regular_bytes > 0 and
+                    .pruning.reasons == (($entries + $subtrees) | map(.reason) | sort | unique) and
+                    .pruning.reasons == [
+                      "transitive_runtime_build_metadata",
+                      "transitive_runtime_headers",
+                      "transitive_runtime_man_info",
+                      "transitive_runtime_python_tests",
+                      "transitive_runtime_shell_completions",
+                      "transitive_runtime_static_archives"
+                    ]
+                ' "$minimization_report" >/dev/null; then
+                  echo "runtime minimization evidence mismatch for $spec on $platform" >&2
+                  exit 1
+                fi
               fi
               if [[ "$scope" == amd64-only ]]; then
                 if ! jq -e --arg catalog_extractor "$catalog_extractor_ref" '
@@ -2142,7 +2314,7 @@ jobs:
             .dalec_module == $inputs[0].dalec_module and
             .buildkit_module == $inputs[0].buildkit_module and
             .tap_policy_digest == "sha256:9f5b47c9d241dc16464dd81c350fc6c7755fa35c992bc821e6c3927573a3f217" and
-            .executable_runtime_policy_digest == "sha256:0dc59f0c1423083b4a2f49ea8356b2832a208dac121c4c080322b48d851f08a1" and
+            .executable_runtime_policy_digest == "sha256:d84e068f9ba7329a1399d598e26ef219ecba60ba3a3fc2f0244e46d234faf37a" and
             .supported_catalog_policy_versions == ["tap-catalog-v1"] and
             .supported_fetch_policy_versions == ["homebrew-bottle-fetch-v1"] and
             .supported_provenance_policy_versions == [
@@ -2720,6 +2892,7 @@ jobs:
               done
             done
             for platform in linux-amd64 linux-arm64; do
+              printf 'runtime-minimization-%s.json\n' "$platform"
               for spec in "${specs[@]}"; do
                 printf 'runtime-evidence-%s-%s.tar.gz\n' "$platform" "$spec"
               done
@@ -2728,7 +2901,7 @@ jobs:
               printf 'runtime-evidence-linux-amd64-%s.tar.gz\n' "$spec"
             done
           } | sort > "$contract_names"
-          expected_contract_count=$((34 + 2 * ${#specs[@]} + ${#amd64_only_specs[@]}))
+          expected_contract_count=$((36 + 2 * ${#specs[@]} + ${#amd64_only_specs[@]}))
           (( $(wc -l < "$contract_names") == expected_contract_count ))
           (
             cd dist/release

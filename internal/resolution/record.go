@@ -27,6 +27,8 @@ const (
 	PolicyVersionV1 = "homebrew-runtime-v1"
 	PolicyVersionV2 = "homebrew-runtime-v2"
 
+	RuntimeProfileMinimalV1 = "minimal-v1"
+
 	// SchemaVersion and PolicyVersion retain their V1 values for source
 	// compatibility with the existing resolver and materializer. V2 callers use
 	// the explicitly versioned constants and RecordV2 APIs.
@@ -187,6 +189,10 @@ type Components struct {
 }
 
 type RuntimePolicy struct {
+	// Profile is an in-memory V2 policy identity. It is deliberately excluded
+	// from immutable resolution JSON; replay derives the sole effective V2
+	// profile from PruningPolicyDigest.
+	Profile       string   `json:"-"`
 	User          string   `json:"user"`
 	UID           int      `json:"uid"`
 	GID           int      `json:"gid"`
@@ -409,6 +415,9 @@ func Validate(r *Record) error {
 	if err := validateRuntimeIdentity(r.Runtime); err != nil {
 		errs = append(errs, err)
 	}
+	if r.Runtime.Profile != "" {
+		errs = append(errs, errors.New("V1 runtime policy must not select a runtime profile"))
+	}
 	if (r.AttestationPolicy.Identity == "") == (r.AttestationPolicy.Waiver == "") {
 		errs = append(errs, errors.New("attestation policy must set exactly one of identity or waiver"))
 	}
@@ -480,6 +489,7 @@ func cloneRecord(r Record) Record {
 	b, _ := json.Marshal(r)
 	var c Record
 	_ = json.Unmarshal(b, &c)
+	c.Runtime.Profile = r.Runtime.Profile
 	return c
 }
 

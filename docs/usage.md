@@ -132,6 +132,50 @@ Dependency rules:
 - `dependencies.runtime` has no declaration-order semantics. For each platform, applicable roots are sorted lexicographically by canonical requested Formula ID. This canonical order is recorded in resolution evidence and drives the default generated `PATH`; installation uses a separate deterministic topological order so dependencies precede dependents. Requested Formulae that expose the same executable basename fail instead of silently shadowing one another.
 - A multi-platform build fails if the same canonical requested root resolves to different package versions on different platforms. Architecture-filtered roots that appear on only one platform are independent.
 
+## Automatic V2 runtime minimization
+
+A release-bound V2 frontend resolves, verifies, and installs the complete
+dependency closure before automatically applying conservative minimization
+during final runtime assembly. There is no Dalec extension or build argument
+that disables, selects, or broadens this behavior. V1 retains its legacy
+runtime assembly behavior.
+
+Requested Formulae are excluded from the added minimization; the existing
+baseline removal of package-manager state, receipts, and Formula source still
+applies. Only transitive `homebrew/core` Formulae are eligible, and only these
+six release-policy-enumerated path classes may be removed:
+
+- headers rooted at `include/`;
+- manual and Info trees rooted at `share/man/` and `share/info/`;
+- build metadata at exact pkg-config, CMake, and aclocal locations;
+- an exact Formula- and path-specific Python standard-library test subtree
+  authorized by the V2 policy. A directory merely named `test` elsewhere does
+  not qualify;
+- shell completions under `share/bash-completion/completions/`,
+  `share/fish/vendor_completions.d/`, and `share/zsh/site-functions/`; and
+- static `.a` archives below `lib/`, except in protected runtime-data
+  locations such as site-packages, `ensurepip`, `venv`, plugins, and
+  `node_modules`.
+
+The minimizer does not prune shared libraries, plugins, `libexec`,
+configuration, locales, Python site-packages, `ensurepip`, `venv`, any
+Formula `share/doc/` content, or static archives in protected runtime-data
+locations. Legal and license text is also retained.
+
+The release policy has one additional development-payload retention rule. Only
+an exact release-bound V2 Formula policy capability can activate compiler or
+MPI development retention. For a capability-authorized Formula, headers, build
+metadata, and static archives remain across its verified dependency closure.
+Unsigned OCI executable-path annotations cannot activate this rule. This does
+not disable the other pruning classes, and unrelated Formulae remain eligible
+for all six.
+
+The added classes do not apply to non-core Formulae. If an exact path
+classification is missing or a retained path or link would become invalid,
+assembly fails or retains the content; it does not infer that the content is
+safe to remove. Resolution, inventory, prune, and runtime-manifest evidence
+bind the release pruning policy and exact decisions.
+
 Target-specific dependencies, image settings, and tests belong to the fixed
 `homebrew` target alongside its child-routing metadata:
 
@@ -238,7 +282,7 @@ See the files under [`../examples/`](../examples/) for command output, filesyste
 
 Package metadata fields such as `name`, `description`, `website`, `version`, `revision`, and `license` may be supplied, but they are optional and do not drive dependency resolution for this runtime-only frontend.
 
-V1 behavior is limited to core-only global and selected-target `dependencies.runtime`, the image fields listed above, and tests without mounts. V2 retains that contract and adds public default GitHub taps addressed only as `owner/tap/formula`; runtime input still cannot provide repository URLs, keys, or endpoint configuration. Unknown non-extension Dalec fields are rejected by the strict decoder. The following known Dalec features are also rejected:
+V1 behavior is limited to core-only global and selected-target `dependencies.runtime`, the image fields listed above, tests without mounts, and legacy runtime assembly. V2 retains the Dalec input contract, adds public default GitHub taps addressed only as `owner/tap/formula`, and automatically applies the release-bound runtime minimization described above; runtime input still cannot provide repository URLs, keys, endpoint configuration, or pruning rules. Unknown non-extension Dalec fields are rejected by the strict decoder. The following known Dalec features are also rejected:
 
 - build, recommended, test, or sysext dependencies
 - extra package repositories

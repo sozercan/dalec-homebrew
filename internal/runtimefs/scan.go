@@ -154,7 +154,15 @@ func scanAndPlan(ctx context.Context, sourceRoot string, record *resolution.Reco
 	if err := attributeEntries(scan, policy); err != nil {
 		return nil, err
 	}
+	// Remove exact optional aliases before deriving minimal-profile link
+	// closures. A link absent from the final image must not retain its target.
 	pruneOptionalDependencyTooling(scan, policy)
+	if err := pruneMinimalRuntimeProfile(scan, policy); err != nil {
+		return nil, err
+	}
+	if err := validateRetainedLinks(scan); err != nil {
+		return nil, err
+	}
 	if err := validateRequestedExecutables(scan, record, policy); err != nil {
 		return nil, err
 	}
@@ -512,11 +520,17 @@ func attributeEntries(scan *sourceScan, policy *normalizedPolicy) error {
 	byInode := map[string]map[string]struct{}{}
 	byRelative := map[string]map[string]globalCandidate{}
 	for _, entry := range scan.entries {
-		if !entry.retain || entry.typeName != TypeRegular {
+		if !entry.retain {
 			continue
 		}
 		pkg, sub, ok := kegLocation(entry.rel, policy.nodes)
 		if !ok {
+			continue
+		}
+		if entry.typeName != TypeRegular {
+			if policy.allowlist.PruningProfile == policyv2.RuntimeProfileMinimalV1 {
+				entry.packageName = pkg
+			}
 			continue
 		}
 		entry.packageName = pkg
@@ -656,6 +670,535 @@ func pruneOptionalDependencyTooling(scan *sourceScan, policy *normalizedPolicy) 
 		entry.retain = false
 		entry.pruneReason = PruneOptionalTooling
 	}
+}
+
+func pruneMinimalRuntimeProfile(scan *sourceScan, policy *normalizedPolicy) error {
+	if policy.allowlist.PruningProfile != policyv2.RuntimeProfileMinimalV1 {
+		return nil
+	}
+
+	candidates := make(map[string]PruneReason)
+	for _, entry := range scan.entries {
+		if !entry.retain {
+			continue
+		}
+		if reason := minimalRuntimePruneReason(entry.rel, entry.packageName, policy); reason != "" && (reason != PruneRuntimeStatic || entry.typeName != TypeDirectory) {
+			candidates[entry.rel] = reason
+		}
+	}
+	// A retained exception such as legal text still needs its directory
+	// ancestors. Keep only those ancestors; siblings remain independently
+	// classified.
+	for _, entry := range scan.entries {
+		if !entry.retain {
+			continue
+		}
+		if _, pruned := candidates[entry.rel]; pruned {
+			continue
+		}
+		for parent := path.Dir(entry.rel); parent != "."; parent = path.Dir(parent) {
+			delete(candidates, parent)
+		}
+	}
+
+	// Homebrew exposes man pages, Info pages, and build metadata through global
+	// hardlinks and copies. Classify those before symlinks so a symlink that
+	// resolves through a matching global copy does not depend on lexical order.
+	for _, entry := range scan.entries {
+		if !entry.retain || entry.typeName != TypeRegular {
+			continue
+		}
+		if _, direct := candidates[entry.rel]; direct {
+			continue
+		}
+		node, ok := policy.nodes[entry.packageName]
+		if !ok {
+			continue
+		}
+		target := scan.byPath[path.Join("Cellar", node.Name, node.PkgVersion, entry.rel)]
+		if target == nil {
+			continue
+		}
+		reason := candidates[target.rel]
+		if reason == "" || !minimalRuntimeAliasContentMatches(entry, target) {
+			continue
+		}
+		if reason == "" || target == nil || entry.packageName == "" || entry.packageName != target.packageName || !minimalRuntimeAliasPath(entry.rel, reason, target.packageName, policy) {
+			continue
+		}
+		candidates[entry.rel] = reason
+	}
+
+	// Classify symlink aliases only after regular aliases have reached their
+	// final candidate state. A symlink remains removable only when its final
+	// target and its own path are in the same bounded class for one package.
+	for _, entry := range scan.entries {
+		if !entry.retain || entry.typeName != TypeSymlink {
+			continue
+		}
+		if _, direct := candidates[entry.rel]; direct {
+			continue
+		}
+		final, err := finalLinkTarget(scan.byPath, entry.rel, nil)
+		if err != nil {
+			return err
+		}
+		target := scan.byPath[final]
+		reason := candidates[final]
+		if reason == "" || target == nil || entry.packageName == "" || entry.packageName != target.packageName || !minimalRuntimeAliasPath(entry.rel, reason, target.packageName, policy) {
+			continue
+		}
+		candidates[entry.rel] = reason
+	}
+
+	// A protected runtime-data link, or a link owned by an exact requested keg,
+	// must remain usable. Remove only already-classified minimal-profile
+	// candidates needed by that relationship; this cannot broaden the exact-core
+	// or requested-root gates used to create candidates.
+	if err := retainMinimalRuntimeAliasTargets(scan, policy, candidates); err != nil {
+		return err
+	}
+
+	for _, entry := range scan.entries {
+		reason, ok := candidates[entry.rel]
+		if !ok {
+			continue
+		}
+		entry.retain = false
+		entry.pruneReason = reason
+	}
+	return nil
+}
+
+func minimalRuntimePruneReason(rel, packageName string, policy *normalizedPolicy) PruneReason {
+	reason, sub := minimalRuntimePathClass(rel, packageName, policy)
+	if reason == "" {
+		return ""
+	}
+	if _, retained := policy.toolchainDev[packageName]; retained {
+		switch reason {
+		case PruneRuntimeHeaders, PruneRuntimeBuild, PruneRuntimeStatic:
+			return ""
+		}
+	}
+	// These paths are runtime-bearing regardless of which removable class an
+	// ancestor otherwise matches. Keep the predicate path-only so assembly and
+	// independent inventory verification enforce the same conservative rule.
+	if minimalRuntimeAlwaysRetainedPath(sub) {
+		return ""
+	}
+	// Only archives below lib are eligible. Archive-looking files in headers,
+	// documentation, configuration, or other package data remain untouched.
+	if strings.EqualFold(path.Ext(sub), ".a") && !staticArchiveRuntimePath(sub) {
+		return ""
+	}
+	return reason
+}
+
+func minimalRuntimePathClass(rel, packageName string, policy *normalizedPolicy) (PruneReason, string) {
+	if policy == nil || policy.allowlist.PruningProfile != policyv2.RuntimeProfileMinimalV1 {
+		return "", ""
+	}
+	pkg, sub, ok := kegLocation(rel, policy.nodes)
+	if !ok || pkg != packageName {
+		return "", ""
+	}
+	if _, requested := policy.requested[pkg]; requested {
+		return "", ""
+	}
+	node, ok := policy.nodes[pkg]
+	if !ok || !exactCoreRuntimeProfileNode(node) {
+		return "", ""
+	}
+	if isWithin(sub, "include") {
+		return PruneRuntimeHeaders, sub
+	}
+	if isWithin(sub, "share/man") || isWithin(sub, "share/info") {
+		return PruneRuntimeDocs, sub
+	}
+	for _, root := range []string{"lib/pkgconfig", "share/pkgconfig", "lib/cmake", "share/cmake", "share/aclocal"} {
+		if isWithin(sub, root) {
+			return PruneRuntimeBuild, sub
+		}
+	}
+	if pythonStdlibTestPath(pkg, sub, policy) {
+		return PruneRuntimeTests, sub
+	}
+	if shellCompletionRuntimePath(sub) {
+		return PruneRuntimeShell, sub
+	}
+	if staticArchiveRuntimePath(sub) {
+		return PruneRuntimeStatic, sub
+	}
+	return "", sub
+}
+
+func exactCoreRuntimeProfileNode(node resolution.Node) bool {
+	id := "homebrew/core/" + node.Name
+	return node.PolicyFormulaID != "" && node.PolicyFormulaID == id && node.FullName == id
+}
+
+func pathContainsLegalText(rel string) bool {
+	components := strings.Split(rel, "/")
+	for index, component := range components {
+		if index == len(components)-1 {
+			if looksLikeLegalText(component) {
+				return true
+			}
+			continue
+		}
+		if looksLikeLegalContainer(component) {
+			return true
+		}
+	}
+	return false
+}
+
+func minimalRuntimeAlwaysRetainedPath(rel string) bool {
+	return pathContainsLegalText(rel) || formulaShareDocRuntimePath(rel) || minimalRuntimeProtectedDataPath(rel) || sharedObjectRuntimePath(rel)
+}
+
+func formulaShareDocRuntimePath(rel string) bool {
+	if isWithin(rel, "share/doc") {
+		return true
+	}
+	sub, ok := cellarKegSubpath(rel)
+	return ok && isWithin(sub, "share/doc")
+}
+
+func cellarKegSubpath(rel string) (string, bool) {
+	parts := strings.Split(rel, "/")
+	if len(parts) < 4 || parts[0] != "Cellar" {
+		return "", false
+	}
+	return strings.Join(parts[3:], "/"), true
+}
+
+func minimalRuntimeProtectedDataPath(rel string) bool {
+	for _, component := range strings.Split(rel, "/") {
+		switch strings.ToLower(component) {
+		case "libexec",
+			"etc",
+			"conf",
+			"config",
+			"configuration",
+			"locale",
+			"locales",
+			"site-packages",
+			"ensurepip",
+			"venv",
+			"plugin",
+			"plugins",
+			"node_modules":
+			return true
+		}
+	}
+	return false
+}
+
+func sharedObjectRuntimePath(rel string) bool {
+	base := strings.ToLower(path.Base(rel))
+	return strings.HasSuffix(base, ".so") || strings.Contains(base, ".so.")
+}
+
+func minimalRuntimeAliasRetainsTarget(rel, _ string, policy *normalizedPolicy) bool {
+	if minimalRuntimeAlwaysRetainedPath(rel) {
+		return true
+	}
+	if policy == nil {
+		return false
+	}
+	pkg, _, ok := kegLocation(rel, policy.nodes)
+	if !ok {
+		return false
+	}
+	_, requested := policy.requested[pkg]
+	return requested
+}
+
+func pythonStdlibTestPath(packageName, sub string, policy *normalizedPolicy) bool {
+	if policy == nil {
+		return false
+	}
+	testRoot, ok := policy.pythonTests[packageName]
+	return ok && isWithin(sub, testRoot)
+}
+
+func pythonStdlibTestRootForFormulaID(formulaID string) (string, bool) {
+	switch formulaID {
+	case "homebrew/core/python@3.13":
+		return "lib/python3.13/test", true
+	case "homebrew/core/python@3.14":
+		return "lib/python3.14/test", true
+	default:
+		return "", false
+	}
+}
+
+func minimalRuntimeAliasContentMatches(alias, target *sourceEntry) bool {
+	if alias == nil || target == nil || alias.typeName != TypeRegular || target.typeName != TypeRegular {
+		return false
+	}
+	if alias.inode != "" && alias.inode == target.inode {
+		return true
+	}
+	return alias.sha256 != "" && alias.sha256 == target.sha256 && alias.size == target.size && alias.mode.Perm()&0o111 == target.mode.Perm()&0o111
+}
+
+func minimalRuntimeAliasPath(rel string, reason PruneReason, packageName string, policy *normalizedPolicy) bool {
+	if minimalRuntimeAlwaysRetainedPath(rel) {
+		return false
+	}
+	switch reason {
+	case PruneRuntimeHeaders:
+		return headerAliasRuntimePath(rel)
+	case PruneRuntimeDocs:
+		return isWithin(rel, "share/man") || isWithin(rel, "share/info")
+	case PruneRuntimeBuild:
+		for _, root := range []string{"lib/pkgconfig", "share/pkgconfig", "lib/cmake", "share/cmake", "share/aclocal"} {
+			if isWithin(rel, root) {
+				return true
+			}
+		}
+	case PruneRuntimeTests:
+		return pythonStdlibTestAliasRuntimePath(rel, packageName, policy)
+	case PruneRuntimeShell:
+		return shellCompletionRuntimePath(rel)
+	case PruneRuntimeStatic:
+		return staticArchiveAliasRuntimePath(rel)
+	}
+	return false
+}
+
+func pythonStdlibTestAliasRuntimePath(rel, packageName string, policy *normalizedPolicy) bool {
+	if policy == nil {
+		return false
+	}
+	testRoot, ok := policy.pythonTests[packageName]
+	return ok && isWithin(rel, testRoot)
+}
+
+func headerAliasRuntimePath(rel string) bool {
+	if isWithin(rel, "include") {
+		return true
+	}
+	sub, ok := cellarKegSubpath(rel)
+	return ok && isWithin(sub, "include")
+}
+
+func shellCompletionRuntimePath(rel string) bool {
+	for _, root := range []string{
+		"share/bash-completion/completions",
+		"share/fish/vendor_completions.d",
+		"share/zsh/site-functions",
+	} {
+		if isWithin(rel, root) {
+			return true
+		}
+	}
+	return false
+}
+
+func staticArchiveRuntimePath(rel string) bool {
+	if !strings.EqualFold(path.Ext(rel), ".a") || !strings.HasPrefix(rel, "lib/") || minimalRuntimeProtectedDataPath(rel) {
+		return false
+	}
+	return true
+}
+
+func staticArchiveAliasRuntimePath(rel string) bool {
+	if minimalRuntimeProtectedDataPath(rel) {
+		return false
+	}
+	if staticArchiveRuntimePath(rel) {
+		return true
+	}
+	sub, ok := cellarKegSubpath(rel)
+	return ok && staticArchiveRuntimePath(sub)
+}
+
+type descendantPathRange struct {
+	start int
+	end   int
+}
+
+// descendantPathIndex consumes lexical path ranges without revisiting paths
+// covered by an earlier, overlapping directory closure. The successor cursor
+// keeps total traversal proportional to the indexed paths rather than to the
+// product of protected links and installed entries.
+type descendantPathIndex struct {
+	paths  []string
+	next   []int
+	ranges map[string]descendantPathRange
+}
+
+func newDescendantPathIndex(paths []string) *descendantPathIndex {
+	paths = slices.Clone(paths)
+	slices.Sort(paths)
+	paths = slices.Compact(paths)
+
+	next := make([]int, len(paths)+1)
+	for i := range next {
+		next[i] = i
+	}
+	return &descendantPathIndex{
+		paths:  paths,
+		next:   next,
+		ranges: make(map[string]descendantPathRange),
+	}
+}
+
+func (i *descendantPathIndex) consumeDescendants(root string, consume func(string)) {
+	pathRange, ok := i.ranges[root]
+	if !ok {
+		// A slash-delimited subtree is the lexical interval [root+"/",
+		// root+"0"): ASCII '0' immediately follows '/'. The target directory
+		// itself is retained separately by link tracing.
+		pathRange.start, _ = slices.BinarySearch(i.paths, root+"/")
+		pathRange.end, _ = slices.BinarySearch(i.paths, root+"0")
+		i.ranges[root] = pathRange
+	}
+
+	for current := i.nextUnconsumed(pathRange.start); current < pathRange.end; current = i.nextUnconsumed(current) {
+		rel := i.paths[current]
+		i.next[current] = i.nextUnconsumed(current + 1)
+		consume(rel)
+	}
+}
+
+func (i *descendantPathIndex) nextUnconsumed(pos int) int {
+	representative := pos
+	for i.next[representative] != representative {
+		representative = i.next[representative]
+	}
+	for i.next[pos] != pos {
+		next := i.next[pos]
+		i.next[pos] = representative
+		pos = next
+	}
+	return representative
+}
+
+func retainMinimalRuntimeAliasTargets(scan *sourceScan, policy *normalizedPolicy, candidates map[string]PruneReason) error {
+	queue := make([]*sourceEntry, 0)
+	for _, entry := range scan.entries {
+		if !entry.retain || entry.typeName != TypeSymlink || !minimalRuntimeAliasRetainsTarget(entry.rel, entry.packageName, policy) {
+			continue
+		}
+		queue = append(queue, entry)
+	}
+
+	seen := make(map[string]struct{}, len(queue))
+	var descendants *descendantPathIndex
+	for len(queue) > 0 {
+		entry := queue[0]
+		queue = queue[1:]
+		if _, ok := seen[entry.rel]; ok {
+			continue
+		}
+		seen[entry.rel] = struct{}{}
+		if _, pruned := candidates[entry.rel]; pruned {
+			continue
+		}
+		final, required, err := minimalRuntimeLinkRequirements(scan.byPath, entry.rel)
+		if err != nil {
+			return err
+		}
+		for _, rel := range required {
+			delete(candidates, rel)
+			if requiredEntry := scan.byPath[rel]; requiredEntry != nil && requiredEntry.typeName == TypeSymlink {
+				queue = append(queue, requiredEntry)
+			}
+		}
+		target := scan.byPath[final]
+		if target == nil || target.typeName != TypeDirectory {
+			continue
+		}
+		if descendants == nil {
+			paths := make([]string, 0, len(scan.entries))
+			for _, candidate := range scan.entries {
+				if !candidate.retain {
+					continue
+				}
+				paths = append(paths, candidate.rel)
+			}
+			descendants = newDescendantPathIndex(paths)
+		}
+		descendants.consumeDescendants(final, func(rel string) {
+			descendant := scan.byPath[rel]
+			if descendant == nil || !descendant.retain {
+				return
+			}
+			delete(candidates, rel)
+			if descendant.typeName == TypeSymlink {
+				queue = append(queue, descendant)
+			}
+		})
+	}
+	return nil
+}
+
+func minimalRuntimeLinkRequirements(entries map[string]*sourceEntry, rel string) (string, []string, error) {
+	queue := strings.Split(rel, "/")
+	stack := []string{}
+	visited := map[string]bool{}
+	required := []string{}
+	steps := 0
+	for len(queue) > 0 {
+		component := queue[0]
+		queue = queue[1:]
+		if component == "" || component == "." {
+			continue
+		}
+		if component == ".." {
+			if len(stack) == 0 {
+				return "", nil, runtimeError(CodeUnsafeLink, rel, "target escapes prefix")
+			}
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		stack = append(stack, component)
+		candidate := strings.Join(stack, "/")
+		entry, ok := entries[candidate]
+		if !ok {
+			continue
+		}
+		if !entry.retain {
+			return "", nil, runtimeError(CodeDanglingLink, rel, "required path %q is pruned", candidate)
+		}
+		required = append(required, candidate)
+		if entry.typeName != TypeSymlink {
+			if len(queue) > 0 && entry.typeName != TypeDirectory {
+				return "", nil, runtimeError(CodeDanglingLink, rel, "component %q is not a directory", candidate)
+			}
+			continue
+		}
+		steps++
+		if steps > 64 || visited[candidate] {
+			return "", nil, runtimeError(CodeUnsafeLink, rel, "symlink cycle through %q", candidate)
+		}
+		visited[candidate] = true
+		stack = nil
+		queue = append(strings.Split(entry.linkResolved, "/"), queue...)
+	}
+	resolved := strings.Join(stack, "/")
+	entry, ok := entries[resolved]
+	if !ok || !entry.retain {
+		return "", nil, runtimeError(CodeDanglingLink, rel, "target %q is absent or pruned", resolved)
+	}
+	return resolved, required, nil
+}
+
+func validateRetainedLinks(scan *sourceScan) error {
+	for _, entry := range scan.entries {
+		if !entry.retain || entry.typeName != TypeSymlink {
+			continue
+		}
+		if _, err := finalLinkTarget(scan.byPath, entry.rel, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateRequestedExecutables(scan *sourceScan, record *resolution.Record, policy *normalizedPolicy) error {

@@ -72,6 +72,85 @@ func TestV2RuntimePolicyBindings(t *testing.T) {
 	if digest, err := V2RuntimePolicyDigest(); err != nil || digest == "" {
 		t.Fatalf("digest=%q err=%v", digest, err)
 	}
+	profile := p.MinimalRuntimeProfile()
+	if profile.Name != policyv2.RuntimeProfileMinimalV1 || !slices.Equal(profile.Rules, policyv2.MinimalV1RuntimePruneRules()) {
+		t.Fatalf("minimal runtime profile=%+v", profile)
+	}
+}
+
+func TestBindRuntimePolicyV2MinimalOnly(t *testing.T) {
+	implicitMinimal := testRuntimePolicyRecordV2(t)
+	implicitAllow, err := BindRuntimePolicyV2(implicitMinimal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if implicitMinimal.Runtime.Profile != policyv2.RuntimeProfileMinimalV1 || implicitAllow.PruningProfile != policyv2.RuntimeProfileMinimalV1 {
+		t.Fatalf("implicit minimal binding = profile %q allowlist %q", implicitMinimal.Runtime.Profile, implicitAllow.PruningProfile)
+	}
+	if !slices.Equal(implicitAllow.PruningRules, policyv2.MinimalV1RuntimePruneRules()) {
+		t.Fatalf("minimal pruning rules=%v", implicitAllow.PruningRules)
+	}
+
+	explicitMinimal := testRuntimePolicyRecordV2(t)
+	explicitMinimal.Runtime.Profile = policyv2.RuntimeProfileMinimalV1
+	explicitAllow, err := BindRuntimePolicyV2(explicitMinimal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicitAllow.PruningProfile != policyv2.RuntimeProfileMinimalV1 {
+		t.Fatalf("explicit minimal allowlist profile = %q", explicitAllow.PruningProfile)
+	}
+	if implicitMinimal.PruningPolicyDigest != explicitMinimal.PruningPolicyDigest {
+		t.Fatalf("implicit and explicit minimal policy digests differ: %s != %s", implicitMinimal.PruningPolicyDigest, explicitMinimal.PruningPolicyDigest)
+	}
+	implicitDigest, err := resolution.DigestV2(implicitMinimal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicitDigest, err := resolution.DigestV2(explicitMinimal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if implicitDigest != explicitDigest {
+		t.Fatalf("implicit and explicit minimal resolution digests differ: %s != %s", implicitDigest, explicitDigest)
+	}
+
+	implicitMinimal.Runtime.Profile = "standard-v1"
+	if _, err := BindRuntimePolicyV2(implicitMinimal); err == nil || !strings.Contains(err.Error(), "unsupported V2 runtime profile") {
+		t.Fatalf("BindRuntimePolicyV2() error = %v, want in-memory profile tamper rejection", err)
+	}
+}
+
+func TestVerifyRuntimePolicyV2InfersDecodedMinimalProfile(t *testing.T) {
+	record := testRuntimePolicyRecordV2(t)
+	record.Runtime.Profile = policyv2.RuntimeProfileMinimalV1
+	if _, err := BindRuntimePolicyV2(record); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := resolution.CanonicalV2(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(canonical, []byte(`"profile"`)) {
+		t.Fatalf("runtime profile leaked into V2 resolution: %s", canonical)
+	}
+	decoded, err := resolution.DecodeV2(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Runtime.Profile != "" {
+		t.Fatalf("decoded in-memory profile = %q, want empty", decoded.Runtime.Profile)
+	}
+	allow, err := VerifyRuntimePolicyV2(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allow.PruningProfile != policyv2.RuntimeProfileMinimalV1 {
+		t.Fatalf("inferred pruning profile = %q, want %q", allow.PruningProfile, policyv2.RuntimeProfileMinimalV1)
+	}
+	if decoded.Runtime.Profile != "" {
+		t.Fatalf("verification mutated decoded profile to %q", decoded.Runtime.Profile)
+	}
 }
 
 func TestRuntimeAllowlistV2UsesFullFormulaIDsForCapabilities(t *testing.T) {
@@ -127,7 +206,7 @@ func TestVerifyRuntimePolicyV2RequiresExactBindingsWithoutMutation(t *testing.T)
 			mutate: func(record *resolution.RecordV2) {
 				record.PruningPolicyDigest = "sha256:" + strings.Repeat("f", 64)
 			},
-			want: "does not match policy",
+			want: "does not match minimal runtime policy",
 		},
 		"mismatched tap policy digest": {
 			mutate: func(record *resolution.RecordV2) {
@@ -152,6 +231,7 @@ func TestVerifyRuntimePolicyV2RequiresExactBindingsWithoutMutation(t *testing.T)
 
 func assertVerifyRuntimePolicyV2DoesNotMutate(t *testing.T, record *resolution.RecordV2, wantError string) {
 	t.Helper()
+	profile := record.Runtime.Profile
 	before, err := json.Marshal(record)
 	if err != nil {
 		t.Fatal(err)
@@ -170,6 +250,9 @@ func assertVerifyRuntimePolicyV2DoesNotMutate(t *testing.T, record *resolution.R
 	}
 	if !bytes.Equal(before, after) {
 		t.Fatalf("VerifyRuntimePolicyV2() mutated record\nbefore: %s\n after: %s", before, after)
+	}
+	if record.Runtime.Profile != profile {
+		t.Fatalf("VerifyRuntimePolicyV2() mutated in-memory profile from %q to %q", profile, record.Runtime.Profile)
 	}
 }
 
@@ -283,7 +366,7 @@ func TestV2RuntimeWritablePathsAreCanonicalized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Count(string(data), "slices.Sort(writable)"); got < 2 {
-		t.Fatalf("V2 writable paths are sorted at %d policy boundaries, want at least 2", got)
+	if got := strings.Count(string(data), "slices.Sort(writable)"); got != 1 {
+		t.Fatalf("V2 writable paths are sorted at %d policy boundaries, want one shared boundary", got)
 	}
 }

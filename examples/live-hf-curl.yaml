@@ -5,7 +5,7 @@
 name: homebrew-live-hf-curl
 version: 0.1.0
 revision: 1
-description: Offline runtime validation for the Hugging Face CLI and curl closure
+description: Offline runtime validation for automatic V2 minimization of the Hugging Face CLI and curl closure
 website: https://huggingface.co/docs/huggingface_hub/
 license: Apache-2.0
 
@@ -33,6 +33,16 @@ tests:
           grep -q '^curl ' /tmp/curl-version
           test "$(id -u):$(id -g)" = "1000:1000"
 
+          curl_root="$(find "$HOMEBREW_PREFIX/Cellar/curl" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$curl_root"
+          test -s "$curl_root/include/curl/curl.h"
+          test -s "$curl_root/share/man/man1/curl.1"
+          test -s "$curl_root/lib/pkgconfig/libcurl.pc"
+
+          hf_root="$(find "$HOMEBREW_PREFIX/Cellar/hf" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$hf_root"
+          test -e "$hf_root/bin/hf"
+
           test ! -e "$HOMEBREW_PREFIX/bin/psl-make-dafsa"
           helper="$(find "$HOMEBREW_PREFIX/Cellar/libpsl" -path '*/bin/psl-make-dafsa' -type f -print -quit)"
           test -n "$helper"
@@ -50,6 +60,68 @@ tests:
           test "$(readlink "$shared_link")" = '../../../../../../../etc/ca-certificates/cert.pem'
           test -s "$HOMEBREW_PREFIX/etc/ca-certificates/cert.pem"
           test ! -w "$HOMEBREW_PREFIX/etc/ca-certificates/cert.pem"
+
+          python_root="$(find "$HOMEBREW_PREFIX/Cellar/python@3.14" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$python_root"
+          test ! -e "$python_root/include"
+          test ! -e "$python_root/share/man"
+          test ! -e "$python_root/share/info"
+          test ! -e "$python_root/lib/pkgconfig"
+          test ! -e "$python_root/share/pkgconfig"
+          test ! -e "$python_root/lib/cmake"
+          test ! -e "$python_root/share/cmake"
+          test ! -e "$python_root/share/aclocal"
+          test ! -e "$python_root/lib/python3.14/test"
+
+          test -s "$python_root/lib/python3.14/ensurepip/__init__.py"
+          test -s "$python_root/lib/python3.14/venv/__init__.py"
+          test -n "$(find "$python_root/libexec" -type f -print -quit)"
+          test -n "$(find "$python_root/lib" -maxdepth 1 -name 'libpython3.14.so*' -print -quit)"
+
+          zlib_root="$(find "$HOMEBREW_PREFIX/Cellar/zlib-ng-compat" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$zlib_root"
+          test ! -e "$zlib_root/lib/libz.a"
+          test -n "$(find "$zlib_root/lib" -maxdepth 1 -name 'libz.so*' -print -quit)"
+
+          share_doc_file="$(find "$HOMEBREW_PREFIX/Cellar" -path '*/share/doc/*' -type f -print -quit)"
+          test -n "$share_doc_file"
+
+          prune_manifest=/usr/share/dalec-homebrew/prune-manifest.json
+          test -s "$prune_manifest"
+          "$python_root/bin/python3.14" - "$HOMEBREW_PREFIX" "$prune_manifest" <<'PY'
+          import json
+          import os
+          import sys
+
+          prefix, manifest_path = sys.argv[1:]
+          expected_reasons = {
+              "transitive_runtime_build_metadata",
+              "transitive_runtime_headers",
+              "transitive_runtime_man_info",
+              "transitive_runtime_python_tests",
+              "transitive_runtime_shell_completions",
+              "transitive_runtime_static_archives",
+          }
+          inactive_reasons = {"transitive_runtime_share_doc"}
+          requested = {"homebrew/core/curl", "homebrew/core/hf"}
+          with open(manifest_path, encoding="utf-8") as stream:
+              manifest = json.load(stream)
+          assert manifest["schema_version"] == "dalec-homebrew-prune-manifest/v4"
+          records = manifest["entries"] + manifest.get("subtrees", [])
+          observed = set()
+          for record in records:
+              reason = record.get("reason")
+              assert reason not in inactive_reasons, record
+              if reason not in expected_reasons:
+                  continue
+              observed.add(reason)
+              assert record.get("formula_id") not in requested, record
+              relative = record["path"]
+              assert relative and not relative.startswith("/"), record
+              assert ".." not in relative.split("/"), record
+              assert not os.path.lexists(os.path.join(prefix, relative)), record
+          assert observed == expected_reasons, (observed, expected_reasons)
+          PY
           echo hf-curl-runtime-closure-ok
         stdout:
           equals: "hf-curl-runtime-closure-ok\n"
@@ -60,5 +132,7 @@ tests:
         not_exist: true
       /home/linuxbrew/.linuxbrew/etc/ca-certificates/cert.pem:
         permissions: 0o644
+      /usr/share/dalec-homebrew/prune-manifest.json:
+        permissions: 0o444
       /home/linuxbrew/.linuxbrew/bin/brew:
         not_exist: true
