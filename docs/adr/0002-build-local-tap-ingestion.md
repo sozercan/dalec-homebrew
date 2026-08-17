@@ -31,6 +31,6 @@ Policy-derived bottles remain BuildKit states and use `build-local-artifact-v1`;
 
 ## Related documentation
 
-- [Usage: public-tap names](../usage.md#declare-runtime-dependencies)
+- [Usage: public-tap names](../usage.md#choose-packages)
 - [Architecture: public-tap flow](../architecture.md#public-tap-flow)
 - [Security: public-tap properties](../../SECURITY.md#public-tap-security-properties)

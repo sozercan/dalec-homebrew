@@ -19,7 +19,7 @@ These controls do not make all upstream software trustworthy. They make the inpu
 The README discovers the newest published `dalec-homebrew` release, then uses
 the exact upstream Dalec digest authenticated by that release's signed inputs.
 A mutable upstream `:latest` tag is not part of the trusted production path.
-See the [usage guide](docs/usage.md#verify-release-assets).
+See the [usage guide](README.md#2-prepare-a-verified-release).
 
 ## Trust model
 
@@ -42,7 +42,9 @@ alone; signed release evidence provides that external binding.
 The current implementation is expected to preserve these properties:
 
 1. Unsupported Dalec inputs, malformed Formula names, and invalid frontend-routing metadata fail before metadata or registry access.
-2. Formula identity and bottle checksums come from a verified Homebrew JWS payload and a pinned public-key set.
+2. For `homebrew/core`, Formula identity and bottle checksums come from a
+   verified Homebrew JWS payload and pinned public-key set. Public-tap identity
+   and checksum authority follow the separately documented release-bound path.
 3. Registry tags are discovery inputs only. Resolution records bind the fetched index descriptor and the selected manifest, config, and layer descriptor identities, sizes, media types, platforms, and selected annotations.
 4. The compressed bottle digest must equal both the selected OCI layer digest and the authenticated Homebrew checksum.
 5. Bottle archives are scanned before installation and cannot contain traversal, special files, setid bits, ACL or sparse metadata, security, trusted, or capability xattrs, collisions, or unbounded expansion. Bounded `user.*` xattrs may be recorded in verification inventory. Hardlinks remain keg-local. Symlinks remain keg-local except for two versioned cases using canonical relative traversal and exact preserved link text: links under the owner keg's `libexec/` tree may target `opt/<signed-direct-dependency>/...`, and exact core `certifi` paths matching `lib/python3.<minor>/site-packages/certifi/cacert.pem`, where `<minor>` is one or two decimal digits without a leading zero, may target only `etc/ca-certificates/cert.pem` when exact core `ca-certificates` is a signed direct dependency. Dependency-opt links must resolve inside the selected dependency keg before and after installation. The shared CA target must remain the direct, protected, nonempty, non-executable, single-link regular file of at most 1 MiB owned by the authenticated runtime identity; aliases receive the exception only when their own source path matches the same certifi grammar. Every other escaping link is rejected.
@@ -55,6 +57,14 @@ The current implementation is expected to preserve these properties:
 12. The Noble runtime base is cut from a fixed Ubuntu snapshot with a SHA-256-pinned Chisel binary and a checksummed, commit-pinned `chisel-releases` archive. Repository-local slice overrides are bound by source and component digests rather than separate per-file checksums. The build-only proxy accepts only Ubuntu archive hosts, while Chisel remains responsible for signed Release and package-digest verification; neither Chisel nor the proxy reaches the final image.
 13. Generated shared runtime data is accepted only at versioned paths with package and capability checks, bounded structure and size, authenticated runtime ownership, and explicit evidence attribution. Node's global `lib/node_modules/npm` runtime is accepted only as a bounded, exact copy of the verified private npm tree plus one exact prefix-bound `npmrc`, with command and manpage links bound back to that validated tree. Exact auxiliary scripts may waive an unavailable interpreter only while they are transitive and unexposed: core `libpsl`'s authenticated `bin/psl-make-dafsa` keg copy is inventoried while its global link is pruned; requesting `libpsl` or otherwise exposing the helper restores strict interpreter validation. Unrelated global `lib` or shared-data mutations continue to fail closed.
 14. Creating a `v*.*.*` release tag is a trusted release-operator action. Repository access must restrict tag creation to those operators, and tag rules should prevent update or deletion. The checked-in tag workflow rejects tag updates and deletions, dispatches only the privileged release workflow on `main`, and binds the initially pushed commit; a new build requires that commit to equal the trusted workflow commit before any registry or signing job runs.
+15. The release-bound runtime policy is applied only after complete resolution,
+    verification, and offline installation. Requested Formulae are the retention
+    boundary; only six enumerated development-file classes in eligible
+    transitive `homebrew/core` kegs may be removed. Runtime-sensitive and legal
+    content remains protected, exact policy capabilities control compiler or
+    MPI development retention, unknown paths fail closed, and evidence binds
+    every decision. Caller input and unsigned OCI annotations cannot disable or
+    broaden the policy.
 
 Production builds require the upstream Dalec target to be
 exactly `homebrew`, the child route to be exactly `image`, target and invocation
@@ -164,29 +174,11 @@ references, tap-policy digest, executable runtime-policy digest, and the exact
 supported catalog, fetch, and provenance policy versions. Invocation build
 arguments cannot add a capability that was not compiled into the frontend.
 
-### Artifact derivation and runtime minimization
+### Prebuilt executable archives
 
 1. Prebuilt executable archives are accepted only for exact Formula IDs in the embedded tap policy. The policy binds the Formula source digest, version, platform URLs and checksums, complete archive inventory, payload mapping, archive limits, static ELF properties, Go module identity, and CGO setting; Dalec input cannot provide or override any of those values.
 2. Build-local ingestion never runs a prebuilt Formula's `install` or `post_install` method. It verifies the upstream archive, derives a canonical receiptless bottle containing only the selected executable and authenticated Formula source, and binds the upstream and derived identities separately. Native bottles take precedence.
 3. Derived bottles pass the same hostile-bottle verification, offline per-package installation, receipt normalization, prefix-delta containment, runtime allowlisting, pruning, and SBOM attribution as upstream bottles. The explicit prebuilt derivation evidence prevents the build-locally generated artifact from being represented as an upstream-published bottle.
-4. A release-bound frontend automatically applies its immutable runtime-
-    minimization policy after complete resolution, verification, and offline
-    installation. Dalec input and build arguments cannot disable or broaden the
-    policy. Requested Formulae are the retention boundary; only the six exact
-    policy-enumerated classes of headers, man and Info trees, build metadata,
-    Python standard-library test paths, shell completions, and bounded `lib/`
-    static archives in transitive `homebrew/core` kegs are removed. Shared
-    libraries, plugins, `libexec`, configuration, locales, site-packages,
-    `ensurepip`, `venv`, `node_modules`, Formula `share/doc` content, legal or
-    license text, and static archives in protected runtime-data locations
-    remain. Only an exact release-bound Formula policy capability can
-    activate compiler or MPI development retention. For a capability-authorized
-    Formula, headers, build metadata, and static archives remain across its
-    verified dependency closure. Unsigned OCI executable-path annotations
-    cannot activate this retention. Unrelated Formulae remain eligible for
-    normal pruning.
-    Unknown identities and paths fail closed, evidence binds the pruning-policy
-    identity and exact decisions.
 
 ### Tap ingestion and replay
 

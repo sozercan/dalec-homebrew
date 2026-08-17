@@ -1,6 +1,6 @@
 # Release and rollback guide
 
-This guide is for maintainers and downstream release operators. Image users normally need only the [README quickstart](../README.md#quickstart) and [release-asset verification steps](usage.md#verify-release-assets). Terms used here are defined in the [glossary](../CONTEXT.md).
+This guide is for maintainers and downstream release operators. Image users normally need only the [README quickstart](../README.md#quickstart) and [release-asset verification steps](../README.md#2-prepare-a-verified-release). Terms used here are defined in the [glossary](../CONTEXT.md).
 
 A release is an immutable tuple of repository-owned frontend, runtime-base,
 bottle-fetcher, catalog-extractor, and materializer components together with
@@ -424,7 +424,7 @@ A release operator should:
    index digest before changing any mutable deployment reference.
 2. **Authenticate the release bundle.** Verify `SHA256SUMS.bundle`, then every
    required asset, with the identity and issuer in
-   [Verify release assets](usage.md#verify-release-assets). Also verify
+   [Verify release assets](../README.md#2-prepare-a-verified-release). Also verify
    `components.json.bundle` with the same certificate policy.
    For the component manifest itself:
 

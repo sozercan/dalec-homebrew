@@ -59,6 +59,6 @@ Rejected. Evidence must distinguish the original upstream archive from the build
 
 ## Related documentation
 
-- [Usage: runtime dependencies](../usage.md#declare-runtime-dependencies)
+- [Usage: runtime dependencies](../usage.md#choose-packages)
 - [Architecture: public-tap flow](../architecture.md#public-tap-flow)
 - [Security: public-tap properties](../../SECURITY.md#public-tap-security-properties)

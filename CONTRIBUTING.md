@@ -172,7 +172,7 @@ a sibling digest file named by appending `.digest` to the directory path:
 
 Set `DALEC_HOMEBREW_LIVE_METADATA_BUNDLE=/path/to/metadata-bundle`. Reconstruct
 and verify these files from the same signed release as described in the
-[usage guide](docs/usage.md#verify-release-assets). The runtime-base,
+[usage guide](README.md#2-prepare-a-verified-release). The runtime-base,
 materializer, and frontend inputs identify exact platform children; the separate
 frontend-index input is the parent claim bound into release evidence and is
 independently checked by release signing. References printed after a rebuild identify that run's

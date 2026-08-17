@@ -218,37 +218,55 @@ func TestPublicBuildDocsAuthenticateReleaseInputs(t *testing.T) {
 		childReference       = "ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>"
 	)
 
-	for _, relative := range []string{"README.md", filepath.Join("docs", "usage.md")} {
+	readDoc := func(relative string) string {
+		t.Helper()
 		data, err := os.ReadFile(filepath.Join(root, relative))
 		if err != nil {
 			t.Fatal(err)
 		}
-		text := string(data)
-		for _, want := range []string{
-			"components.json",
-			"inputs.json",
-			"metadata-bundle-manifest.json",
-			"metadata-formula.jws.json",
-			"metadata-migrations.jws.json",
-			"metadata-bundle.digest",
-			"SHA256SUMS.bundle",
-			"cosign verify-blob",
-			`--certificate-identity-regexp '^https://github\.com/sozercan/dalec-homebrew/\.github/workflows/release\.yml@refs/heads/main$'`,
-			"min >= (now - 7 * 24 * 60 * 60)",
-			`DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json`,
-			`DALEC_HOMEBREW_METADATA_BUNDLE/formula.jws.json`,
-			`DALEC_HOMEBREW_METADATA_BUNDLE/formula_tap_migrations.jws.json`,
-			`test "$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" = "sha256:$MANIFEST_SHA256"`,
-			`jq -er '.frontend.index'`,
-			`.frontend.platforms[]`,
-			`DALEC_SYNTAX="$(jq -er '.dalec_frontend.index'`,
-			`DALEC_FRONTEND_VERSION="$(jq -er '.dalec_frontend.module.version'`,
-			`# syntax=$DALEC_SYNTAX`,
-		} {
-			if !strings.Contains(text, want) {
-				t.Errorf("%s authenticated release preparation is missing %q", relative, want)
-			}
+		return string(data)
+	}
+	readme := readDoc("README.md")
+	usage := readDoc(filepath.Join("docs", "usage.md"))
+
+	for _, want := range []string{
+		"components.json",
+		"inputs.json",
+		"metadata-bundle-manifest.json",
+		"metadata-formula.jws.json",
+		"metadata-migrations.jws.json",
+		"metadata-bundle.digest",
+		"SHA256SUMS.bundle",
+		"cosign verify-blob",
+		`--certificate-identity-regexp '^https://github\.com/sozercan/dalec-homebrew/\.github/workflows/release\.yml@refs/heads/main$'`,
+		"min >= (now - 7 * 24 * 60 * 60)",
+		`DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json`,
+		`DALEC_HOMEBREW_METADATA_BUNDLE/formula.jws.json`,
+		`DALEC_HOMEBREW_METADATA_BUNDLE/formula_tap_migrations.jws.json`,
+		`test "$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" = "sha256:$manifest_sha256"`,
+		`jq -er '.frontend.index'`,
+		`.frontend.platforms[]`,
+		`DALEC_SYNTAX="$(jq -er '.dalec_frontend.index'`,
+		`DALEC_FRONTEND_VERSION="$(jq -er '.dalec_frontend.module.version'`,
+		`# syntax=$DALEC_SYNTAX`,
+	} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("README.md authenticated release preparation is missing %q", want)
 		}
+	}
+	for _, want := range []string{
+		"../README.md#2-prepare-a-verified-release",
+		"Release-approved upstream Dalec digest",
+		"Exact `dalec-homebrew` platform child",
+		"Matching `dalec-homebrew` parent index",
+		"Three-file Homebrew metadata bundle",
+	} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("docs/usage.md release-input reference is missing %q", want)
+		}
+	}
+
+	for relative, text := range map[string]string{"README.md": readme, filepath.Join("docs", "usage.md"): usage} {
 		for _, forbidden := range []string{
 			"ghcr.io/sozercan/dalec-homebrew:latest",
 			"DALEC_SYNTAX=ghcr.io/project-dalec/dalec/frontend:latest",
@@ -258,32 +276,23 @@ func TestPublicBuildDocsAuthenticateReleaseInputs(t *testing.T) {
 			}
 		}
 
+		found := 0
 		for _, tail := range strings.Split(text, "```console")[1:] {
 			block, _, ok := strings.Cut(tail, "```")
 			if !ok {
 				continue
 			}
-			for _, command := range []string{"curl -fL", "cosign verify-blob", "sha256sum --check", "docker buildx build"} {
+			for _, command := range []string{"curl -fsSL", "cosign verify-blob", "sha256sum --check", "docker buildx build"} {
 				position := strings.Index(block, command)
 				if position >= 0 && !strings.Contains(block[:position], "set -euo pipefail") {
 					t.Errorf("%s command %q can continue after an authentication or input failure:\n%s", relative, command, block)
 				}
 			}
-		}
-
-		found := 0
-		for _, tail := range strings.Split(text, "```console")[1:] {
-			block, _, ok := strings.Cut(tail, "```")
-			if !ok || !strings.Contains(block, "docker buildx build") {
+			if !strings.Contains(block, "docker buildx build") {
 				continue
 			}
 			found++
-			for _, want := range []string{
-				"--target homebrew/image",
-				indexBuildArg,
-				metadataBuildArg,
-				metadataBuildContext,
-			} {
+			for _, want := range []string{"--target homebrew/image", indexBuildArg, metadataBuildArg, metadataBuildContext} {
 				if !strings.Contains(block, want) {
 					t.Errorf("%s build command is missing %q:\n%s", relative, want, block)
 				}
@@ -295,11 +304,7 @@ func TestPublicBuildDocsAuthenticateReleaseInputs(t *testing.T) {
 	}
 
 	for _, relative := range []string{filepath.Join("examples", "forwarded-hello.yaml"), filepath.Join("examples", "hello.yaml")} {
-		data, err := os.ReadFile(filepath.Join(root, relative))
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(data)
+		text := readDoc(relative)
 		for _, want := range []string{indexReference, metadataReference, metadataContext, childReference} {
 			if !strings.Contains(text, want) {
 				t.Errorf("%s is missing %q", relative, want)
