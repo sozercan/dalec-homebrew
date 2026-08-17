@@ -4,17 +4,21 @@
 
 `dalec-homebrew` is an out-of-tree Dalec BuildKit gateway frontend. It converts
 Dalec `dependencies.runtime` entries into minimal Linux OCI images assembled
-from verified `homebrew/core` bottles.
+from verified Homebrew bottles.
 
-The V1 contract is intentionally narrow:
+The supported contract is intentionally narrow:
 
 - Linux `amd64` and `arm64` only.
-- Current stable `homebrew/core` Formulae, installed from bottles only.
+- Current stable Formulae from `homebrew/core` and public default GitHub taps,
+  installed from bottles, plus exact release-policy-authorized prebuilt
+  executable archives.
 - Authenticated Formula metadata and exact digest-bound OCI descriptors.
 - Offline materialization onto a snapshot-pinned Ubuntu Chisel runtime base.
 - Non-root final images with root-owned, non-writable runtime code.
-- No version ranges, casks, third-party taps, source builds, custom runtime
-  bases, or networked runtime tests.
+- Automatic release-bound runtime minimization of transitive core packages.
+- No version ranges, casks, private or authenticated taps, arbitrary Git
+  remotes, general source builds, custom runtime bases, or networked runtime
+  tests.
 
 Security, reproducibility, and fail-closed behavior are product requirements.
 Do not trade them for convenience or silently broaden the supported contract.
@@ -61,7 +65,10 @@ reset, discard, or rewrite them.
   and execution.
 - `internal/frontend`: DockerUI orchestration, platform fan-out, image config,
   tests, and exporter epoch handling.
-- `internal/policy`, `policy/v1`, `internal/release`, and `release/`: versioned
+- `internal/catalog*`, `internal/fetcher`, and `internal/prebuilt`: public tap
+  ingestion, bounded artifact fetching, and policy-authorized prebuilt archive
+  derivation.
+- `internal/policy`, `policy/`, `internal/release`, and `release/`: versioned
   runtime policy and release tuple validation.
 - `internal/buildfiles`: source-level contract tests for Dockerfile, Bake,
   pins, and release workflows.

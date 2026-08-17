@@ -1,14 +1,23 @@
-# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
-# Also pass the matching parent index from trusted release evidence:
-# --build-arg DALEC_HOMEBREW_FRONTEND_INDEX_REF=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>
-# --build-arg DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=sha256:<metadata-bundle-manifest-digest>
-# --build-context dalec-homebrew-metadata=/path/to/verified/metadata-bundle
+# syntax=ghcr.io/project-dalec/dalec/frontend:latest
+#
+# Replace <dalec-homebrew-child-digest> at the bottom of this file with the
+# release image digest for your builder's architecture, then build with the
+# matching release inputs:
+#
+#   docker buildx build \
+#     --build-arg DALEC_HOMEBREW_FRONTEND_INDEX_REF=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest> \
+#     --build-arg DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=sha256:<metadata-bundle-manifest-digest> \
+#     --build-context dalec-homebrew-metadata=/path/to/verified/metadata-bundle \
+#     --target homebrew/image --platform linux/amd64 --file examples/hello.yaml \
+#     --tag hello-runtime:local --load .
+#
+# The README quickstart shows how to obtain those values from a release.
 name: hello-runtime
 description: GNU hello from a verified Homebrew bottle
 website: https://www.gnu.org/software/hello/
 version: 0.1.0
 revision: 1
-license: Apache-2.0
+license: GPL-3.0-or-later
 
 dependencies:
   runtime:

@@ -1,5 +1,22 @@
 # Domain glossary
 
+## Formula
+
+A Homebrew package definition. `dalec-homebrew` addresses one by its canonical
+identity: `homebrew/core/<name>` for core packages, or `owner/tap/formula` for a
+public default GitHub tap.
+
+## Tap
+
+A repository of Formulae. Only `homebrew/core` and public default GitHub taps
+(`https://github.com/<owner>/homebrew-<tap>`) are supported.
+
+## Metadata bundle
+
+The authenticated snapshot of Homebrew's signed Formula and tap-migration
+documents that a release captures once and binds by digest. Builds read Formula
+metadata only from that snapshot.
+
 ## Bottle
 
 A Homebrew package archive with a Cellar keg layout and embedded Formula metadata that can be verified and poured without building source.

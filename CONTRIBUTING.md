@@ -1,36 +1,47 @@
 # Contributing
 
-Contributions are welcome. This guide covers the local workflow; the [architecture](docs/architecture.md), [security policy](SECURITY.md), and [release guide](docs/release.md) describe the design constraints that changes must preserve.
+Thanks for your interest in `dalec-homebrew`. This guide covers the local
+workflow: what to install, what to run, and what reviewers expect.
 
-## Prerequisites
+Most contributions — bug fixes, new tests, and documentation — need nothing
+beyond the Go tests. The container, live, and release sections further down
+apply when you change image composition, materialization, or release inputs.
 
-For Go development:
+Read the [architecture overview](docs/architecture.md), the
+[security policy](SECURITY.md), and the [release guide](docs/release.md) before
+changing behavior. They describe the design constraints that every change must
+preserve.
 
-- Go 1.25.9 for CI and release parity; newer local toolchains are not the
-  release-tested toolchain
-- Bash, Make, `jq`, and Python 3
+## Getting started in 5 minutes
 
-For component and integration work:
-
-- Docker Buildx `v0.36.0` backed by BuildKit `v0.32.0` for parity with CI
-  and release automation; these are the release-tested executor pins, while
-  `github.com/moby/buildkit v0.31.2` is the Go module version
-- For component rebuild mode, a writable OCI registry reachable from the selected BuildKit daemon
-- For published-tuple mode, pull access from the selected BuildKit daemon to each digest-pinned component reference and the release-bound upstream Dalec frontend
-- Builder access to authenticated Homebrew metadata, selected bottle layers, component registries, and the pinned Ubuntu inputs used by the selected mode
-
-Additional reporting and VM validation tools are listed in their sections below.
-
-## Set up the repository
-
-Download dependencies and build the host tools:
+You need Go 1.25.9 — the version in `go.mod`, and the toolchain CI and releases
+are tested with — plus Bash, Make, and `jq`. A newer local toolchain is not the
+release-tested toolchain.
 
 ```console
+git clone https://github.com/sozercan/dalec-homebrew.git
+cd dalec-homebrew
 go mod download
+make test
+make check
+```
+
+`make test` runs every Go test. `make check` runs the canonical repository
+check that CI runs. If both pass, your change is ready for review unless it
+touches the areas covered by the container and release sections below.
+
+While iterating, run the narrowest relevant test first, for example
+`go test ./internal/resolver`, and then widen to `make check`.
+
+## Build the host binaries
+
+```console
 make build
 ```
 
-`make build` writes ignored, host-native binaries to `bin/`. The frontend is a BuildKit gateway process rather than a conventional CLI; the materializer and test runner are pipeline internals.
+`make build` writes ignored, host-native binaries to `bin/`. The frontend is a
+BuildKit gateway process rather than a conventional CLI; the materializer and
+test runner are pipeline internals.
 
 ## Run validation
 
@@ -42,7 +53,7 @@ before opening a pull request.
 | `make test` | All Go tests |
 | `make vet` | `go vet ./...` |
 | `make build` | Host builds for the primary command binaries, including `dalec-homebrew-release-manifest` |
-| `make check` | Shell syntax checks, tests, vet, selected race tests, and Linux cross-builds for every command on `amd64` and `arm64` |
+| `make check` | Shell syntax checks, the live-helper unit test, all tests, vet, selected race tests, and Linux cross-builds for every command on `amd64` and `arm64` |
 
 The canonical repository check is also available directly:
 
@@ -50,7 +61,8 @@ The canonical repository check is also available directly:
 ./scripts/check.sh
 ```
 
-Cross-compiled binaries are written to `/tmp`; validation should not modify the repository.
+Cross-compiled binaries are written to `/tmp`; validation should not modify the
+repository.
 
 CI also runs dependency tidiness, host builds, and whitespace checks:
 
@@ -62,10 +74,39 @@ git diff --check
 ```
 
 For workflow, Dockerfile, or Bake changes, CI additionally lints the workflows
-with its pinned `actionlint` image, validates `./scripts/release-inputs.sh`,
-prints the `release-children`, `release-frontend`, and `frontend` Bake graph, and builds the `amd64`
-frontend with the pinned Buildx and BuildKit executor. Run the applicable Docker
-checks from [Build component images](#build-component-images) locally.
+with its pinned `actionlint` image, validates `./scripts/release-inputs.sh` and
+the upstream Dalec pin in
+[`release/dalec-frontend.json`](release/dalec-frontend.json), prints the
+`release-children`, `release-frontend`, and `frontend` Bake graph, builds the
+`amd64` frontend with the pinned Buildx and BuildKit executor, and runs
+`./scripts/materializer-compat.sh` for `amd64` and `arm64`. Run the applicable
+Docker checks from [Build component images](#build-component-images) locally.
+
+## Tools for container and release work
+
+The remaining sections drive Docker, BuildKit, and registries. They need:
+
+- Docker Buildx `v0.36.0` backed by BuildKit `v0.32.0` for parity with CI
+  and release automation; these are the release-tested executor pins, while
+  `github.com/moby/buildkit v0.31.2` is the Go module version
+- `jq`, Python 3, `curl`, and `sha256sum` for the release-input, end-to-end,
+  compatibility, and reporting scripts
+- For component rebuild mode, a writable OCI registry reachable from the
+  selected BuildKit daemon
+- For published-tuple mode, pull access from the selected BuildKit daemon to
+  each digest-pinned component reference and the release-bound upstream Dalec
+  frontend
+- Builder access to authenticated Homebrew metadata, selected bottle layers,
+  component registries, and the pinned Ubuntu inputs used by the selected mode
+
+Released component indexes are published as immutable version tags, for example
+`ghcr.io/sozercan/dalec-homebrew:v0.2.9`. Platform children are addressable only
+by digest; read the index and its children with a command such as
+`docker buildx imagetools inspect ghcr.io/sozercan/dalec-homebrew:v0.2.9`. The
+`DALEC_HOMEBREW_LIVE_*_REF` variables and the end-to-end BuildKit and registry
+image inputs must be digest-pinned; a tag is rejected.
+
+Additional reporting and VM validation tools are listed in their sections below.
 
 ## Run the live BuildKit test
 
@@ -83,7 +124,7 @@ BuildKit --target homebrew/image
 | Mode | Required variables | Behavior |
 | --- | --- | --- |
 | Component rebuild | `DALEC_HOMEBREW_LIVE_BUILDER`, `DALEC_HOMEBREW_LIVE_REGISTRY`, and `DALEC_HOMEBREW_LIVE_PLATFORM` | Builds and pushes the runtime base, materializer, and `dalec-homebrew` child frontend with one fixed source-date epoch, then consumes their reported digests. |
-| Published tuple | Builder and platform plus the runtime-base child, materializer child, frontend index, and frontend child `DALEC_HOMEBREW_LIVE_*_REF` variables | Skips component builds and passes the immutable platform tuple through upstream Dalec to the release-bound child frontend. |
+| Published tuple | Builder and platform, the runtime-base child, materializer child, frontend index, and frontend child `DALEC_HOMEBREW_LIVE_*_REF` variables, and `DALEC_HOMEBREW_LIVE_METADATA_BUNDLE` | Skips component builds and passes the immutable platform tuple through upstream Dalec to the release-bound child frontend. |
 
 The helper validates [`release/dalec-frontend.json`](release/dalec-frontend.json)
 before any Docker command. It uses the pinned upstream index and fixed
@@ -136,6 +177,7 @@ Common optional variables:
 | `DALEC_HOMEBREW_LIVE_OUTPUT` | `load` | `load` the final image or `push` it |
 | `DALEC_HOMEBREW_LIVE_PROGRESS` | `plain` | Buildx progress output |
 | `DALEC_HOMEBREW_LIVE_METADATA_NOT_BEFORE` | unset | RFC3339 lower bound for authenticated Homebrew metadata |
+| `DALEC_HOMEBREW_LIVE_METADATA_BUNDLE` | unset | Captured metadata bundle directory; optional when rebuilding, required for a published tuple |
 | `DALEC_HOMEBREW_LIVE_DALEC_FRONTEND_PIN` | `release/dalec-frontend.json` | External upstream Dalec index/children/route binding |
 
 Rebuild-only options are `DALEC_HOMEBREW_LIVE_SOURCE_DATE_EPOCH` (default
@@ -148,14 +190,32 @@ Published mode requires digest-pinned
 `DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF`, and
 `DALEC_HOMEBREW_LIVE_FRONTEND_REF`. The runtime-base, materializer, and
 frontend inputs identify exact platform children; the separate frontend-index
-input is the parent claim bound into V2 evidence and independently checked by
-release signing. References printed after a rebuild identify that run's
-single-platform staging outputs, not release indexes.
+input is the parent claim bound into resolution evidence and independently
+checked by release signing, and it must use the same repository as the frontend
+child. References printed after a rebuild identify that run's single-platform
+staging outputs, not release indexes.
+
+Published mode also requires `DALEC_HOMEBREW_LIVE_METADATA_BUNDLE`: a directory
+holding the released `manifest.json`, `formula.jws.json`, and
+`formula_tap_migrations.jws.json`, plus a sibling `<directory>.digest` file
+containing exactly one `sha256:` digest. The helper recomputes the digest of
+`manifest.json`, compares it, and fails before Docker runs on any mismatch. It
+then passes the directory to the build as the `dalec-homebrew-metadata` context.
+Capture an equivalent bundle from current authenticated metadata with:
+
+```console
+go run ./cmd/metadata-bundle \
+  --output /tmp/metadata-bundle \
+  --digest-output /tmp/metadata-bundle.digest
+```
+
+The output directory must not already exist, and `--digest-output` must be the
+exact sibling file so the bundle keeps exactly three files.
 
 The helper prints the selected repository-owned components, upstream Dalec
-reference and route, metadata floor, final image name, final digest, and
-immutable `DALEC_HOMEBREW_LIVE_FINAL_REF` as shell assignments. After `push`,
-the final reference is pullable from the final image repository.
+reference and route, metadata floor, metadata bundle, final image name, final
+digest, and immutable `DALEC_HOMEBREW_LIVE_FINAL_REF` as shell assignments.
+After `push`, the final reference is pullable from the final image repository.
 
 ## Exercise focused runtime closures
 
@@ -164,20 +224,20 @@ Use `DALEC_HOMEBREW_LIVE_SPEC` to run the same helper with a focused example:
 - [`examples/live-toolchain.yaml`](examples/live-toolchain.yaml) — Azure CLI, OpenTofu, Go, Node/npm, jq, ripgrep, kubectl, and Helm in one closure
 - [`examples/live-curl.yaml`](examples/live-curl.yaml) — curl with its transitive libpsl helper retained only in the keg
 - [`examples/live-python-curl.yaml`](examples/live-python-curl.yaml) — Python plus curl without relying on an unversioned Python interpreter
-- [`examples/live-hf-curl.yaml`](examples/live-hf-curl.yaml) — Hugging Face CLI plus curl, including automatic V2 transitive pruning, requested-Formula retention, and certifi's exact shared CA links
+- [`examples/live-hf-curl.yaml`](examples/live-hf-curl.yaml) — Hugging Face CLI plus curl, including automatic transitive pruning, requested-Formula retention, and certifi's exact shared CA links
 - [`examples/live-python.yaml`](examples/live-python.yaml) — extensions, TLS and CA data, SQLite, compression, and time zones
 - [`examples/live-glibc.yaml`](examples/live-glibc.yaml) — the brewed loader, locale archive, and conversion modules
 - [`examples/live-redis.yaml`](examples/live-redis.yaml) — a stateful non-root lifecycle
 - [`examples/live-graphviz.yaml`](examples/live-graphviz.yaml) — plugins and generated shared runtime indexes
 
-Runtime-minimization changes require focused V2 coverage. Verify that requested
+Runtime-minimization changes require focused coverage. Verify that requested
 Formulae remain the retention boundary, that every removed path belongs to
 exactly one of the six documented classes, and that retained shared libraries,
 plugins, `libexec`, configuration, locales, Python site-packages, `ensurepip`,
 `venv`, Formula `share/doc` content, and static archives in protected
 runtime-data locations remain usable. Legal and license text must also remain.
 Add focused coverage for compiler and MPI development retention activated by an
-exact release-bound V2 Formula policy capability. Prove that headers, build
+exact release-bound Formula policy capability. Prove that headers, build
 metadata, and static archives remain across that node's verified dependency
 closure while unrelated nodes still prune, and that unsigned OCI
 executable-path annotations cannot activate retention. Review the generated
@@ -187,9 +247,10 @@ is not sufficient if runtime behavior or release-policy binding changes.
 ## Run the non-core production-path E2E
 
 Pull requests run [`scripts/noncore-e2e.sh`](scripts/noncore-e2e.sh) on
-`linux/amd64`. Unlike the core-only fixture set, this test exercises actual upstream-Dalec forwarding and assembles the full V2
-path: a local registry, one component BuildKit worker, the release-bound
-catalog extractor and bottle fetcher, and V2 materializer/frontend images. Tap
+`linux/amd64`. Unlike the core-only fixture set, this test exercises actual
+upstream-Dalec forwarding and assembles the complete production path: a local
+registry, one component BuildKit worker, the release-bound catalog extractor and
+bottle fetcher, and freshly built materializer and frontend images. Tap
 metadata and policy-derived bottles remain content-addressed BuildKit states;
 no catalog service, signing key, or public tunnel is started. It then builds
 [`examples/ci-noncore-multi-package.yaml`](examples/ci-noncore-multi-package.yaml)
@@ -211,7 +272,10 @@ DALEC_HOMEBREW_E2E_RUN_ID=local-1 \
 
 It needs Docker privilege for the BuildKit worker, public network access to
 GitHub, Homebrew metadata, GHCR, and the selected tap bottle hosts, and unused
-loopback port `5000` for the ephemeral local registry.
+loopback port `5000` for the ephemeral local registry. The run captures its own
+metadata bundle and removes its builder, registry container, network, and work
+directory on exit; set `DALEC_HOMEBREW_E2E_KEEP_WORK=1` to keep the work
+directory for debugging.
 
 ## Validate a published image on a VM
 
@@ -253,6 +317,9 @@ The size reporter emits JSON for registry or local images:
   localhost:5000/IMAGE:tag
 ```
 
+Use `--top N` to change how many of the largest entries are listed (default
+`25`), and `--help` for the full option list.
+
 It requires Docker, `jq`, and Python 3. `crane` or `skopeo` is optional; the
 script falls back to Docker Buildx metadata and may temporarily pull or copy the
 image when necessary. Private images require credentials for the selected
@@ -262,7 +329,7 @@ the daemon's registry configuration.
 
 ## Developer utilities
 
-Resolve current Formulae without materializing an image:
+Resolve current `homebrew/core` Formulae without materializing an image:
 
 ```console
 go run ./cmd/resolve \
@@ -271,18 +338,24 @@ go run ./cmd/resolve \
   --output resolution.json
 ```
 
-The standalone resolver is a diagnostic tool. It authenticates Homebrew metadata and records GHCR descriptors, but it does not bind a release component tuple. Use the record verifier only with a resolution produced by an actual frontend build or another release-aware workflow:
+The standalone resolver is a diagnostic tool. It authenticates Homebrew
+metadata and records GHCR descriptors, but it does not bind a release component
+tuple. Use the record verifier only with a resolution produced by an actual
+frontend build or another release-aware workflow:
 
 ```console
 go run ./cmd/record-verify path/to/release-bound-resolution.json
 ```
 
-`record-verify` checks schema and internal relationships recorded in the file; it
-does not re-fetch or cryptographically reverify the source JWS envelopes or OCI
-documents. Authenticate a persisted record through its signed release evidence
-before relying on that structural verification.
+`record-verify` accepts current and older resolution records, checks schema and
+internal relationships recorded in the file, and prints the canonical record
+digest. It does not re-fetch or cryptographically reverify the source JWS
+envelopes or OCI documents. Authenticate a persisted record through its signed
+release evidence before relying on that structural verification.
 
-Generate a canonical component manifest from immutable index and child references with `cmd/release-manifest` (run it with `--help` for the complete flag list), then validate and digest the result:
+Generate a canonical component manifest from immutable index and child
+references with `cmd/release-manifest` (run it with `--help` for the complete
+flag list), then validate and digest the result:
 
 ```console
 go run ./cmd/release-manifest --help
@@ -290,9 +363,11 @@ go run ./cmd/release-verify path/to/components.json
 ```
 
 [`release/components-v2.example.json`](release/components-v2.example.json)
-documents the current V2 shape but contains placeholders and is not directly
-verifiable. [`release/components.example.json`](release/components.example.json)
-retains the V1 shape.
+documents the current manifest shape, schema `dalec-homebrew-components/v2`, but
+contains placeholders and is not directly verifiable.
+[`release/components.example.json`](release/components.example.json) documents
+the older `dalec-homebrew-components/v1` shape that `release-verify` still
+accepts.
 
 ## Build component images
 
@@ -349,5 +424,8 @@ review, signing, and promotion requirements in
 - Add or update tests for behavior changes.
 - Update user documentation when the supported Dalec contract changes.
 - Run `make check` and the relevant CI-parity checks above.
-- Keep component and snapshot inputs digest-pinned; update the complete release tuple together.
+- Keep component and snapshot inputs digest-pinned; update the complete release
+  tuple together.
 - Avoid committing generated binaries, local resolution records, or size reports.
+- Report the verification you actually ran, and say which live or E2E checks you
+  skipped and why.
