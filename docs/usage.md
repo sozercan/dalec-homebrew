@@ -15,81 +15,78 @@ archives.
 - Docker Buildx or `buildctl` backed by BuildKit `0.31.2` or newer.
 - Network access from the BuildKit daemon to `ghcr.io`, GitHub, and the bottle
   hosts used by the packages you request.
+- `curl`, `jq`, `cosign`, and `sha256sum` (macOS: `shasum -a 256`) to prepare
+  the release inputs.
 
-Every build also needs four inputs that come from one `dalec-homebrew` release.
+## Set up the release inputs
 
-## The four build inputs
+Every build needs four things, and all of them come from one `dalec-homebrew`
+release:
 
-| Input | Where it goes | What it is |
-| --- | --- | --- |
-| Dalec frontend | `# syntax=` line | The upstream Dalec frontend, which reads your spec and hands the `homebrew` target to `dalec-homebrew` |
-| `dalec-homebrew` child | `targets.homebrew.frontend.image` | The exact platform image that runs the build, named by digest |
-| `dalec-homebrew` index | `--build-arg DALEC_HOMEBREW_FRONTEND_INDEX_REF` | The multi-platform release image the child belongs to, named by digest |
-| Homebrew package index | `--build-context dalec-homebrew-metadata` and `--build-arg DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST` | The signed Homebrew Formula snapshot captured by that release |
+| Input | Where it goes |
+| --- | --- |
+| Upstream Dalec frontend | the `# syntax=` line of your spec |
+| `dalec-homebrew` platform child | `targets.homebrew.frontend.image` |
+| `dalec-homebrew` release index | `--build-arg DALEC_HOMEBREW_FRONTEND_INDEX_REF` |
+| Homebrew package index | `--build-context dalec-homebrew-metadata` and `--build-arg DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST` |
 
-The child and index references must be digest-pinned; mutable tags are rejected
-before anything is downloaded. Use `ghcr.io/project-dalec/dalec/frontend:latest`
-for the `# syntax=` line while you are getting started, and pin the digest
-recorded in [`../release/dalec-frontend.json`](../release/dalec-frontend.json)
-for builds you want to reproduce or verify later. That file records the
-release-approved upstream Dalec index, its exact Linux platform children, the
-module identity, and the fixed `homebrew/image` route.
-
-### Get the references from a release
-
-Resolve the version tag of the release you want into the two digests it
-publishes:
+The frontend child and index must be digest-pinned; a tag is rejected before
+anything is downloaded. Take both from the release's signed `components.json`
+rather than resolving a tag yourself:
 
 ```console
-DALEC_HOMEBREW_VERSION=v0.2.9
-DALEC_HOMEBREW_REPO=ghcr.io/sozercan/dalec-homebrew
-ARCH=amd64   # the architecture of the machine running BuildKit
+set -euo pipefail
 
-DALEC_HOMEBREW_INDEX=$DALEC_HOMEBREW_REPO@$(
-  docker buildx imagetools inspect "$DALEC_HOMEBREW_REPO:$DALEC_HOMEBREW_VERSION" \
-    --format '{{.Manifest.Digest}}')
+DALEC_HOMEBREW_VERSION=$(curl -fsSL https://api.github.com/repos/sozercan/dalec-homebrew/releases |
+  jq -er 'map(select(.draft == false and .prerelease == false)) | max_by(.published_at).tag_name')
+RELEASE=https://github.com/sozercan/dalec-homebrew/releases/download/$DALEC_HOMEBREW_VERSION
 
-DALEC_HOMEBREW_CHILD=$DALEC_HOMEBREW_REPO@$(
-  docker buildx imagetools inspect --raw "$DALEC_HOMEBREW_REPO:$DALEC_HOMEBREW_VERSION" |
-    jq -r --arg arch "$ARCH" \
-      '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest')
-```
-
-### Prepare the Homebrew package index
-
-Homebrew signs its Formula index, and each release captures, verifies, and binds
-one snapshot of it. Builds read Formula metadata only from that snapshot, so a
-release always resolves the same package versions. Download the release assets,
-check them against the signed `SHA256SUMS`, and lay them out under the three
-file names the build expects:
-
-```console
-DALEC_HOMEBREW_ASSETS=https://github.com/sozercan/dalec-homebrew/releases/download/$DALEC_HOMEBREW_VERSION
-
-for asset in SHA256SUMS metadata-bundle.digest metadata-bundle-manifest.json \
-  metadata-formula.jws.json metadata-migrations.jws.json; do
-  curl -fsSLO "$DALEC_HOMEBREW_ASSETS/$asset"
+mkdir -p release homebrew-metadata
+for asset in components.json SHA256SUMS SHA256SUMS.bundle \
+  metadata-bundle-manifest.json metadata-formula.jws.json metadata-migrations.jws.json; do
+  curl -fsSL -o "release/$asset" "$RELEASE/$asset"
 done
-grep -E 'metadata-(bundle|formula|migrations)' SHA256SUMS | sha256sum -c -
 
+cosign verify-blob \
+  --bundle release/SHA256SUMS.bundle \
+  --certificate-identity-regexp '^https://github\.com/sozercan/dalec-homebrew/\.github/workflows/release\.yml@refs/heads/main$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  release/SHA256SUMS
+(cd release && sha256sum -c --ignore-missing SHA256SUMS)
+
+cp release/metadata-bundle-manifest.json homebrew-metadata/manifest.json
+cp release/metadata-formula.jws.json homebrew-metadata/formula.jws.json
+cp release/metadata-migrations.jws.json homebrew-metadata/formula_tap_migrations.jws.json
+
+ARCH=$(docker info --format '{{.Architecture}}' | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+DALEC_HOMEBREW_INDEX=$(jq -er .frontend.index release/components.json)
+DALEC_HOMEBREW_CHILD=$(jq -er --arg arch "$ARCH" \
+  '.frontend.platforms[] | select(.platform.architecture == $arch).ref' release/components.json)
 DALEC_HOMEBREW_METADATA_BUNDLE=$PWD/homebrew-metadata
-mkdir -p "$DALEC_HOMEBREW_METADATA_BUNDLE"
-install -m 0444 metadata-bundle-manifest.json "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json"
-install -m 0444 metadata-formula.jws.json "$DALEC_HOMEBREW_METADATA_BUNDLE/formula.jws.json"
-install -m 0444 metadata-migrations.jws.json "$DALEC_HOMEBREW_METADATA_BUNDLE/formula_tap_migrations.jws.json"
-
-DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$(tr -d '\n' < metadata-bundle.digest)
-test "$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" = "sha256:$(sha256sum "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json" | awk '{print $1}')"
+DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$(jq -er .metadata_bundle_digest release/components.json)
 ```
 
-The bundle folder must contain exactly `manifest.json`, `formula.jws.json`, and
-`formula_tap_migrations.jws.json`; the build rejects any other layout. The final
-line checks that the digest you pass to the build is the digest of the manifest
-you assembled.
+Notes on the pieces:
 
-> **Releases expire.** Metadata older than 168 hours (7 days) is rejected, and
-> that limit cannot be raised, so a published release only builds for a week
-> after its snapshot was captured. Always use the newest release.
+- The metadata folder must contain exactly `manifest.json`, `formula.jws.json`,
+  and `formula_tap_migrations.jws.json`. Any other layout is rejected.
+- `ARCH` is the architecture of the machine running BuildKit, which is what
+  executes the frontend. Building for the other architecture works if that
+  builder has emulation configured.
+- Use `ghcr.io/project-dalec/dalec/frontend:latest` on the `# syntax=` line
+  while getting started. For a build you want to reproduce or verify later, use
+  the digest your release was tested against: `jq -er .dalec_frontend.index`
+  from the release's `inputs.json`, which matches
+  [`../release/dalec-frontend.json`](../release/dalec-frontend.json).
+
+> **Releases expire.** Homebrew metadata older than 168 hours (7 days) is
+> rejected and the limit cannot be raised, so a published release only builds
+> for a week after its snapshot was captured. Check before building:
+>
+> ```console
+> jq -e '[.formula, .migrations] | map(.generated_at | fromdateiso8601) | min > now - 604800' \
+>   release/metadata-bundle-manifest.json
+> ```
 
 ## Build an image
 
@@ -108,7 +105,7 @@ image:
 targets:
   homebrew:
     frontend:
-      image: ghcr.io/sozercan/dalec-homebrew@sha256:<child-digest>
+      image: ghcr.io/sozercan/dalec-homebrew@sha256:<child-digest>   # $DALEC_HOMEBREW_CHILD
 ```
 
 Build it with the index and metadata inputs attached:
@@ -120,14 +117,13 @@ docker buildx build \
   --build-context "dalec-homebrew-metadata=$DALEC_HOMEBREW_METADATA_BUNDLE" \
   --target homebrew/image \
   --platform "linux/$ARCH" \
-  --file examples/forwarded-hello.yaml \
+  --file spec.yaml \
   --tag hello-runtime:local \
   --load \
   .
 ```
 
-A ready-to-copy spec is at
-[`../examples/forwarded-hello.yaml`](../examples/forwarded-hello.yaml).
+Ready-to-copy specs are in [`../examples/`](../examples/).
 
 ### Platforms
 
@@ -341,11 +337,10 @@ plugin, locale, generated-data, and stateful workload checks.
 
 ## What the build removes automatically
 
-After the complete dependency closure has been resolved, verified, and installed
-offline, the build removes development-only files from *transitive*
-`homebrew/core` packages. The packages you requested are the boundary: their
-payload is never touched by this step. There is no spec field or build argument
-that disables, selects, or widens the behavior.
+After the dependency closure is resolved, verified, and installed offline, the
+build removes development-only files from *transitive* `homebrew/core` packages.
+Packages you requested are never touched by this step, and no spec field or
+build argument can disable, select, or widen it.
 
 Exactly six classes of paths may be removed:
 
@@ -364,16 +359,16 @@ configuration, locales, Python site-packages, `ensurepip`, `venv`,
 `node_modules`, `share/doc/` content, legal and license text, and static
 archives in the protected locations above.
 
-Compiler and MPI packages are a special case: when the release policy
-authorizes one, headers, build metadata, and static archives are kept across its
-verified dependency closure so it remains usable, while unrelated packages are
-still pruned normally. Unsigned OCI executable-path annotations cannot activate
-that retention.
+Compiler and MPI packages are a special case: when the release policy authorizes
+one, headers, build metadata, and static archives are kept across its verified
+dependency closure so it stays usable, while unrelated packages are still pruned
+normally. Unsigned OCI executable-path annotations cannot activate that
+retention.
 
-Classification is fail-closed. If a path cannot be classified exactly, or if
+Classification is fail-closed: if a path cannot be classified exactly, or if
 removing it would break a retained path or link, the build keeps the content or
-fails; it never guesses. The pruning policy identity and every decision are
-recorded in the resolution, inventory, prune, and runtime-manifest evidence.
+fails. The policy identity and every decision are recorded in the resolution,
+inventory, prune, and runtime-manifest evidence.
 
 ## Runtime contents and evidence
 

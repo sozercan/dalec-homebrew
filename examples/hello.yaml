@@ -17,7 +17,7 @@ description: GNU hello from a verified Homebrew bottle
 website: https://www.gnu.org/software/hello/
 version: 0.1.0
 revision: 1
-license: Apache-2.0
+license: GPL-3.0-or-later
 
 dependencies:
   runtime:

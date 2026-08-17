@@ -170,9 +170,6 @@ func TestNonCoreE2ESpecContainsQualifiedAndCoreRoots(t *testing.T) {
 func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
 	root := repositoryRoot(t)
 	const (
-		indexResolution      = "docker buildx imagetools inspect"
-		indexAssignment      = "DALEC_HOMEBREW_INDEX=$DALEC_HOMEBREW_REPO@$("
-		childAssignment      = "DALEC_HOMEBREW_CHILD=$DALEC_HOMEBREW_REPO@$("
 		indexBuildArg        = `--build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX"`
 		metadataBuildArg     = `--build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST"`
 		metadataBuildContext = `--build-context "dalec-homebrew-metadata=$DALEC_HOMEBREW_METADATA_BUNDLE"`
@@ -180,8 +177,7 @@ func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
 		metadataReference    = "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=sha256:<metadata-bundle-manifest-digest>"
 		metadataContext      = "--build-context dalec-homebrew-metadata=/path/to/verified/metadata-bundle"
 		childReference       = "ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>"
-		mutableIndexBinding  = "DALEC_HOMEBREW_FRONTEND_INDEX_REF=ghcr.io/sozercan/dalec-homebrew:"
-		mutableChildBinding  = "image: ghcr.io/sozercan/dalec-homebrew:"
+		mutableReference     = "ghcr.io/sozercan/dalec-homebrew:"
 	)
 
 	for _, relative := range []string{"README.md", filepath.Join("docs", "usage.md")} {
@@ -190,33 +186,47 @@ func TestPublicProductionInvocationsBindFrontendIndex(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := string(data)
+
+		// The documented setup must authenticate the release assets it consumes.
+		for _, want := range []string{
+			"cosign verify-blob",
+			`--certificate-identity-regexp '^https://github\.com/sozercan/dalec-homebrew/\.github/workflows/release\.yml@refs/heads/main$'`,
+			"--certificate-oidc-issuer https://token.actions.githubusercontent.com",
+			"sha256sum -c --ignore-missing SHA256SUMS",
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s release authentication is missing %q", relative, want)
+			}
+		}
+
+		// The metadata context must be assembled under its exact member names.
 		for _, want := range []string{
 			"metadata-bundle-manifest.json",
 			"metadata-formula.jws.json",
 			"metadata-migrations.jws.json",
-			"metadata-bundle.digest",
-			`DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json`,
-			`DALEC_HOMEBREW_METADATA_BUNDLE/formula.jws.json`,
-			`DALEC_HOMEBREW_METADATA_BUNDLE/formula_tap_migrations.jws.json`,
-			`test "$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" = "sha256:$(sha256sum "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json" | awk '{print $1}')"`,
+			"homebrew-metadata/manifest.json",
+			"homebrew-metadata/formula.jws.json",
+			"homebrew-metadata/formula_tap_migrations.jws.json",
 		} {
 			if !strings.Contains(text, want) {
 				t.Errorf("%s metadata bundle preparation is missing %q", relative, want)
 			}
 		}
 
-		// A published release is named by version tag, but every documented
-		// build must still bind the exact index and platform child digests
-		// resolved from that tag.
-		for _, want := range []string{indexResolution, indexAssignment, childAssignment} {
+		// Component references must come from signed release data, and the
+		// seven-day metadata window must be checked before building.
+		for _, want := range []string{
+			"jq -er .frontend.index release/components.json",
+			".frontend.platforms[]",
+			"jq -er .metadata_bundle_digest release/components.json",
+			"now - 604800",
+		} {
 			if !strings.Contains(text, want) {
-				t.Errorf("%s must document resolving the release version tag to digests, missing %q", relative, want)
+				t.Errorf("%s must bind release inputs from signed component data, missing %q", relative, want)
 			}
 		}
-		for _, unwanted := range []string{mutableIndexBinding, mutableChildBinding} {
-			if strings.Contains(text, unwanted) {
-				t.Errorf("%s must not document a mutable frontend reference %q", relative, unwanted)
-			}
+		if strings.Contains(text, mutableReference) {
+			t.Errorf("%s must not document a mutable %q reference", relative, mutableReference)
 		}
 
 		found := 0
