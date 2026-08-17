@@ -3,6 +3,12 @@
 - Status: Accepted
 - Date: 2026-08-05
 
+## Plain-language summary
+
+A few Homebrew Formulae publish a ready-made executable but no Homebrew bottle. We support only explicitly reviewed cases: the release policy fixes the exact Formula, download, files, and executable properties, then the build converts that verified payload into the normal bottle-installation path. This does **not** enable general source builds or user-supplied archive URLs.
+
+For term definitions, see the [glossary](../../CONTEXT.md).
+
 ## Context
 
 Some public Homebrew Formulae distribute platform-specific, checksummed executable archives but do not publish Homebrew bottles. `sozercan/repo/a365` is the initial case: its Linux release archive contains an already-built `a365` executable, while the Formula installs that executable into `bin`.
@@ -50,3 +56,9 @@ Rejected. Evidence must distinguish the original upstream archive from the build
 - Catalog and resolution evidence gains an explicit prebuilt-derivation record.
 - The existing hostile-bottle verifier and offline per-package materializer remain authoritative for installation.
 - General Homebrew source builds and user-defined archive recipes remain unsupported.
+
+## Related documentation
+
+- [Usage: runtime dependencies](../usage.md#choose-packages)
+- [Architecture: public-tap flow](../architecture.md#public-tap-flow)
+- [Security: public-tap properties](../../SECURITY.md#public-tap-security-properties)

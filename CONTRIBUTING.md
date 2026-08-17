@@ -1,18 +1,20 @@
 # Contributing
 
-Contributions are welcome. This guide covers the local workflow; the [architecture](docs/architecture.md), [security policy](SECURITY.md), and [release guide](docs/release.md) describe the design constraints that changes must preserve.
+Contributions are welcome. This guide is for people changing the repository; image users should start with the [README](README.md) or [usage guide](docs/usage.md). The [glossary](CONTEXT.md) explains project terminology.
+
+Before changing behavior, read the [architecture](docs/architecture.md), [security model](SECURITY.md), and [release guide](docs/release.md). Security, reproducibility, and fail-closed behavior are part of the product contract, not optional hardening.
 
 ## Prerequisites
 
 For Go development:
 
-- Go 1.25.9 for CI and release parity; newer local toolchains are not the
+- [Go 1.25.9](https://go.dev/doc/install) for CI and release parity; newer local toolchains are not the
   release-tested toolchain
 - Bash, Make, `jq`, and Python 3
 
 For component and integration work:
 
-- Docker Buildx `v0.36.0` backed by BuildKit `v0.32.0` for parity with CI
+- [Docker Buildx](https://docs.docker.com/build/install-buildx/) `v0.36.0` backed by BuildKit `v0.32.0` for parity with CI
   and release automation; these are the release-tested executor pins, while
   `github.com/moby/buildkit v0.31.2` is the Go module version
 - For component rebuild mode, a writable OCI registry reachable from the selected BuildKit daemon
@@ -23,7 +25,7 @@ Additional reporting and VM validation tools are listed in their sections below.
 
 ## Set up the repository
 
-Download dependencies and build the host tools:
+Clone your fork, enter the checkout, and confirm that `git status --short` is clean before editing. Then download dependencies and build the host tools:
 
 ```console
 go mod download
@@ -61,6 +63,14 @@ make build
 git diff --check
 ```
 
+For documentation-only changes, also run the source-level documentation and
+release-contract tests plus the whitespace check:
+
+```console
+go test ./internal/buildfiles
+git diff --check
+```
+
 For workflow, Dockerfile, or Bake changes, CI additionally lints the workflows
 with its pinned `actionlint` image, validates `./scripts/release-inputs.sh`,
 prints the `release-children`, `release-frontend`, and `frontend` Bake graph, and builds the `amd64`
@@ -83,7 +93,7 @@ BuildKit --target homebrew/image
 | Mode | Required variables | Behavior |
 | --- | --- | --- |
 | Component rebuild | `DALEC_HOMEBREW_LIVE_BUILDER`, `DALEC_HOMEBREW_LIVE_REGISTRY`, and `DALEC_HOMEBREW_LIVE_PLATFORM` | Builds and pushes the runtime base, materializer, and `dalec-homebrew` child frontend with one fixed source-date epoch, then consumes their reported digests. |
-| Published tuple | Builder and platform plus the runtime-base child, materializer child, frontend index, and frontend child `DALEC_HOMEBREW_LIVE_*_REF` variables | Skips component builds and passes the immutable platform tuple through upstream Dalec to the release-bound child frontend. |
+| Published tuple | Builder and platform; the runtime-base child, materializer child, frontend index, and frontend child `DALEC_HOMEBREW_LIVE_*_REF` variables; and `DALEC_HOMEBREW_LIVE_METADATA_BUNDLE` | Skips component builds and passes the immutable platform tuple and its matching authenticated metadata bundle through upstream Dalec. |
 
 The helper validates [`release/dalec-frontend.json`](release/dalec-frontend.json)
 before any Docker command. It uses the pinned upstream index and fixed
@@ -94,9 +104,10 @@ index or the selected platform child, and the target must equal the pinned
 route. Partial, mutable, mismatched, or malformed inputs fail before the builder
 is inspected.
 
-Leave all four component reference variables unset to rebuild, or set
-all four to replay a published tuple. The input fixture must start with a
-`# syntax=` directive, define `dependencies.runtime` in map form, and not already
+Leave all four component-reference variables unset to rebuild. To replay a
+published tuple, set all four references **and** provide its reconstructed
+metadata bundle through `DALEC_HOMEBREW_LIVE_METADATA_BUNDLE`. The input
+fixture must start with a `# syntax=` directive, define `dependencies.runtime` in map form, and not already
 define a top-level `targets` mapping. The helper replaces the directive with
 upstream Dalec, injects the exact `targets.homebrew.frontend.image` mapping, and
 builds `--target homebrew/image`. The runtime dependency map is unordered. For
@@ -146,10 +157,25 @@ Published mode requires digest-pinned
 `DALEC_HOMEBREW_LIVE_RUNTIME_BASE_REF`,
 `DALEC_HOMEBREW_LIVE_MATERIALIZER_REF`,
 `DALEC_HOMEBREW_LIVE_FRONTEND_INDEX_REF`, and
-`DALEC_HOMEBREW_LIVE_FRONTEND_REF`. The runtime-base, materializer, and
-frontend inputs identify exact platform children; the separate frontend-index
-input is the parent claim bound into V2 evidence and independently checked by
-release signing. References printed after a rebuild identify that run's
+`DALEC_HOMEBREW_LIVE_FRONTEND_REF`, plus
+`DALEC_HOMEBREW_LIVE_METADATA_BUNDLE`. The bundle directory must contain
+`manifest.json`, `formula.jws.json`, and `formula_tap_migrations.jws.json`, with
+a sibling digest file named by appending `.digest` to the directory path:
+
+```text
+/path/to/metadata-bundle/
+├── manifest.json
+├── formula.jws.json
+└── formula_tap_migrations.jws.json
+/path/to/metadata-bundle.digest
+```
+
+Set `DALEC_HOMEBREW_LIVE_METADATA_BUNDLE=/path/to/metadata-bundle`. Reconstruct
+and verify these files from the same signed release as described in the
+[usage guide](README.md#2-prepare-a-verified-release). The runtime-base,
+materializer, and frontend inputs identify exact platform children; the separate
+frontend-index input is the parent claim bound into release evidence and is
+independently checked by release signing. References printed after a rebuild identify that run's
 single-platform staging outputs, not release indexes.
 
 The helper prints the selected repository-owned components, upstream Dalec
@@ -164,20 +190,20 @@ Use `DALEC_HOMEBREW_LIVE_SPEC` to run the same helper with a focused example:
 - [`examples/live-toolchain.yaml`](examples/live-toolchain.yaml) — Azure CLI, OpenTofu, Go, Node/npm, jq, ripgrep, kubectl, and Helm in one closure
 - [`examples/live-curl.yaml`](examples/live-curl.yaml) — curl with its transitive libpsl helper retained only in the keg
 - [`examples/live-python-curl.yaml`](examples/live-python-curl.yaml) — Python plus curl without relying on an unversioned Python interpreter
-- [`examples/live-hf-curl.yaml`](examples/live-hf-curl.yaml) — Hugging Face CLI plus curl, including automatic V2 transitive pruning, requested-Formula retention, and certifi's exact shared CA links
+- [`examples/live-hf-curl.yaml`](examples/live-hf-curl.yaml) — Hugging Face CLI plus curl, including automatic transitive pruning, requested-Formula retention, and certifi's exact shared CA links
 - [`examples/live-python.yaml`](examples/live-python.yaml) — extensions, TLS and CA data, SQLite, compression, and time zones
 - [`examples/live-glibc.yaml`](examples/live-glibc.yaml) — the brewed loader, locale archive, and conversion modules
 - [`examples/live-redis.yaml`](examples/live-redis.yaml) — a stateful non-root lifecycle
 - [`examples/live-graphviz.yaml`](examples/live-graphviz.yaml) — plugins and generated shared runtime indexes
 
-Runtime-minimization changes require focused V2 coverage. Verify that requested
+Runtime-minimization changes require focused coverage. Verify that requested
 Formulae remain the retention boundary, that every removed path belongs to
 exactly one of the six documented classes, and that retained shared libraries,
 plugins, `libexec`, configuration, locales, Python site-packages, `ensurepip`,
 `venv`, Formula `share/doc` content, and static archives in protected
 runtime-data locations remain usable. Legal and license text must also remain.
 Add focused coverage for compiler and MPI development retention activated by an
-exact release-bound V2 Formula policy capability. Prove that headers, build
+exact release-bound Formula policy capability. Prove that headers, build
 metadata, and static archives remain across that node's verified dependency
 closure while unrelated nodes still prune, and that unsigned OCI
 executable-path annotations cannot activate retention. Review the generated
@@ -187,9 +213,8 @@ is not sufficient if runtime behavior or release-policy binding changes.
 ## Run the non-core production-path E2E
 
 Pull requests run [`scripts/noncore-e2e.sh`](scripts/noncore-e2e.sh) on
-`linux/amd64`. Unlike the core-only fixture set, this test exercises actual upstream-Dalec forwarding and assembles the full V2
-path: a local registry, one component BuildKit worker, the release-bound
-catalog extractor and bottle fetcher, and V2 materializer/frontend images. Tap
+`linux/amd64`. Unlike the core-only fixture set, this test exercises actual upstream-Dalec forwarding and assembles the full production path: a local registry, one component BuildKit worker, the release-bound
+catalog extractor, bottle fetcher, materializer, and frontend images. Tap
 metadata and policy-derived bottles remain content-addressed BuildKit states;
 no catalog service, signing key, or public tunnel is started. It then builds
 [`examples/ci-noncore-multi-package.yaml`](examples/ci-noncore-multi-package.yaml)
@@ -290,9 +315,10 @@ go run ./cmd/release-verify path/to/components.json
 ```
 
 [`release/components-v2.example.json`](release/components-v2.example.json)
-documents the current V2 shape but contains placeholders and is not directly
-verifiable. [`release/components.example.json`](release/components.example.json)
-retains the V1 shape.
+documents the current manifest shape but contains placeholders and is not
+directly verifiable. The numeric filename suffix is a schema-compatibility
+label, not a release mode. [`release/components.example.json`](release/components.example.json)
+is retained as a historical schema fixture.
 
 ## Build component images
 
@@ -346,6 +372,8 @@ review, signing, and promotion requirements in
 
 ## Pull request checklist
 
+- Use a [Conventional Commit](https://www.conventionalcommits.org/) subject for
+  commits and the pull-request title. Sign commits with `git commit -s`.
 - Add or update tests for behavior changes.
 - Update user documentation when the supported Dalec contract changes.
 - Run `make check` and the relevant CI-parity checks above.

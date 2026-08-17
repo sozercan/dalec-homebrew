@@ -1,90 +1,181 @@
 <div align="center">
   <h1>dalec-homebrew</h1>
-  <p><strong>Build minimal Linux container images with Homebrew packages.</strong></p>
-  <p>Choose the packages you need. <code>dalec-homebrew</code> builds a ready-to-run image for you.</p>
+  <p><strong>Turn Homebrew packages into small, non-root Linux container images.</strong></p>
 </div>
 
----
+## What is this?
 
-`dalec-homebrew` uses [Dalec](https://github.com/project-dalec/dalec) to turn Homebrew packages into minimal, non-root Linux container images.
-
-## What you get
-
-- Choose packages from `homebrew/core` or public default GitHub taps in a release-bound V2 frontend, including exact policy-authorized prebuilt executable archives.
-- Get a minimal, non-root image without Homebrew or package managers.
-- Keep an SBOM and a record of everything included in the image.
-
-## Build an image
-
-The only supported production path uses two immutable gateway images:
-
-1. the upstream Dalec syntax frontend, which selects the `homebrew` target; and
-2. the digest-pinned `dalec-homebrew` child frontend, selected through
-   `targets.homebrew.frontend.image` and invoked at child route `image`.
-
-Release-bound child frontends also require the matching digest-pinned
-`dalec-homebrew` parent index through the
-`DALEC_HOMEBREW_FRONTEND_INDEX_REF` build argument. Upstream Dalec forwards
-that argument to the child; the child keeps the executing platform child and
-its separately trusted parent index as distinct identities.
-
-The child advertises `image` only so upstream Dalec can discover and forward to
-that route. Direct use of `dalec-homebrew` as the syntax frontend is unsupported:
-an `image` solve without the forwarded `homebrew` target context is rejected.
-
-Use the exact digests from trusted release evidence. The repository binding in
-[`release/dalec-frontend.json`](release/dalec-frontend.json) records the upstream
-Dalec index, its Linux platform children, and the fixed `homebrew/image` route.
-
-Released child frontends also require the exact authenticated Homebrew metadata
-bundle from the same release. First verify the release's signed `SHA256SUMS`,
-then reconstruct the three-file named context and verify its manifest digest:
-
-```console
-RELEASE_ASSETS=/path/to/verified/release-assets
-DALEC_HOMEBREW_METADATA_BUNDLE=$(mktemp -d)
-install -m 0444 "$RELEASE_ASSETS/metadata-bundle-manifest.json" "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json"
-install -m 0444 "$RELEASE_ASSETS/metadata-formula.jws.json" "$DALEC_HOMEBREW_METADATA_BUNDLE/formula.jws.json"
-install -m 0444 "$RELEASE_ASSETS/metadata-migrations.jws.json" "$DALEC_HOMEBREW_METADATA_BUNDLE/formula_tap_migrations.jws.json"
-DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$(tr -d '\n' < "$RELEASE_ASSETS/metadata-bundle.digest")
-test "$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" = "sha256:$(sha256sum "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json" | awk '{print $1}')"
-```
-
-### Build from the command line through upstream Dalec
-
-Build from stdin through upstream Dalec with `jq`:
-
-```console
-DALEC_FRONTEND=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
-DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>
-DALEC_HOMEBREW_CHILD=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>
-
-jq -nc --arg child_frontend "$DALEC_HOMEBREW_CHILD" '{
-  dependencies: {runtime: {hello: {}}},
-  image: {entrypoint: "/home/linuxbrew/.linuxbrew/bin/hello"},
-  targets: {homebrew: {frontend: {image: $child_frontend}}}
-}' |
-  docker buildx build \
-    --build-arg "BUILDKIT_SYNTAX=$DALEC_FRONTEND" \
-    --build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX" \
-    --build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" \
-    --build-context "dalec-homebrew-metadata=$DALEC_HOMEBREW_METADATA_BUNDLE" \
-    --target homebrew/image \
-    --platform linux/amd64 \
-    --tag hello-runtime:inline \
-    --load \
-    -
-
-docker run --rm hello-runtime:inline
-```
-
-### Build from YAML
-
-Save this as `hello.yaml`, replacing the syntax and child placeholders with
-immutable digests:
+`dalec-homebrew` is a [Dalec](https://github.com/project-dalec/dalec) extension
+for Docker Buildx. You describe the tools you want in YAML instead of writing a
+Dockerfile:
 
 ```yaml
-# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
+dependencies:
+  runtime:
+    curl: {}
+    jq: {}
+```
+
+BuildKit resolves those Formulae and their runtime dependencies, verifies the
+selected artifacts, installs them without network access, and copies an
+allowlisted runtime onto a clean Ubuntu base. The final image contains neither
+Homebrew nor a package manager.
+
+New to Dalec, frontends, Formulae, or bottles? You can follow the quickstart
+without knowing those terms; the [glossary](CONTEXT.md) explains them.
+
+## Why use it?
+
+- **Minimal runtime:** only explicitly selected runtime files and evidence are
+  copied from the build environment.
+- **Non-root by default:** processes run as `linuxbrew` (`1000:1000`), while
+  runtime code remains root-owned and non-writable.
+- **Verified inputs:** metadata, component identities, package digests, and
+  archive contents are checked before installation.
+- **Offline installation and tests:** Homebrew materialization and declared
+  runtime tests run without network access.
+- **Auditable output:** every image includes an SPDX SBOM plus resolution,
+  inventory, minimization, and materialization evidence.
+
+## Quickstart
+
+The steps below build GNU Hello. Run every block in the same Bash session.
+
+> [!IMPORTANT]
+> A released metadata snapshot is accepted for seven days. If no published
+> release has fresh metadata, there is temporarily no supported published build
+> path. The setup below detects that condition before the large download; do not
+> bypass or extend the limit.
+
+### 1. Install the prerequisites
+
+You need:
+
+- [Docker](https://docs.docker.com/get-docker/) with `docker buildx`;
+- Bash, `curl`, [`jq`](https://jqlang.github.io/jq/download/), `install`,
+  `grep`, `awk`, `tr`, `wc`, and either `sha256sum` or `shasum`; and
+- [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/)
+  3.1.2 or a compatible newer release.
+
+On Windows, use WSL or another compatible Bash environment. Confirm Docker and
+Buildx are ready:
+
+```console
+set -euo pipefail
+docker info >/dev/null
+docker buildx version
+```
+
+### 2. Prepare a verified release
+
+This block discovers the newest release unless you set
+`DALEC_HOMEBREW_VERSION` first. It authenticates the release assets, rejects
+stale metadata, and selects the exact component and Dalec frontend digests for
+your platform.
+
+```console
+set -euo pipefail
+
+RELEASE_DIR="$PWD/.dalec-homebrew/release"
+DALEC_HOMEBREW_METADATA_BUNDLE="$PWD/.dalec-homebrew/metadata"
+mkdir -p "$RELEASE_DIR" "$DALEC_HOMEBREW_METADATA_BUNDLE"
+
+if [ -z "${DALEC_HOMEBREW_VERSION:-}" ]; then
+  DALEC_HOMEBREW_VERSION="$(
+    curl -fsSL https://api.github.com/repos/sozercan/dalec-homebrew/releases/latest \
+      | jq -er .tag_name
+  )"
+fi
+RELEASE_URL="https://github.com/sozercan/dalec-homebrew/releases/download/$DALEC_HOMEBREW_VERSION"
+
+curl -fsSL "$RELEASE_URL/metadata-bundle-manifest.json" \
+  -o "$RELEASE_DIR/metadata-bundle-manifest.json"
+jq -e '
+  [.formula.generated_at, .migrations.generated_at]
+  | map(fromdateiso8601)
+  | min >= (now - 7 * 24 * 60 * 60)
+' "$RELEASE_DIR/metadata-bundle-manifest.json" >/dev/null || {
+  echo "No published dalec-homebrew release currently has fresh metadata." >&2
+  exit 1
+}
+
+for file in \
+  components.json inputs.json metadata-bundle.digest \
+  metadata-formula.jws.json metadata-migrations.jws.json \
+  SHA256SUMS SHA256SUMS.bundle
+do
+  curl -fsSL "$RELEASE_URL/$file" -o "$RELEASE_DIR/$file"
+done
+
+cosign verify-blob \
+  --bundle "$RELEASE_DIR/SHA256SUMS.bundle" \
+  --certificate-identity-regexp '^https://github\.com/sozercan/dalec-homebrew/\.github/workflows/release\.yml@refs/heads/main$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "$RELEASE_DIR/SHA256SUMS"
+
+grep -E '  \./(components\.json|inputs\.json|metadata-bundle\.digest|metadata-bundle-manifest\.json|metadata-formula\.jws\.json|metadata-migrations\.jws\.json)$' \
+  "$RELEASE_DIR/SHA256SUMS" > "$RELEASE_DIR/REQUIRED_SHA256SUMS"
+test "$(wc -l < "$RELEASE_DIR/REQUIRED_SHA256SUMS" | tr -d ' ')" -eq 6
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$RELEASE_DIR" && sha256sum --check REQUIRED_SHA256SUMS)
+  manifest_sha256="$(sha256sum "$RELEASE_DIR/metadata-bundle-manifest.json" | awk '{print $1}')"
+else
+  (cd "$RELEASE_DIR" && shasum -a 256 --check REQUIRED_SHA256SUMS)
+  manifest_sha256="$(shasum -a 256 "$RELEASE_DIR/metadata-bundle-manifest.json" | awk '{print $1}')"
+fi
+
+install -m 0444 "$RELEASE_DIR/metadata-bundle-manifest.json" \
+  "$DALEC_HOMEBREW_METADATA_BUNDLE/manifest.json"
+install -m 0444 "$RELEASE_DIR/metadata-formula.jws.json" \
+  "$DALEC_HOMEBREW_METADATA_BUNDLE/formula.jws.json"
+install -m 0444 "$RELEASE_DIR/metadata-migrations.jws.json" \
+  "$DALEC_HOMEBREW_METADATA_BUNDLE/formula_tap_migrations.jws.json"
+DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST="$(tr -d '\r\n' < "$RELEASE_DIR/metadata-bundle.digest")"
+test "$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" = "sha256:$manifest_sha256"
+
+if [ -z "${DALEC_HOMEBREW_PLATFORM:-}" ]; then
+  case "$(docker info --format '{{.Architecture}}')" in
+    x86_64|amd64) DALEC_HOMEBREW_PLATFORM=linux/amd64 ;;
+    arm64|aarch64) DALEC_HOMEBREW_PLATFORM=linux/arm64 ;;
+    *) echo "Set DALEC_HOMEBREW_PLATFORM to linux/amd64 or linux/arm64" >&2; exit 1 ;;
+  esac
+fi
+case "$DALEC_HOMEBREW_PLATFORM" in
+  linux/amd64|linux/arm64) ;;
+  *) echo "Unsupported platform: $DALEC_HOMEBREW_PLATFORM" >&2; exit 1 ;;
+esac
+arch="${DALEC_HOMEBREW_PLATFORM#linux/}"
+
+DALEC_HOMEBREW_INDEX="$(jq -er '.frontend.index' "$RELEASE_DIR/components.json")"
+DALEC_HOMEBREW_CHILD="$(
+  jq -er --arg arch "$arch" '
+    .frontend.platforms[]
+    | select(.platform.os == "linux" and .platform.architecture == $arch)
+    | .ref
+  ' "$RELEASE_DIR/components.json"
+)"
+DALEC_SYNTAX="$(jq -er '.dalec_frontend.index' "$RELEASE_DIR/inputs.json")"
+DALEC_FRONTEND_VERSION="$(jq -er '.dalec_frontend.module.version' "$RELEASE_DIR/inputs.json")"
+printf 'Using dalec-homebrew %s with Dalec %s for %s\n' \
+  "$DALEC_HOMEBREW_VERSION" "$DALEC_FRONTEND_VERSION" "$DALEC_HOMEBREW_PLATFORM"
+```
+
+The upstream `frontend:latest` tag is deliberately not used: it can move to a
+version that the selected release has not tested.
+
+### 3. Create the spec
+
+```console
+set -euo pipefail
+cat > hello.yaml <<EOF
+# syntax=$DALEC_SYNTAX
+
+name: hello-homebrew
+version: 1.0.0
+revision: 1
+description: GNU Hello in a minimal runtime image
+website: https://www.gnu.org/software/hello/
+license: GPL-3.0-or-later
 
 dependencies:
   runtime:
@@ -93,117 +184,98 @@ dependencies:
 image:
   entrypoint: /home/linuxbrew/.linuxbrew/bin/hello
 
+tests:
+  - name: hello-runs
+    steps:
+      - command: hello
+        stdout:
+          contains: ["Hello, world!"]
+
 targets:
   homebrew:
     frontend:
-      image: ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-child-digest>
+      image: $DALEC_HOMEBREW_CHILD
+EOF
 ```
 
-Build and run it:
+### 4. Build and run
 
 ```console
-DALEC_HOMEBREW_INDEX=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>
-
+set -euo pipefail
 docker buildx build \
   --build-arg "DALEC_HOMEBREW_FRONTEND_INDEX_REF=$DALEC_HOMEBREW_INDEX" \
   --build-arg "DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=$DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST" \
   --build-context "dalec-homebrew-metadata=$DALEC_HOMEBREW_METADATA_BUNDLE" \
   --target homebrew/image \
-  --platform linux/amd64 \
+  --platform "$DALEC_HOMEBREW_PLATFORM" \
   --file hello.yaml \
-  --tag hello-runtime:spec \
+  --tag hello-homebrew:1.0.0 \
   --load \
   .
 
-docker run --rm hello-runtime:spec
+docker run --rm hello-homebrew:1.0.0
 ```
 
-Both forms print:
+Expected output:
 
 ```text
 Hello, world!
 ```
 
-The upstream frontend forwards the effective Dalec spec to the exact
-`targets.homebrew.frontend.image`. The child requires the selected spec target
-to be `homebrew`, the child route to be `image`, target and invocation `cmdline`
-values to be empty, and the target frontend image to equal the child gateway
-`source`. Inside the child solve, `source` identifies `dalec-homebrew`, so the
-child can authenticate its own digest but cannot prove which parent frontend
-invoked it. Trusted releases bind the upstream Dalec index and children
-externally through the release pin and signed provenance.
+## Versions, in plain English
 
-The `dependencies.runtime` mapping is unordered. For each platform, applicable
-roots are sorted lexicographically by canonical requested Formula ID. This
-canonical order is recorded in resolution evidence and drives the default
-generated `PATH`; installation uses a separate deterministic topological order
-so dependencies precede dependents. Each global or selected-target
-`dependencies` scope must either be omitted or contain a non-empty runtime map;
-omit the selected scope to inherit global roots.
+- `DALEC_HOMEBREW_VERSION` selects one published component, policy, and metadata
+  tuple. The quickstart finds the newest release automatically.
+- `DALEC_FRONTEND_VERSION` is the compatible upstream Dalec version recorded by
+  that release. The image itself is still selected by digest.
+- Top-level `version: 1.0.0` is descriptive spec metadata. The image has that
+  tag only because the build command explicitly uses `--tag ...:1.0.0`.
+- `hello: {}` selects the stable Formula in the release's metadata snapshot.
+  Exact Formula names such as `python@3.14` work; version ranges and historical
+  versions do not.
 
-### Automatic V2 runtime minimization
+## What you built
 
-A release-bound V2 frontend automatically removes policy-enumerated
-development-only paths from transitive `homebrew/core` Formulae during final
-runtime assembly. Requested Formulae are the retention boundary: their package
-payload is not subject to this added minimization. The six bounded removable
-classes are headers, manuals and Info pages, build metadata, exact policy-
-authorized Python standard-library tests, shell completions, and static
-archives in bounded `lib/` locations.
+| Property | Value |
+| --- | --- |
+| Runtime user | `linuxbrew` (`1000:1000`) |
+| Working directory | `/home/linuxbrew` |
+| Homebrew prefix | `/home/linuxbrew/.linuxbrew` |
+| Evidence and SBOM | `/usr/share/dalec-homebrew` |
+| Package managers in the image | None |
 
-There is no Dalec input or build argument that enables, disables, or broadens
-the policy. Shared libraries, plugins, `libexec`, configuration, locales,
-Python site-packages, `ensurepip`, `venv`, `node_modules`, Formula `share/doc`
-content, and legal or license text remain. Static archives under those
-protected runtime-data locations also remain. Only an exact release-bound V2
-Formula policy capability can activate compiler or MPI development retention.
-For a capability-authorized Formula, headers, build metadata, and static
-archives also remain across its verified dependency closure; unrelated
-Formulae still use the six normal pruning classes. Unsigned OCI executable-path
-annotations cannot activate this retention. V1 frontends retain their legacy
-assembly behavior.
-See the [usage reference](docs/usage.md#automatic-v2-runtime-minimization) for
-the exact contract.
+To add packages, add keys under `dependencies.runtime`. To configure commands,
+environment, labels, volumes, or tests, see the [usage guide](docs/usage.md).
 
-See the [usage reference](docs/usage.md) for image settings, tests, dependency rules, and the complete supported contract.
-
-## Scope
+## Supported scope
 
 | Supported | Not supported |
 | --- | --- |
 | Linux `amd64` and `arm64` | Other platforms |
-| Current stable `homebrew/core` bottles, public default GitHub tap bottles, and exact release-policy-authorized prebuilt executable archives in V2-capable releases | Casks, private/authenticated taps, arbitrary Git remotes, general source builds, and non-self-contained bottle Formulae |
-| Non-root images | Custom base images and networked tests |
+| Stable Formulae from the release snapshot | Historical versions or ranges |
+| `homebrew/core` and public default GitHub taps | Casks, private taps, arbitrary Git remotes |
+| Bottles and exact policy-authorized prebuilt executables | General source builds |
+| Built-in non-root runtime base | Custom runtime bases |
+| Offline build-time runtime tests | Networked tests or test mounts |
 
-## Public taps (V2)
+## Common failures
 
-A V2-capable frontend accepts `owner/tap/formula` and derives only the public default GitHub repository `https://github.com/<owner>/homebrew-<tap>`. Bare names and explicit `homebrew/core/formula` canonicalize to the same core identity. The capability is compiled into the signed component tuple; build arguments cannot enable it on a core-only frontend.
+| Message or symptom | Action |
+| --- | --- |
+| Metadata is stale | Wait for a fresh release; never extend the release limit |
+| Child or index is not digest-pinned | Read both values from verified `components.json` |
+| Target or route is rejected | Build exactly `--target homebrew/image` through upstream Dalec |
+| A Formula or version is unavailable | Use a stable bottled Formula or exact published versioned name |
+| A runtime test cannot reach the network | Replace it with an offline assertion |
 
-Non-core builds run the release-bound catalog extractor directly on the caller's BuildKit worker. BuildKit fetches the derived public GitHub tap, records the exact observed commit/tree/archive identity, and evaluates Formula metadata in a network-disabled read-only exec. Core-only builds continue to use the official Homebrew JWS and GHCR path and never run the extractor.
+## Documentation
 
-The frontend verifies bottle checksums and sizes, hostile-archive structure, embedded Formula bytes, and any digest-advertised Sigstore/in-toto bundle covered by the release tap policy. Missing provenance is recorded as an explicit per-artifact waiver; invalid advertised provenance fails the build. No catalog server, signing key, database, or public service origin is required.
+- [Usage](docs/usage.md) — packages, image settings, tests, evidence, and errors
+- [Examples](examples/README.md) — templates versus integration fixtures
+- [Glossary](CONTEXT.md) — project terminology
+- [Security](SECURITY.md) — guarantees, trust boundaries, and limitations
+- [Architecture](docs/architecture.md) — build and verification flow
+- [Release and rollback](docs/release.md) — operator procedures
+- [Contributing](CONTRIBUTING.md) — local development and validation
 
-A Formula without a bottle remains unsupported unless its exact Formula ID is present in the embedded tap policy as a prebuilt executable archive. For those entries, build-local ingestion verifies the complete upstream archive and executable properties, creates a deterministic receiptless derived bottle containing only the policy-selected payload, and passes those content-addressed bytes directly into offline materialization. Build input cannot add archive recipes or enable another Formula.
-
-```yaml
-dependencies:
-  runtime:
-    acme/tools/widget: {}
-```
-
-The example identity above is illustrative; use a Formula present in the public tap selected by your release/test environment.
-
-## Examples
-
-Start with the standalone [forwarded hello](examples/forwarded-hello.yaml). The
-[multi-package toolchain](examples/live-toolchain.yaml),
-[curl](examples/live-curl.yaml), [Python plus curl](examples/live-python-curl.yaml),
-[Hugging Face plus curl](examples/live-hf-curl.yaml), [Python](examples/live-python.yaml),
-[Redis](examples/live-redis.yaml), [Graphviz](examples/live-graphviz.yaml), and
-[glibc](examples/live-glibc.yaml) files are base fixtures for `scripts/live-test.sh`; the helper validates them,
-injects the release-bound `targets.homebrew.frontend.image` child mapping, and
-builds through upstream Dalec's `homebrew/image` target.
-
-## Learn more
-
-[Usage](docs/usage.md) · [Security](SECURITY.md) · [Architecture](docs/architecture.md) · [Releases](docs/release.md) · [Contributing](CONTRIBUTING.md)
+Licensed under the [Apache License 2.0](LICENSE).
