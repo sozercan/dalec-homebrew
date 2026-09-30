@@ -29,10 +29,11 @@ a package manager.
 
 ## Get started
 
-The [quickstart](docs/quickstart.md) builds GNU Hello in four steps: install the
-prerequisites, prepare a verified release, write a spec, and build. It needs
-Docker with Buildx, Bash, `curl`, `jq`, and `cosign`, and assumes no Dalec or
-Homebrew knowledge.
+The [quickstart](docs/quickstart.md) turns a short spec into a GNU Hello image in
+three steps: get the release inputs, write the spec, and build. It needs Docker
+with Buildx, Bash, `curl`, and `jq`. For CI and production, use the
+[verified release build](docs/verified-release.md), which authenticates the
+release with Cosign.
 
 > [!IMPORTANT]
 > Released metadata is accepted for seven days. If no release is that fresh,
@@ -55,6 +56,7 @@ Homebrew knowledge.
 | Guide | Contents |
 | --- | --- |
 | [Quickstart](docs/quickstart.md) | Build and run your first image |
+| [Verified release build](docs/verified-release.md) | Cosign-authenticated inputs for CI and production |
 | [Usage](docs/usage.md) | Packages, image settings, tests, evidence, troubleshooting |
 | [Examples](examples/README.md) | Templates and integration fixtures |
 | [Glossary](CONTEXT.md) | Dalec, Formula, bottle, and release terms |

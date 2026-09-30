@@ -16,10 +16,14 @@ A supported release is designed so that:
 
 These controls do not make all upstream software trustworthy. They make the inputs and transformations explicit, bounded, and auditable. Review [upstream trust limitations](#upstream-trust-limitations) and [external controls](#out-of-scope-and-external-controls) before production use.
 
-The quickstart discovers the newest published `dalec-homebrew` release, then uses
-the exact upstream Dalec digest authenticated by that release's signed inputs.
-A mutable upstream `:latest` tag is not part of the trusted production path.
-See the [quickstart](docs/quickstart.md#2-prepare-a-verified-release).
+The [verified release build](docs/verified-release.md#2-prepare-a-verified-release)
+discovers the newest published `dalec-homebrew` release, authenticates its signed
+checksum set, and uses the exact upstream Dalec digest from that release's signed
+inputs. A mutable upstream `:latest` tag is not part of the trusted production
+path. The [quickstart](docs/quickstart.md) is a convenience path that reads the
+same inputs from GitHub over TLS without checking signatures; do not use it for
+production or published images. The frontend still verifies metadata signatures,
+freshness, and package digests during every build.
 
 ## Trust model
 

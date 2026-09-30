@@ -16,7 +16,7 @@ Every released build uses four inputs from one authenticated release:
 | Matching `dalec-homebrew` parent index | `DALEC_HOMEBREW_FRONTEND_INDEX_REF` |
 | Three-file Homebrew metadata bundle and its manifest digest | Named context `dalec-homebrew-metadata` and `DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST` |
 
-The [release-preparation step](quickstart.md#2-prepare-a-verified-release)
+The [release-preparation step](verified-release.md#2-prepare-a-verified-release)
 authenticates the signed checksum set, verifies all consumed assets, enforces
 the seven-day metadata limit, and exports the shell variables used below. Do
 not mix releases, derive trusted identities from mutable tags, or skip that

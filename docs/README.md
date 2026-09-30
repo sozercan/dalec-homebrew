@@ -7,10 +7,12 @@ Choose the shortest guide that matches what you are trying to do.
 1. **[Quickstart](quickstart.md)** — start from no Dalec or
    BuildKit knowledge and build GNU Hello.
 2. **[Usage guide](usage.md)** — select packages, configure an image, add
-   offline runtime tests, verify release assets, and troubleshoot failures.
-3. **[Examples](../examples/README.md)** — templates and integration fixtures,
+   offline runtime tests, and troubleshoot failures.
+3. **[Verified release build](verified-release.md)** — authenticate release
+   assets with Cosign before building; use this for CI and production.
+4. **[Examples](../examples/README.md)** — templates and integration fixtures,
    clearly categorized.
-4. **[Glossary](../CONTEXT.md)** — definitions for Dalec, frontend, Formula,
+5. **[Glossary](../CONTEXT.md)** — definitions for Dalec, frontend, Formula,
    bottle, resolution, materialization, and release terminology.
 
 ## Evaluate security and design

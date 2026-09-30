@@ -226,7 +226,8 @@ func TestPublicBuildDocsAuthenticateReleaseInputs(t *testing.T) {
 		}
 		return string(data)
 	}
-	readme := readDoc(filepath.Join("docs", "quickstart.md"))
+	readme := readDoc(filepath.Join("docs", "verified-release.md"))
+	quickstart := readDoc(filepath.Join("docs", "quickstart.md"))
 	usage := readDoc(filepath.Join("docs", "usage.md"))
 
 	for _, want := range []string{
@@ -251,11 +252,11 @@ func TestPublicBuildDocsAuthenticateReleaseInputs(t *testing.T) {
 		`# syntax=$DALEC_SYNTAX`,
 	} {
 		if !strings.Contains(readme, want) {
-			t.Errorf("docs/quickstart.md authenticated release preparation is missing %q", want)
+			t.Errorf("docs/verified-release.md authenticated release preparation is missing %q", want)
 		}
 	}
 	for _, want := range []string{
-		"quickstart.md#2-prepare-a-verified-release",
+		"verified-release.md#2-prepare-a-verified-release",
 		"Release-approved upstream Dalec digest",
 		"Exact `dalec-homebrew` platform child",
 		"Matching `dalec-homebrew` parent index",
@@ -266,7 +267,7 @@ func TestPublicBuildDocsAuthenticateReleaseInputs(t *testing.T) {
 		}
 	}
 
-	for relative, text := range map[string]string{"docs/quickstart.md": readme, filepath.Join("docs", "usage.md"): usage} {
+	for relative, text := range map[string]string{"docs/verified-release.md": readme, "docs/quickstart.md": quickstart, filepath.Join("docs", "usage.md"): usage} {
 		for _, forbidden := range []string{
 			"ghcr.io/sozercan/dalec-homebrew:latest",
 			"DALEC_SYNTAX=ghcr.io/project-dalec/dalec/frontend:latest",
