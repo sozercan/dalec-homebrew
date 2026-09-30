@@ -1,6 +1,6 @@
 # Architecture
 
-This guide is for users who want to understand what happens during a build and for contributors changing the pipeline. Start with the [README](../README.md) to build an image, the [usage guide](usage.md) for the public contract, or the [glossary](../CONTEXT.md) for unfamiliar terms.
+This guide is for users who want to understand what happens during a build and for contributors changing the pipeline. Start with the [quickstart](quickstart.md) to build an image, the [usage guide](usage.md) for the public contract, or the [glossary](../CONTEXT.md) for unfamiliar terms.
 
 `dalec-homebrew` deliberately separates **resolution**, where network access is allowed and every input is reduced to an exact identity, from **materialization**, where those verified inputs are installed without network access. The final runtime is assembled from an explicit allowlist on an independent Ubuntu Chisel base; the build environment is never copied wholesale.
 

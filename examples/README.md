@@ -5,7 +5,7 @@ category before copying one.
 
 ## Start here
 
-For a first build, use the [README quickstart](../README.md#quickstart). It
+For a first build, use the [quickstart](../docs/quickstart.md). It
 authenticates the newest fresh release, selects the correct platform child, and
 generates a complete `hello.yaml` without digest placeholders.
 

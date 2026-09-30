@@ -4,7 +4,7 @@ Choose the shortest guide that matches what you are trying to do.
 
 ## Build and use images
 
-1. **[README quickstart](../README.md#quickstart)** — start from no Dalec or
+1. **[Quickstart](quickstart.md)** — start from no Dalec or
    BuildKit knowledge and build GNU Hello.
 2. **[Usage guide](usage.md)** — select packages, configure an image, add
    offline runtime tests, verify release assets, and troubleshoot failures.

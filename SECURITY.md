@@ -16,10 +16,10 @@ A supported release is designed so that:
 
 These controls do not make all upstream software trustworthy. They make the inputs and transformations explicit, bounded, and auditable. Review [upstream trust limitations](#upstream-trust-limitations) and [external controls](#out-of-scope-and-external-controls) before production use.
 
-The README discovers the newest published `dalec-homebrew` release, then uses
+The quickstart discovers the newest published `dalec-homebrew` release, then uses
 the exact upstream Dalec digest authenticated by that release's signed inputs.
 A mutable upstream `:latest` tag is not part of the trusted production path.
-See the [usage guide](README.md#2-prepare-a-verified-release).
+See the [quickstart](docs/quickstart.md#2-prepare-a-verified-release).
 
 ## Trust model
 

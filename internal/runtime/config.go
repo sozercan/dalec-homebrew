@@ -112,7 +112,7 @@ func ParseIdentity(value string) (Identity, error) {
 	}
 	uid, err := strconv.Atoi(parts[0])
 	if err != nil {
-		return Identity{}, fmt.Errorf("unknown named image.user %q; V1 only owns %q", value, DefaultUser)
+		return Identity{}, fmt.Errorf("unknown named image.user %q; only %q is supported", value, DefaultUser)
 	}
 	if len(parts) == 1 {
 		return Identity{}, fmt.Errorf("numeric image.user %q must specify an explicit numeric gid", value)
