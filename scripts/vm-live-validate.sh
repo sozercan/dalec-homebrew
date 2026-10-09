@@ -221,7 +221,7 @@ if grep -Fq '"schema_version":"dalec-homebrew-runtime-manifest/v1"' "$EVIDENCE_D
   materialization_path=$EVIDENCE_DIR/materialization.json
   [ ! -e "$EVIDENCE_DIR/materialization-v2.json" ] \
     && [ ! -L "$EVIDENCE_DIR/materialization-v2.json" ] \
-    || fail "V1 runtime contains V2 materialization evidence"
+    || fail "legacy-schema runtime contains current materialization evidence"
 elif grep -Fq '"schema_version":"dalec-homebrew-runtime-manifest/v2"' "$EVIDENCE_DIR/manifest.json" \
   && grep -Fq '"schema_version":"dalec-homebrew-resolution/v2"' "$EVIDENCE_DIR/resolution.json" \
   && grep -Fq '"schema_version":"dalec-homebrew-runtime-inventory/v2"' "$EVIDENCE_DIR/runtime-inventory.json" \
@@ -229,9 +229,9 @@ elif grep -Fq '"schema_version":"dalec-homebrew-runtime-manifest/v2"' "$EVIDENCE
   materialization_path=$EVIDENCE_DIR/materialization-v2.json
   [ ! -e "$EVIDENCE_DIR/materialization.json" ] \
     && [ ! -L "$EVIDENCE_DIR/materialization.json" ] \
-    || fail "V2 runtime contains V1 materialization evidence"
+    || fail "current-schema runtime contains legacy materialization evidence"
 else
-  fail "runtime evidence schemas are not a coherent V1 or V2 tuple"
+  fail "runtime evidence files do not form a coherent supported schema tuple"
 fi
 [ -f "$materialization_path" ] || fail "materialization evidence is missing or not regular: $materialization_path"
 [ ! -L "$materialization_path" ] || fail "materialization evidence must not be a symlink: $materialization_path"
@@ -239,9 +239,9 @@ fi
 assert_root_owned_non_user_writable "$materialization_path"
 grep -Fq '"verified_bottles"' "$materialization_path" || fail "materialization evidence has no verified bottles"
 if [ "$materialization_path" = "$EVIDENCE_DIR/materialization-v2.json" ]; then
-  grep -Fq '"schema_version":"dalec-homebrew-materialization/v2"' "$materialization_path" || fail "V2 materialization evidence schema is invalid"
+  grep -Fq '"schema_version":"dalec-homebrew-materialization/v2"' "$materialization_path" || fail "current materialization evidence schema is invalid"
 else
-  ! grep -Fq 'dalec-homebrew-materialization/v2' "$materialization_path" || fail "V1 materialization evidence contains a V2 schema"
+  ! grep -Fq 'dalec-homebrew-materialization/v2' "$materialization_path" || fail "legacy materialization evidence contains current schema"
 fi
 grep -Fq '"spdxVersion":"SPDX-2.3"' \
   "$EVIDENCE_DIR/sbom.spdx.json" || fail "SBOM is not SPDX 2.3"

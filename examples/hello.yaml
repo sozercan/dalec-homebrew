@@ -1,4 +1,5 @@
-# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
+# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:37f3a2ab5b7e65b3f8c5cb4e79f9f184f8d2b7e7d3f328041d7d22d160805c8c
+# Upstream Dalec v0.21.5, pinned by release/dalec-frontend.json.
 # Also pass the matching parent index from trusted release evidence:
 # --build-arg DALEC_HOMEBREW_FRONTEND_INDEX_REF=ghcr.io/sozercan/dalec-homebrew@sha256:<dalec-homebrew-index-digest>
 # --build-arg DALEC_HOMEBREW_METADATA_BUNDLE_DIGEST=sha256:<metadata-bundle-manifest-digest>
@@ -8,7 +9,7 @@ description: GNU hello from a verified Homebrew bottle
 website: https://www.gnu.org/software/hello/
 version: 0.1.0
 revision: 1
-license: Apache-2.0
+license: GPL-3.0-or-later
 
 dependencies:
   runtime:

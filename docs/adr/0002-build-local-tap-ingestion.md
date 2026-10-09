@@ -3,6 +3,12 @@
 - Status: Accepted
 - Date: 2026-08-05
 
+## Plain-language summary
+
+Public taps are inspected inside the caller's BuildKit worker for each build. The project does not run a central catalog service. Every build records the exact Git commit and artifact bytes it observed, but a future build can observe a moved default branch; reproducible replay therefore retains the original inputs.
+
+For term definitions, see the [glossary](../../CONTEXT.md).
+
 ## Context
 
 The initial non-core design required a hosted catalog service, persistent single-writer state, a PS512 signing key, a dedicated ingestion worker, and an HTTPS origin. That preserved centralized sequencing but imposed an operational service on every capable release.
@@ -22,3 +28,9 @@ Policy-derived bottles remain BuildKit states and use `build-local-artifact-v1`;
 - Untrusted Formula evaluation shares the caller's trusted BuildKit worker, although the exec remains network-disabled and isolated.
 - There is no centralized cross-build rollback floor. Records bind the exact observed commit and use `build-local-exact-commit-no-cross-build-rollback-v1` explicitly.
 - Replaying a retained release requires the exact retained catalog, upstream archive, and locally derived bottle bytes.
+
+## Related documentation
+
+- [Usage: public-tap names](../usage.md#choose-packages)
+- [Architecture: public-tap flow](../architecture.md#public-tap-flow)
+- [Security: public-tap properties](../../SECURITY.md#public-tap-security-properties)

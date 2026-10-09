@@ -1,6 +1,6 @@
-# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:<dalec-frontend-digest>
-# Base fixture: the integration helper injects targets.homebrew.frontend.image
-# before building homebrew/image.
+# syntax=ghcr.io/project-dalec/dalec/frontend@sha256:37f3a2ab5b7e65b3f8c5cb4e79f9f184f8d2b7e7d3f328041d7d22d160805c8c
+# Base fixture: the integration helper pins the release-tested upstream Dalec
+# frontend and injects targets.homebrew.frontend.image before building homebrew/image.
 
 name: homebrew-live-graphviz
 version: 0.1.0
@@ -100,7 +100,7 @@ tests:
             test ! -e "$materialization_v1"
             test ! -L "$materialization_v1"
           else
-            echo 'runtime evidence schemas are not a coherent V1 or V2 tuple' >&2
+            echo 'runtime evidence files do not form a coherent supported schema tuple' >&2
             exit 1
           fi
           test -f "$materialization_path"

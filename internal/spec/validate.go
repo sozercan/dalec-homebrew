@@ -74,7 +74,7 @@ func validate(s *dalec.Spec, targetKey, arch string, forwarding *Forwarding, cap
 		return nil, err
 	}
 	if _, ok := supportedArches[arch]; !ok {
-		return nil, fmt.Errorf("unsupported target architecture %q; V1 supports amd64 and arm64", arch)
+		return nil, fmt.Errorf("unsupported target architecture %q; only amd64 and arm64 are supported", arch)
 	}
 	// This frontend materializes runtime dependencies directly and does not build
 	// a package from the Dalec spec, so package metadata is optional.

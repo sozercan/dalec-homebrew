@@ -485,7 +485,7 @@ func TestReleaseRuntimeEvidenceAssertionsAcceptOnlyCoherentSchemas(t *testing.T)
 				t.Errorf("%s does not accept coherent runtime evidence schema %q", spec, schema)
 			}
 		}
-		if !bytes.Contains(data, []byte("runtime evidence schemas are not a coherent V1 or V2 tuple")) {
+		if !bytes.Contains(data, []byte("runtime evidence files do not form a coherent supported schema tuple")) {
 			t.Errorf("%s does not reject mixed runtime evidence schemas", spec)
 		}
 		for _, assertion := range wantFixtureMaterializationAssertions {
@@ -508,7 +508,7 @@ func TestReleaseRuntimeEvidenceAssertionsAcceptOnlyCoherentSchemas(t *testing.T)
 			t.Errorf("vm-live-validate.sh does not accept coherent runtime evidence schema %q", schema)
 		}
 	}
-	if !bytes.Contains(validator, []byte("runtime evidence schemas are not a coherent V1 or V2 tuple")) {
+	if !bytes.Contains(validator, []byte("runtime evidence files do not form a coherent supported schema tuple")) {
 		t.Error("vm-live-validate.sh does not reject mixed runtime evidence schemas")
 	}
 	for _, assertion := range []string{
